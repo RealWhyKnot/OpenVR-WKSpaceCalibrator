@@ -17,20 +17,33 @@ static Hook<void(*)(vr::IVRServerDriverHost *, uint32_t, const vr::DriverPose_t 
 static void DetourTrackedDevicePoseUpdated005(vr::IVRServerDriverHost *_this, uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
 	//TRACE("ServerTrackedDeviceProvider::DetourTrackedDevicePoseUpdated(%d)", unWhichDevice);
-	auto pose = newPose;
-	if (Driver->HandleDevicePoseUpdated(unWhichDevice, pose))
-	{
-		TrackedDevicePoseUpdatedHook005.originalFunc(_this, unWhichDevice, pose, unPoseStructSize);
+	const vr::DriverPose_t* pNewPose = &newPose; // somehow newPose is nullptr sometimes??????
+	if (pNewPose && unPoseStructSize == sizeof(vr::DriverPose_t)) {
+		auto pose = newPose;
+		if (Driver->HandleDevicePoseUpdated(unWhichDevice, pose))
+		{
+			TrackedDevicePoseUpdatedHook005.originalFunc(_this, unWhichDevice, pose, unPoseStructSize);
+		}
+	} else {
+		// i think this would also cause issues
+		TrackedDevicePoseUpdatedHook005.originalFunc(_this, unWhichDevice, newPose, unPoseStructSize);
 	}
 }
 
 static void DetourTrackedDevicePoseUpdated006(vr::IVRServerDriverHost *_this, uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
 	//TRACE("ServerTrackedDeviceProvider::DetourTrackedDevicePoseUpdated(%d)", unWhichDevice);
-	auto pose = newPose;
-	if (Driver->HandleDevicePoseUpdated(unWhichDevice, pose))
-	{
-		TrackedDevicePoseUpdatedHook006.originalFunc(_this, unWhichDevice, pose, unPoseStructSize);
+	const vr::DriverPose_t* pNewPose = &newPose; // somehow newPose is nullptr sometimes??????
+	if (pNewPose && unPoseStructSize == sizeof(vr::DriverPose_t)) {
+		auto pose = newPose;
+		if (Driver->HandleDevicePoseUpdated(unWhichDevice, pose))
+		{
+			TrackedDevicePoseUpdatedHook006.originalFunc(_this, unWhichDevice, pose, unPoseStructSize);
+		}
+	}
+	else {
+		// i think this would also cause issues in steamvr tho
+		TrackedDevicePoseUpdatedHook006.originalFunc(_this, unWhichDevice, newPose, unPoseStructSize);
 	}
 }
 
