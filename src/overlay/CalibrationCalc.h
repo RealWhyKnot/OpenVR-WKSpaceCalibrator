@@ -99,6 +99,24 @@ public:
 	double ReferenceJitter() const;
 	double TargetJitter() const;
 
+	// Motion-coverage metrics on the current sample buffer. Used during one-
+	// shot calibration to give the user real-time feedback on whether their
+	// figure-8 motion has produced enough variety to fit a good calibration.
+	// Each returns a 0.0..1.0 score where 1.0 means "you've covered enough
+	// motion that the math will produce a clean fit; you can stop now".
+	//
+	// TranslationDiversity is the smallest per-axis position range divided by
+	// a target range (~30cm). Penalises planar / single-axis motion -- you
+	// want all three axes to have meaningful spread, not just the one the
+	// user is comfortable swinging.
+	//
+	// RotationDiversity is the maximum angular distance between any two
+	// sampled target rotations, divided by a target angle (~90 deg). Even
+	// one wide rotation pair is enough to constrain yaw cleanly; we don't
+	// need full hemispheric coverage like translation.
+	double TranslationDiversity() const;
+	double RotationDiversity() const;
+
 	bool ComputeOneshot(const bool ignoreOutliers);
 	bool ComputeIncremental(bool &lerp, double threshold, double relPoseMaxError, const bool ignoreOutliers);
 

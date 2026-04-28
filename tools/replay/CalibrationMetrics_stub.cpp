@@ -44,6 +44,8 @@ namespace Metrics {
 	TimeSeries<double> consecutiveRejections;
 	TimeSeries<double> samplesInBuffer;
 	TimeSeries<double> watchdogResetCount;
+	TimeSeries<double> translationDiversity;
+	TimeSeries<double> rotationDiversity;
 	std::string lastRejectReason;
 
 	// Driver-side apply-rate counters. Not used by the offline replay tool but

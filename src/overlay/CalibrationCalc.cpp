@@ -699,6 +699,57 @@ double CalibrationCalc::TargetJitter() const {
 	return WelfordStdMagnitude(m_samples, /*useTarget=*/true);
 }
 
+double CalibrationCalc::TranslationDiversity() const {
+	// Per-axis bounding box of the target tracker translation across valid
+	// samples. The smallest axis-range relative to a desired total spread
+	// is the "weakest link" -- a user who waved on X+Y but never on Z gets
+	// a low score regardless of how much they waved on the other two.
+	if (m_samples.size() < 2) return 0.0;
+	constexpr double kInf = std::numeric_limits<double>::infinity();
+	Eigen::Vector3d minPos(kInf, kInf, kInf);
+	Eigen::Vector3d maxPos(-kInf, -kInf, -kInf);
+	int n = 0;
+	for (const auto& s : m_samples) {
+		if (!s.valid) continue;
+		minPos = minPos.cwiseMin(s.target.trans);
+		maxPos = maxPos.cwiseMax(s.target.trans);
+		++n;
+	}
+	if (n < 2) return 0.0;
+	const Eigen::Vector3d range = maxPos - minPos;
+	// 30cm spread per axis is the sweet spot where the translation LS is
+	// well-conditioned for a typical room-scale setup. Going much wider
+	// doesn't help; going narrower starts to leak per-axis correlation noise
+	// into the fitted offset.
+	constexpr double kDesiredAxisRange = 0.30;
+	const double minAxis = range.minCoeff();
+	const double score = minAxis / kDesiredAxisRange;
+	return std::min(std::max(score, 0.0), 1.0);
+}
+
+double CalibrationCalc::RotationDiversity() const {
+	// Maximum angular distance between any two sampled target rotations.
+	// One pair with a wide angular separation is enough to anchor yaw; we
+	// scale toward 90 degrees as the "fully covered" point. This is much
+	// less stringent than the full SO(3) Kabsch needs for a clean fit, but
+	// matches the practical observation that even modest rotation variety
+	// constrains the calibration's rotation component well.
+	if (m_samples.size() < 2) return 0.0;
+	constexpr double kDesiredMaxAngle = EIGEN_PI / 2.0; // 90 deg
+	Eigen::Quaterniond first;
+	bool haveFirst = false;
+	double maxAngle = 0.0;
+	for (const auto& s : m_samples) {
+		if (!s.valid) continue;
+		const Eigen::Quaterniond q(s.target.rot);
+		if (!haveFirst) { first = q; haveFirst = true; continue; }
+		const double a = first.angularDistance(q);
+		if (a > maxAngle) maxAngle = a;
+	}
+	const double score = maxAngle / kDesiredMaxAngle;
+	return std::min(std::max(score, 0.0), 1.0);
+}
+
 Eigen::Vector3d CalibrationCalc::ComputeRefToTargetOffset(const Eigen::AffineCompact3d& calibration) const {
 	Eigen::Vector3d accum = Eigen::Vector3d::Zero();
 	int sampleCount = 0;

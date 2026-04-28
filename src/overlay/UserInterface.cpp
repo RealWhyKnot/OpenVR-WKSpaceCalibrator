@@ -1853,6 +1853,64 @@ void BuildMenu(bool runningInOverlay)
 		}
 		ImGui::PopStyleColor();
 
+		// Live motion-coverage feedback while the user is actively running a
+		// one-shot calibration (Begin / Rotation / Translation). The math runs
+		// at sample-buffer fill regardless; these bars just tell the user
+		// "you've moved enough on every axis" so they don't stop early or
+		// keep waving long after they're done.
+		const bool isCollecting =
+			CalCtx.state == CalibrationState::Begin ||
+			CalCtx.state == CalibrationState::Rotation ||
+			CalCtx.state == CalibrationState::Translation;
+		if (isCollecting) {
+			ImGui::Spacing();
+			ImGui::Separator();
+			ImGui::TextDisabled("Motion coverage");
+			ImGui::Spacing();
+
+			const float trDiv = (float)Metrics::translationDiversity.last();
+			const float rotDiv = (float)Metrics::rotationDiversity.last();
+
+			char trLabel[64], rotLabel[64];
+			snprintf(trLabel, sizeof trLabel, "Translation %d%%", (int)(trDiv * 100.0f));
+			snprintf(rotLabel, sizeof rotLabel, "Rotation %d%%", (int)(rotDiv * 100.0f));
+
+			constexpr float kGoodThreshold = 0.70f;
+			const ImVec4 trColor = trDiv >= kGoodThreshold
+				? ImVec4(0.40f, 0.85f, 0.40f, 1.0f)
+				: ImVec4(0.95f, 0.70f, 0.20f, 1.0f);
+			const ImVec4 rotColor = rotDiv >= kGoodThreshold
+				? ImVec4(0.40f, 0.85f, 0.40f, 1.0f)
+				: ImVec4(0.95f, 0.70f, 0.20f, 1.0f);
+
+			ImGui::PushStyleColor(ImGuiCol_PlotHistogram, trColor);
+			ImGui::ProgressBar(trDiv, ImVec2(-1.0f, 0.0f), trLabel);
+			ImGui::PopStyleColor();
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("Translation coverage: how much you've moved the tracker along all three axes.\n"
+				                  "Wave it ~30 cm in each of left/right, up/down, and forward/back to fill this bar.\n"
+				                  "Green = enough variety for a clean calibration.");
+			}
+			ImGui::PushStyleColor(ImGuiCol_PlotHistogram, rotColor);
+			ImGui::ProgressBar(rotDiv, ImVec2(-1.0f, 0.0f), rotLabel);
+			ImGui::PopStyleColor();
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("Rotation coverage: the widest angle between any two sampled tracker rotations.\n"
+				                  "Twist the tracker through ~90 degrees at some point to fill this bar.\n"
+				                  "Green = enough variety for a clean calibration.");
+			}
+
+			if (trDiv < kGoodThreshold || rotDiv < kGoodThreshold) {
+				ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+				if (trDiv < rotDiv) {
+					ImGui::TextWrapped("Tip: try moving the tracker through wider distances on every axis.");
+				} else {
+					ImGui::TextWrapped("Tip: try rotating the tracker more (point it in different directions).");
+				}
+				ImGui::PopStyleColor();
+			}
+		}
+
 		if (CalCtx.state == CalibrationState::None)
 		{
 			ImGui::Text("");
