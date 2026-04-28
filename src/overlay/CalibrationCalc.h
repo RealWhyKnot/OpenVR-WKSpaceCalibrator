@@ -136,6 +136,57 @@ private:
 	Eigen::AffineCompact3d m_estimatedTransformation;
 	bool m_relativePosCalibrated = false;
 
+	// Pre-allocated scratch matrices reused across solver invocations. With
+	// continuous calibration ticking at ~2 Hz against a 200-sample buffer, the
+	// per-call heap churn from local Eigen::MatrixXd / Eigen::VectorXd
+	// allocations was on the order of ~100 KB per tick. These members are
+	// resized in place; resize() is a no-op when the requested dimensions
+	// already match, so the steady-state cost is just the solve itself.
+	mutable Eigen::MatrixXd m_coefficientsTrans;
+	mutable Eigen::VectorXd m_constantsTrans;
+	mutable Eigen::VectorXd m_weightsTrans;
+	mutable Eigen::MatrixXd m_outlierCoefficients;
+	mutable Eigen::VectorXd m_outlierConstraints;
+
+	// Smallest/largest singular-value ratio of the translation LS coefficient
+	// matrix from the most recent CalibrateTranslation. Mirrors
+	// m_rotationConditionRatio: near-zero means the user moved through too few
+	// independent directions to constrain the translation, so the result is
+	// dominated by noise. Set by CalibrateTranslation, consulted by
+	// ComputeIncremental to reject ill-conditioned solves.
+public:
+	mutable double m_translationConditionRatio = 0.0;
+
+	// Residual pitch+roll (in degrees) of the most recent SO(3) Kabsch fit. If
+	// this is large (~> 2 deg), the reference and target spaces' gravity axes
+	// don't agree, which the yaw-only solver cannot represent — we log a hint
+	// for the user but don't reject the solution.
+	mutable double m_residualPitchRollDeg = 0.0;
+
+	// SO(3) Kabsch result + validity, computed in DetectOutliers and reused by
+	// CalibrateRotation for the yaw projection (item #3 from the math review).
+	// Without this DetectOutliers and CalibrateRotation each ran their own
+	// Kabsch SVD, with CalibrateRotation throwing away the Y axis before the
+	// SVD step — that 2D simplification leaks any pitch/roll discrepancy into
+	// the yaw answer. The shared 3D fit projected to yaw is the principled
+	// answer.
+	mutable Eigen::Matrix3d m_so3KabschResult = Eigen::Matrix3d::Identity();
+	mutable bool m_so3KabschValid = false;
+
+	// Diagnostics: which gate caused the most recent ValidateCalibration to
+	// reject. Set by ValidateCalibration and consulted by ComputeOneshot for
+	// branching the user-facing log line.
+	enum class RejectReason {
+		None,
+		RmsTooHigh,
+		// (other gates live further out; ValidateCalibration only checks RMS today)
+	};
+	mutable RejectReason m_lastRejectReason = RejectReason::None;
+	mutable double m_lastRejectRms = 0.0;
+	mutable double m_lastRejectRmsThreshold = 0.0;
+
+private:
+
 	/*
 	 * This affine transform estimates the pose of the target within the reference device's local pose space.
 	 * That is to say, it's given by transforming the target world pose by the inverse reference pose.
