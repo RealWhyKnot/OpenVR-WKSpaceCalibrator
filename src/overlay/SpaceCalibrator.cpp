@@ -86,6 +86,14 @@ static void HandleCommandLine(LPWSTR lpCmdLine);
 
 static GLFWwindow *glfwWindow = nullptr;
 static vr::VROverlayHandle_t overlayMainHandle = 0, overlayThumbnailHandle = 0;
+
+// Asks the main loop to exit cleanly on the next frame. Used by the in-app
+// updater to hand off to the installer (the installer can't replace a running
+// EXE, so we have to be gone before it finishes copying files).
+void RequestExit() {
+	if (glfwWindow) glfwSetWindowShouldClose(glfwWindow, 1);
+}
+
 static GLuint fboHandle = 0, fboTextureHandle = 0;
 static int fboTextureWidth = 0, fboTextureHeight = 0;
 
