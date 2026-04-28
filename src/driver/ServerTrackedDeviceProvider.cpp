@@ -10,6 +10,10 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext *pDriver
 	TRACE("ServerTrackedDeviceProvider::Init()");
 	VR_INIT_SERVER_DRIVER_CONTEXT(pDriverContext);
 
+	// QPF is constant for the lifetime of the boot; capture it once instead of
+	// querying inside BlendTransform on every pose update.
+	QueryPerformanceFrequency(&qpcFreq);
+
 	// transforms[] elements are zero/identity-initialized via DeviceTransform's
 	// default member initializers and IsoTransform's default constructor; a
 	// memset would be undefined behavior because Eigen members aren't trivially
@@ -140,11 +144,12 @@ double ServerTrackedDeviceProvider::GetTransformRate(DeltaSize delta) const {
  * Smoothly interpolates the device active transform towards the target transform.
  */
 void ServerTrackedDeviceProvider::BlendTransform(DeviceTransform& device, const IsoTransform &deviceWorldPose) const {
-	LARGE_INTEGER timestamp, freq;
+	LARGE_INTEGER timestamp;
 	QueryPerformanceCounter(&timestamp);
-	QueryPerformanceFrequency(&freq);
 
-	double lerp = (timestamp.QuadPart - device.lastPoll.QuadPart) / (double)freq.QuadPart;
+	// qpcFreq captured once in Init(); QPF is constant per boot so re-querying
+	// here would be wasted work on the pose-update hot path.
+	double lerp = (timestamp.QuadPart - device.lastPoll.QuadPart) / (double)qpcFreq.QuadPart;
 	device.lastPoll = timestamp;
 	
 	lerp *= GetTransformRate(device.currentRate);
@@ -201,6 +206,11 @@ void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTr
 		size_t len = 0;
 		while (len < maxLen && newTransform.target_system[len] != '\0') ++len;
 		deviceSystem[newTransform.openVRID].assign(newTransform.target_system, len);
+		// Mark the lookup state so the pose-hook thread doesn't re-query the
+		// property store for this slot. Empty target_system means "unknown" —
+		// fall back to NotTried so the lazy lookup can still try (and then
+		// throttle if it keeps failing).
+		lookupState[newTransform.openVRID] = (len > 0) ? LookupState::Cached : LookupState::NotTried;
 	}
 
 	// Whenever the per-ID transform is updated (whether enabling or disabling), the
@@ -251,25 +261,62 @@ void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTr
 	tf.currentRate = DeltaSize::TINY;
 }
 
+ServerTrackedDeviceProvider::FallbackSlot* ServerTrackedDeviceProvider::FindFallbackSlot(const char* name, size_t len)
+{
+	if (len == 0 || len > protocol::MaxTrackingSystemNameLen) return nullptr;
+	for (size_t i = 0; i < MaxFallbackSlots; ++i) {
+		if (!systemFallbacks[i].occupied) continue;
+		// Compare the full buffer length so a shorter prefix can't accidentally
+		// match a longer occupant. The buffer is NUL-padded after assignment so
+		// `len` bytes followed by a sentinel NUL is sufficient to distinguish.
+		if (memcmp(systemFallbacks[i].system_name, name, len) == 0
+			&& (len == protocol::MaxTrackingSystemNameLen || systemFallbacks[i].system_name[len] == '\0')) {
+			return &systemFallbacks[i];
+		}
+	}
+	return nullptr;
+}
+
+const ServerTrackedDeviceProvider::FallbackSlot* ServerTrackedDeviceProvider::FindFallbackSlot(const char* name, size_t len) const
+{
+	return const_cast<ServerTrackedDeviceProvider*>(this)->FindFallbackSlot(name, len);
+}
+
+ServerTrackedDeviceProvider::FallbackSlot* ServerTrackedDeviceProvider::AcquireFallbackSlot(const char* name, size_t len)
+{
+	if (len == 0 || len > protocol::MaxTrackingSystemNameLen) return nullptr;
+	if (auto* existing = FindFallbackSlot(name, len)) return existing;
+	for (size_t i = 0; i < MaxFallbackSlots; ++i) {
+		if (!systemFallbacks[i].occupied) {
+			memset(systemFallbacks[i].system_name, 0, sizeof systemFallbacks[i].system_name);
+			memcpy(systemFallbacks[i].system_name, name, len);
+			systemFallbacks[i].occupied = true;
+			systemFallbacks[i].tf = FallbackTransform{};
+			return &systemFallbacks[i];
+		}
+	}
+	return nullptr;
+}
+
 void ServerTrackedDeviceProvider::SetTrackingSystemFallback(const protocol::SetTrackingSystemFallback& newFallback)
 {
 	size_t maxLen = sizeof newFallback.system_name;
 	size_t len = 0;
 	while (len < maxLen && newFallback.system_name[len] != '\0') ++len;
-	std::string name(newFallback.system_name, len);
-	if (name.empty()) return;
+	if (len == 0) return;
 
 	std::lock_guard<std::mutex> lock(stateMutex);
 
 	if (!newFallback.enabled) {
 		// Disabling the fallback. Drop any per-ID slots that were following it so
 		// they don't keep applying the stale offset on subsequent pose updates.
-		auto it = systemFallbacks.find(name);
-		if (it != systemFallbacks.end()) {
-			it->second.enabled = false;
+		if (auto* slot = FindFallbackSlot(newFallback.system_name, len)) {
+			slot->tf.enabled = false;
 		}
 		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id) {
-			if (transforms[id].fallbackActive && deviceSystem[id] == name) {
+			if (!transforms[id].fallbackActive) continue;
+			const std::string& sys = deviceSystem[id];
+			if (sys.size() == len && memcmp(sys.data(), newFallback.system_name, len) == 0) {
 				transforms[id].fallbackActive = false;
 				transforms[id].targetTransform = transforms[id].transform;
 				transforms[id].currentRate = DeltaSize::TINY;
@@ -279,14 +326,20 @@ void ServerTrackedDeviceProvider::SetTrackingSystemFallback(const protocol::SetT
 		return;
 	}
 
-	auto& fb = systemFallbacks[name];
-	fb.enabled = true;
-	fb.transform.translation = Eigen::Vector3d(
+	auto* slot = AcquireFallbackSlot(newFallback.system_name, len);
+	if (!slot) {
+		// Flat array is full. With MaxFallbackSlots=8 this should never happen
+		// in practice; log so we notice if it does.
+		LOG("Fallback slot table full; ignoring fallback for new tracking system");
+		return;
+	}
+	slot->tf.enabled = true;
+	slot->tf.transform.translation = Eigen::Vector3d(
 		newFallback.translation.v[0], newFallback.translation.v[1], newFallback.translation.v[2]);
-	fb.transform.rotation = Eigen::Quaterniond(
+	slot->tf.transform.rotation = Eigen::Quaterniond(
 		newFallback.rotation.w, newFallback.rotation.x, newFallback.rotation.y, newFallback.rotation.z);
-	fb.scale = newFallback.scale;
-	fb.freezePrediction = newFallback.freezePrediction;
+	slot->tf.scale = newFallback.scale;
+	slot->tf.freezePrediction = newFallback.freezePrediction;
 }
 
 bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t &pose)
@@ -322,8 +375,9 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 	// write so the overlay's sample-collection sees the same frozen pose data.
 	bool freeze = tf.freezePrediction;
 	if (!freeze && !tf.enabled && !deviceSystem[openVRID].empty()) {
-		auto fbIt = systemFallbacks.find(deviceSystem[openVRID]);
-		if (fbIt != systemFallbacks.end() && fbIt->second.enabled && fbIt->second.freezePrediction) {
+		const auto& sys = deviceSystem[openVRID];
+		const FallbackSlot* slot = FindFallbackSlot(sys.data(), sys.size());
+		if (slot && slot->tf.enabled && slot->tf.freezePrediction) {
 			freeze = true;
 		}
 	}
@@ -365,19 +419,38 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 		//
 		// If the overlay hasn't told us this device's tracking system yet (no
 		// SetDeviceTransform has arrived for this slot), query it directly via the
-		// driver-side property API so the fallback can apply on the *very* first
-		// pose update — before any overlay scan has run. The query is lazy: cache
-		// success in deviceSystem[id], and on failure leave it empty and try again
-		// next tick (cheap; properties are an in-process lookup).
-		if (deviceSystem[openVRID].empty()) {
-			if (auto* helpers = vr::VRProperties()) {
-				auto handle = helpers->TrackedDeviceToPropertyContainer(openVRID);
-				if (handle != vr::k_ulInvalidPropertyContainer) {
-					vr::ETrackedPropertyError err = vr::TrackedProp_Success;
-					std::string sys = helpers->GetStringProperty(handle, vr::Prop_TrackingSystemName_String, &err);
-					if (err == vr::TrackedProp_Success && !sys.empty()) {
-						deviceSystem[openVRID] = std::move(sys);
+		// driver-side property API. Without throttling this fires for every
+		// unoccupied slot up to k_unMaxTrackedDeviceCount on every pose update;
+		// gate it on lookupState + a 1-second backoff for failures.
+		if (deviceSystem[openVRID].empty() && lookupState[openVRID] != LookupState::Cached) {
+			bool shouldTry = true;
+			if (lookupState[openVRID] == LookupState::Failed) {
+				LARGE_INTEGER now;
+				QueryPerformanceCounter(&now);
+				// Retry no more than once per second. qpcFreq.QuadPart is the
+				// number of QPC ticks per second.
+				if (qpcFreq.QuadPart > 0 &&
+					(now.QuadPart - lastLookupAttempt[openVRID].QuadPart) < qpcFreq.QuadPart) {
+					shouldTry = false;
+				}
+			}
+			if (shouldTry) {
+				bool ok = false;
+				if (auto* helpers = vr::VRProperties()) {
+					auto handle = helpers->TrackedDeviceToPropertyContainer(openVRID);
+					if (handle != vr::k_ulInvalidPropertyContainer) {
+						vr::ETrackedPropertyError err = vr::TrackedProp_Success;
+						std::string sys = helpers->GetStringProperty(handle, vr::Prop_TrackingSystemName_String, &err);
+						if (err == vr::TrackedProp_Success && !sys.empty()) {
+							deviceSystem[openVRID] = std::move(sys);
+							lookupState[openVRID] = LookupState::Cached;
+							ok = true;
+						}
 					}
+				}
+				if (!ok) {
+					lookupState[openVRID] = LookupState::Failed;
+					QueryPerformanceCounter(&lastLookupAttempt[openVRID]);
 				}
 			}
 		}
@@ -386,9 +459,10 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 			return true; // No system known yet; nothing to fall back to.
 		}
 
-		auto it = systemFallbacks.find(deviceSystem[openVRID]);
-		if (it != systemFallbacks.end() && it->second.enabled) {
-			const auto& fb = it->second;
+		const auto& sys = deviceSystem[openVRID];
+		FallbackSlot* slot = FindFallbackSlot(sys.data(), sys.size());
+		if (slot && slot->tf.enabled) {
+			const auto& fb = slot->tf;
 
 			// Update the slot's blend target from the (possibly newly updated) fallback.
 			tf.targetTransform = fb.transform;
