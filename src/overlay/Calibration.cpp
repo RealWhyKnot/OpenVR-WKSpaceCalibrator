@@ -1312,7 +1312,12 @@ void CalibrationTick(double time)
 		CalCtx.messages.clear();
 		calibration.enableStaticRecalibration = CalCtx.enableStaticRecalibration;
 		calibration.lockRelativePosition = CalCtx.lockRelativePosition;
-		calibration.ComputeIncremental(lerp, CalCtx.continuousCalibrationThreshold, CalCtx.maxRelativeErrorThreshold, CalCtx.ignoreOutliers);
+		// User-toggled "Pause updates" from the continuous-cal UI: keep the
+		// already-applied driver offset live, skip any new solve cycle so the
+		// math doesn't fight the user trying to inspect the current result.
+		if (!CalCtx.calibrationPaused) {
+			calibration.ComputeIncremental(lerp, CalCtx.continuousCalibrationThreshold, CalCtx.maxRelativeErrorThreshold, CalCtx.ignoreOutliers);
+		}
 	}
 	else {
 		calibration.enableStaticRecalibration = false;
