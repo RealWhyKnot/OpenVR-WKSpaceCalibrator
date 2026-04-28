@@ -68,6 +68,16 @@ The biggest historical pain point with continuous calibration is getting stuck i
 
 Accepted continuous updates pass through a single-step EMA on the published transform: `α = 0.3` for the new estimate, `0.7` retained from the prior. This is skipped for first calibration (snap to the only thing we have) and for rapid-correct (the relative-pose path is supposed to snap to a known-better solution, not be smoothed). The 1.5x rejection gate already filters most bad updates; the EMA softens the per-tick wobble that survives the gate.
 
+## Inter-system latency offset (manual)
+
+Different tracking systems have different end-to-end latencies — a wireless tracker (Slime IMU, Oculus Quest tracker) typically lags a Lighthouse reference by 10–30 ms. During quick motion this lag manifests as motion-correlated calibration error: every collected sample pair is taken at slightly different effective times, and the difference shows up as a position error proportional to velocity.
+
+The **Target latency offset (ms)** slider in the Continuous Calibration panel exposes a per-target-system offset (range ±100 ms, default 0). When non-zero, `CollectSample` shifts the reference pose along its velocity vector at the time of sample collection so it lines up with the target's effective timestamp. The shift is computed as `(targetSampleTime - referenceSampleTime) - targetLatencyOffsetMs / 1000` seconds (positive means extrapolate the reference forward) and applied via `pose.vecPosition += vecVelocity * dt` plus an axis-angle rotation built from `vecAngularVelocity` — both in the driver-local frame, so `qWorldFromDriverRotation` handles the projection into world space downstream. If the velocity data isn't finite or is implausibly large (NaN, infinite, > 50 m/s, > 50 rad/s — typically a momentary tracking glitch), the un-extrapolated reference pose is used for that tick rather than throwing.
+
+Default 0 produces bit-for-bit identical behaviour to before the feature existed — the conditional that gates the extrapolation never triggers.
+
+**Auto-detection** of the correct offset (cross-correlation of motion histories between the two devices) is a separate feature on the roadmap. The current value is dialled in by hand: increase it until motion-correlated calibration error stops growing with movement speed.
+
 ## Diagnostics
 
 The Debug tab plots every interesting per-tick value as a 30-second rolling time series. The CSV log (enabled via `enableLogs`) writes one row per tick to `%LOCALAPPDATA%\Low\SpaceCalibrator\Logs\spacecal_log.<timestamp>.txt`. Useful columns when something goes wrong:
