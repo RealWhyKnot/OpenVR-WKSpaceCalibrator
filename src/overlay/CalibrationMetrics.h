@@ -73,6 +73,13 @@ namespace Metrics {
 	// specific buffer churn event.
 	extern TimeSeries<double> samplesInBuffer;
 
+	// Motion-coverage scores for the live sample buffer (0..1 each). Surfaced
+	// in the Calibration Progress popup as live progress bars during one-shot
+	// collection so the user knows whether their figure-8 wave has produced
+	// the variety the math needs. Pushed each tick from CollectSample.
+	extern TimeSeries<double> translationDiversity;
+	extern TimeSeries<double> rotationDiversity;
+
 	// Cumulative count of stuck-loop watchdog firings. Logged as a per-row
 	// number so you can grep the CSV for the row index where a fire happened
 	// even after the # annotation lines are stripped.

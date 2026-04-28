@@ -162,6 +162,33 @@ static protocol::DriverPoseShmem shmem;
 namespace {
 	CalibrationCalc calibration;
 
+	// Dedicated sample buffer + math instance for the T-pose-triggered silent
+	// recalibration path (F). Lives separately from the primary `calibration`
+	// global so passive collection while idle doesn't disturb a user-initiated
+	// one-shot or continuous run, and vice versa.
+	CalibrationCalc silentRecalCalc;
+
+	// Time of the last accepted silent recal (seconds, glfwGetTime). Used to
+	// throttle to at most one accepted recal per ~30 s — the user noticing a
+	// micro-jump is more confusing than letting drift sit for an extra moment.
+	double silentRecalLastAcceptedTime = -1e9;
+
+	// T-pose hold tracking: when we first start observing T-pose conditions,
+	// stamp the time. The hold must sustain for kTPoseHoldSeconds before we
+	// fire. Reset to -1 whenever conditions break.
+	double silentRecalTPoseHoldStartTime = -1.0;
+
+	// E: residual-EMA drift monitor. Tracks an exponentially-weighted average of
+	// the current calibration's RMS error against the silent-recal sample
+	// buffer. When the EMA crosses kResidualEmaTriggerM and stays there, a
+	// silent recal fires (subject to the same throttle and accept-if-better
+	// gates as the T-pose path). Time of last EMA update is tracked separately
+	// so the EMA decay rate is in real seconds, not ticks.
+	double silentRecalResidualEMA = 0.0;
+	double silentRecalLastEMATime = -1.0;
+	double silentRecalLastResidualCheckTime = -1.0;
+	bool silentRecalEMAPrimed = false;
+
 	inline vr::HmdVector3d_t quaternionRotateVector(const vr::HmdQuaternion_t& quat, const double(&vector)[3]) {
 		vr::HmdQuaternion_t vectorQuat = { 0.0, vector[0], vector[1] , vector[2] };
 		vr::HmdQuaternion_t conjugate = { quat.w, -quat.x, -quat.y, -quat.z };
@@ -467,7 +494,347 @@ namespace {
 		tgtWorld.translation() = ConvertPose(target).trans;
 		const_cast<CalibrationContext&>(ctx).UpdateAutoLockDetector(refWorld, tgtWorld);
 
+		// Push motion-coverage metrics for the live sample buffer. The Calibration
+		// Progress popup reads these via Metrics:: and renders progress bars so
+		// the user can see whether their motion is varied enough to fit a clean
+		// calibration. Computed every CollectSample tick; cheap (linear scan).
+		Metrics::translationDiversity.Push(calibration.TranslationDiversity());
+		Metrics::rotationDiversity.Push(calibration.RotationDiversity());
+
 		return true;
+	}
+
+	// === F: T-pose-triggered silent recalibration ============================
+	// Forward declarations. AssignTargets is needed for standby-identity
+	// resolution when IDs aren't set yet. InvalidateAllTransformCaches lives in
+	// a later anonymous-namespace block alongside the per-ID dedupe cache;
+	// referencing it from here forces a forward decl since C++ name lookup
+	// doesn't reach across files-or-blocks for that symbol until link time.
+	bool AssignTargets();
+	void InvalidateAllTransformCaches();
+
+	// Helper: pose for an OpenVR-ID-indexed device, using the same world-space
+	// projection as the calibration math. Returns nullopt if the device isn't
+	// present / not running OK. Used by both the passive sample collector and
+	// the T-pose detector.
+	struct WorldPose {
+		Eigen::Affine3d pose;
+		Eigen::Vector3d linVel;
+	};
+	bool TryGetWorldPose(int32_t id, WorldPose& out) {
+		if (id < 0 || id >= (int32_t)vr::k_unMaxTrackedDeviceCount) return false;
+		const auto& dp = CalCtx.devicePoses[id];
+		if (!dp.poseIsValid || !dp.deviceIsConnected) return false;
+		if (dp.result != vr::ETrackingResult::TrackingResult_Running_OK) return false;
+		Pose p = ConvertPose(dp);
+		out.pose = Eigen::Affine3d::Identity();
+		out.pose.linear() = p.rot;
+		out.pose.translation() = p.trans;
+		out.linVel = Eigen::Vector3d(dp.vecVelocity[0], dp.vecVelocity[1], dp.vecVelocity[2]);
+		return true;
+	}
+
+	// Locate the user's hand-controllers regardless of which tracking system
+	// they live in. T-pose detection needs both hands. AssignTargets() also
+	// fills CalCtx.controllerIDs[] but only with target-system controllers,
+	// which is the wrong set for the typical lighthouse-HMD + slime-body
+	// case where hands are in the reference system. We do our own scan.
+	struct HandIDs { int32_t left = -1, right = -1; };
+	HandIDs FindHandControllerIDs() {
+		HandIDs h;
+		if (!vr::VRSystem()) return h;
+		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id) {
+			if (vr::VRSystem()->GetTrackedDeviceClass(id) != vr::TrackedDeviceClass_Controller) continue;
+			vr::TrackedPropertyError err = vr::TrackedProp_Success;
+			int32_t role = vr::VRSystem()->GetInt32TrackedDeviceProperty(
+				id, vr::Prop_ControllerRoleHint_Int32, &err);
+			if (err != vr::TrackedProp_Success) continue;
+			if (role == vr::TrackedControllerRole_LeftHand) h.left = (int32_t)id;
+			else if (role == vr::TrackedControllerRole_RightHand) h.right = (int32_t)id;
+		}
+		return h;
+	}
+
+	// Push a passive sample into silentRecalCalc, throttled to one push per
+	// ~50 ms (matches CalibrationTick's own gating). Sized to a 30-second
+	// rolling window at that rate (~600 samples max, then the oldest gets
+	// shifted out). Uses the primary calibration's referenceID/targetID so we
+	// silently fit the same pair the user already has calibrated.
+	void PassiveCollectSilentSample() {
+		WorldPose ref, tgt;
+		if (!TryGetWorldPose(CalCtx.referenceID, ref)) return;
+		if (!TryGetWorldPose(CalCtx.targetID, tgt)) return;
+
+		Pose refPose; refPose.rot = ref.pose.linear(); refPose.trans = ref.pose.translation();
+		Pose tgtPose; tgtPose.rot = tgt.pose.linear(); tgtPose.trans = tgt.pose.translation();
+		silentRecalCalc.PushSample(Sample(refPose, tgtPose, glfwGetTime()));
+
+		// Cap the buffer at a fixed depth (matches the primary buffer's typical
+		// size) so memory stays bounded even on very long sessions.
+		constexpr size_t kMaxSilentSamples = 600;
+		while (silentRecalCalc.SampleCount() > kMaxSilentSamples) {
+			silentRecalCalc.ShiftSample();
+		}
+	}
+
+	// T-pose detector. Returns true while the user holds the canonical T-pose
+	// (HMD upright, both hands extended laterally at HMD height, all trackers
+	// near-stationary). Fast to run -- a few dot products and norms per tick.
+	// Tuning rationale lives next to each gate; the values match the plan's
+	// detector criteria (pitch ±15°, lateral >50 cm, height ±30 cm,
+	// velocity <5 cm/s on every tracked device).
+	bool DetectTPose(const HandIDs& hands) {
+		if (hands.left < 0 || hands.right < 0) return false;
+
+		WorldPose hmd, lh, rh;
+		if (!TryGetWorldPose(0, hmd)) return false; // HMD is always index 0
+		if (!TryGetWorldPose(hands.left, lh)) return false;
+		if (!TryGetWorldPose(hands.right, rh)) return false;
+
+		// HMD upright: HMD's local +Y axis (up) must point near world +Y.
+		// Equivalently, the dot of the rotated up-vector with world up must
+		// exceed cos(15°) ~= 0.966.
+		const Eigen::Vector3d hmdUp = hmd.pose.linear() * Eigen::Vector3d::UnitY();
+		if (hmdUp.y() < 0.966) return false;
+
+		// HMD forward and right axes for lateral-distance computation.
+		const Eigen::Vector3d hmdRight = hmd.pose.linear() * Eigen::Vector3d::UnitX();
+		const Eigen::Vector3d hmdPos = hmd.pose.translation();
+
+		// Both hands at HMD height ±30 cm.
+		const double dyL = lh.pose.translation().y() - hmdPos.y();
+		const double dyR = rh.pose.translation().y() - hmdPos.y();
+		if (std::abs(dyL) > 0.30 || std::abs(dyR) > 0.30) return false;
+
+		// Lateral distance from HMD: project (hand - hmd) onto HMD's right axis.
+		// Left hand should be in -right direction, right hand in +right, both
+		// >= 50 cm.
+		const Eigen::Vector3d toL = lh.pose.translation() - hmdPos;
+		const Eigen::Vector3d toR = rh.pose.translation() - hmdPos;
+		const double latL = toL.dot(hmdRight);  // expect strongly negative
+		const double latR = toR.dot(hmdRight);  // expect strongly positive
+		if (-latL < 0.50 || latR < 0.50) return false;
+
+		// Stillness: every tracked device's reported linear velocity below
+		// 5 cm/s. We check HMD + both hands + the calibrated target -- if any
+		// of those move, the user isn't holding still in T-pose.
+		auto stillness = [](const Eigen::Vector3d& v) {
+			return v.norm() < 0.05;
+		};
+		if (!stillness(hmd.linVel) || !stillness(lh.linVel) || !stillness(rh.linVel)) return false;
+
+		WorldPose tgt;
+		if (TryGetWorldPose(CalCtx.targetID, tgt)) {
+			if (!stillness(tgt.linVel)) return false;
+		}
+		return true;
+	}
+
+	// Apply silentRecalCalc's most recent ComputeOneshot result to the live
+	// calibration if its RMS is meaningfully better than the current calibration's
+	// RMS on the same sample buffer. "Meaningfully better" = at least 10%
+	// improvement (per the open question in the drift plan -- conservative to
+	// avoid replacing a good fit with a marginally-different one and producing
+	// micro-jumps the user will notice).
+	bool TryAcceptSilentRecal(double now, const char* source = "silent") {
+		// Need motion coverage in the buffer or the math is solving against a
+		// degenerate set of poses. Reuse the same diversity metrics that gate
+		// one-shot calibration's UI feedback.
+		if (silentRecalCalc.TranslationDiversity() < 0.50) return false;
+		if (silentRecalCalc.RotationDiversity() < 0.50) return false;
+
+		// Compose the current applied calibration into the same AffineCompact3d
+		// space the math uses, then ask silentRecalCalc to score it on its
+		// buffer. ValidateCalibration writes RMS to errorOut even when it
+		// returns false (the bool only signals "passes the RMS gate"); we want
+		// the raw number for comparison.
+		const Eigen::Vector3d eulerRad = CalCtx.calibratedRotation * EIGEN_PI / 180.0;
+		const Eigen::Quaterniond curRotQ =
+			Eigen::AngleAxisd(eulerRad(0), Eigen::Vector3d::UnitZ()) *
+			Eigen::AngleAxisd(eulerRad(1), Eigen::Vector3d::UnitY()) *
+			Eigen::AngleAxisd(eulerRad(2), Eigen::Vector3d::UnitX());
+		Eigen::AffineCompact3d curCal = Eigen::AffineCompact3d::Identity();
+		curCal.linear() = curRotQ.toRotationMatrix();
+		curCal.translation() = CalCtx.calibratedTranslation * 0.01;
+
+		double curRMS = std::numeric_limits<double>::infinity();
+		(void)silentRecalCalc.ValidateCalibration(curCal, &curRMS);
+
+		// Run the silent recal. ignoreOutliers=false -- we want the gate to
+		// fire on bad samples rather than fitting through them.
+		if (!silentRecalCalc.ComputeOneshot(/*ignoreOutliers=*/false)) {
+			return false;
+		}
+
+		const Eigen::AffineCompact3d newCal = silentRecalCalc.Transformation();
+		double newRMS = std::numeric_limits<double>::infinity();
+		(void)silentRecalCalc.ValidateCalibration(newCal, &newRMS);
+
+		if (!std::isfinite(newRMS) || !std::isfinite(curRMS)) return false;
+		if (newRMS >= curRMS * 0.9) return false; // need >=10% improvement
+
+		// Decompose newCal into the cm + euler-deg encoding the rest of the
+		// pipeline expects.
+		CalCtx.calibratedTranslation = newCal.translation() * 100.0;
+		CalCtx.calibratedRotation =
+			Eigen::Matrix3d(newCal.linear()).eulerAngles(2, 1, 0) * 180.0 / EIGEN_PI;
+
+		char logbuf[256];
+		snprintf(logbuf, sizeof logbuf,
+			"Silent recal accepted via %s (RMS %.4f m -> %.4f m)\n",
+			source, curRMS, newRMS);
+		CalCtx.Log(logbuf);
+		char annotation[128];
+		snprintf(annotation, sizeof annotation, "silent_recal: accepted via %s", source);
+		Metrics::WriteLogAnnotation(annotation);
+
+		silentRecalLastAcceptedTime = now;
+		InvalidateAllTransformCaches();
+		// Wipe the buffer so the next T-pose collects fresh post-recal motion
+		// rather than scoring against samples that already produced this fit.
+		silentRecalCalc.Clear();
+		return true;
+	}
+
+	// E: update the rolling 30s EMA of the current calibration's RMS error
+	// against the silent buffer. Returns the up-to-date EMA. When the buffer
+	// doesn't have enough samples to score a calibration yet, returns 0 and
+	// leaves the EMA un-primed -- the trigger upstream will see EMA below
+	// threshold and not fire spuriously.
+	double UpdateResidualEMA(double now) {
+		// Need at least a handful of samples for ValidateCalibration to make
+		// sense. The math itself only needs >0 but we want a meaningful score.
+		if (silentRecalCalc.SampleCount() < 30) {
+			silentRecalEMAPrimed = false;
+			return 0.0;
+		}
+
+		const Eigen::Vector3d eulerRad = CalCtx.calibratedRotation * EIGEN_PI / 180.0;
+		const Eigen::Quaterniond curRotQ =
+			Eigen::AngleAxisd(eulerRad(0), Eigen::Vector3d::UnitZ()) *
+			Eigen::AngleAxisd(eulerRad(1), Eigen::Vector3d::UnitY()) *
+			Eigen::AngleAxisd(eulerRad(2), Eigen::Vector3d::UnitX());
+		Eigen::AffineCompact3d curCal = Eigen::AffineCompact3d::Identity();
+		curCal.linear() = curRotQ.toRotationMatrix();
+		curCal.translation() = CalCtx.calibratedTranslation * 0.01;
+
+		double instRMS = 0.0;
+		(void)silentRecalCalc.ValidateCalibration(curCal, &instRMS);
+		if (!std::isfinite(instRMS)) return silentRecalResidualEMA;
+
+		if (!silentRecalEMAPrimed) {
+			silentRecalResidualEMA = instRMS;
+			silentRecalLastEMATime = now;
+			silentRecalEMAPrimed = true;
+			return silentRecalResidualEMA;
+		}
+
+		// Continuous-time EMA: y = (1-α) * y_prev + α * x, with α derived from
+		// (dt / tau). Tau ~30 s gives the "30 s memory" the plan calls for;
+		// using real seconds not tick counts keeps the half-life stable even
+		// if the tick rate fluctuates.
+		const double dt = std::max(0.0, now - silentRecalLastEMATime);
+		const double tau = 30.0;
+		const double alpha = 1.0 - std::exp(-dt / tau);
+		silentRecalResidualEMA += alpha * (instRMS - silentRecalResidualEMA);
+		silentRecalLastEMATime = now;
+		return silentRecalResidualEMA;
+	}
+
+	// P: gate auto-recal triggers behind tracking-quality. If either ref or
+	// target's most recent pose is anything other than Running_OK, suppress.
+	// Avoids fitting against samples that included a wireless dropout or
+	// out-of-bounds frame.
+	bool TrackingQualityOK() {
+		auto ok = [](int32_t id) {
+			if (id < 0 || id >= (int32_t)vr::k_unMaxTrackedDeviceCount) return false;
+			const auto& dp = CalCtx.devicePoses[id];
+			return dp.poseIsValid && dp.deviceIsConnected
+				&& dp.result == vr::ETrackingResult::TrackingResult_Running_OK;
+		};
+		return ok(CalCtx.referenceID) && ok(CalCtx.targetID);
+	}
+
+	// Top-level driver for F (T-pose) and E (residual-EMA drift) silent recal.
+	// Called from CalibrationTick when state == None.
+	// Runs passive sample collection, watches for sustained T-pose, and
+	// triggers TryAcceptSilentRecal when the hold completes.
+	void TickSilentTPoseRecal(double now) {
+		// IDs may not be resolved yet on a fresh launch with a saved profile
+		// (the user hasn't started a calibration session, so StartCalibration's
+		// AssignTargets() hasn't run). Resolve from standby identity once.
+		// AssignTargets is a no-op for already-set IDs.
+		if (CalCtx.referenceID < 0 || CalCtx.targetID < 0) {
+			AssignTargets();
+			if (CalCtx.referenceID < 0 || CalCtx.targetID < 0) return;
+		}
+
+		// Drop the buffer if the user re-targeted (different tracker selected,
+		// or HMD index changed). Old samples are in the previous device's
+		// reference frame and would corrupt any fit.
+		static int32_t s_lastRefID = -2;
+		static int32_t s_lastTgtID = -2;
+		if (CalCtx.referenceID != s_lastRefID || CalCtx.targetID != s_lastTgtID) {
+			silentRecalCalc.Clear();
+			silentRecalTPoseHoldStartTime = -1.0;
+			s_lastRefID = CalCtx.referenceID;
+			s_lastTgtID = CalCtx.targetID;
+		}
+
+		// Throttle: at most one accepted recal per 30 s.
+		const bool throttled = (now - silentRecalLastAcceptedTime) < 30.0;
+
+		PassiveCollectSilentSample();
+
+		// E: residual EMA. Updated at ~1 Hz to keep cost negligible. The EMA
+		// itself decays in real seconds, not tick count.
+		if (silentRecalLastResidualCheckTime < 0.0
+			|| (now - silentRecalLastResidualCheckTime) >= 1.0)
+		{
+			silentRecalLastResidualCheckTime = now;
+			const double ema = UpdateResidualEMA(now);
+
+			// Trigger threshold per the drift plan: ~3 cm sustained EMA. With
+			// a 30 s tau, "sustained 30 s above threshold" naturally translates
+			// into "EMA above threshold" -- the EMA itself encodes the
+			// sustained part. P-gate: don't fire if tracking is currently
+			// degraded.
+			constexpr double kResidualEmaTriggerM = 0.03;
+			if (silentRecalEMAPrimed && ema > kResidualEmaTriggerM
+				&& !throttled && TrackingQualityOK())
+			{
+				if (TryAcceptSilentRecal(now, "residual-EMA")) {
+					// Reset the EMA primer so the next cycle's first sample
+					// re-anchors at the post-recal residual rather than
+					// inheriting the now-stale pre-recal value.
+					silentRecalEMAPrimed = false;
+					return;
+				}
+			}
+		}
+
+		// F: T-pose detection.
+		const HandIDs hands = FindHandControllerIDs();
+		const bool tpose = DetectTPose(hands);
+
+		if (!tpose) {
+			silentRecalTPoseHoldStartTime = -1.0;
+			return;
+		}
+		if (silentRecalTPoseHoldStartTime < 0.0) {
+			silentRecalTPoseHoldStartTime = now;
+		}
+		// Plan calls for "1-2 sustained seconds". Pick 1.5 s.
+		constexpr double kTPoseHoldSeconds = 1.5;
+		if ((now - silentRecalTPoseHoldStartTime) < kTPoseHoldSeconds) return;
+		if (throttled) return;
+		if (!TrackingQualityOK()) return; // P-gate
+
+		// Hold completed; attempt the recal. Reset hold so we don't re-fire
+		// every tick the user keeps standing in T-pose; require them to break
+		// the pose and re-enter to retry.
+		silentRecalTPoseHoldStartTime = -1.0;
+		(void)TryAcceptSilentRecal(now, "T-pose");
 	}
 
 	bool AssignTargets() {
@@ -1428,6 +1795,105 @@ void CalibrationTick(double time)
 	ctx.yprev = (float) p[1];
 	ctx.zprev = (float) p[2];
 
+	// HMD recenter compensation. When the HMD's pose in reference-tracking world
+	// jumps by more than legitimate motion can produce in one tick (>30 cm or
+	// >30 deg), interpret it as a driver-side re-origin (Quest Home-button
+	// recenter, Oculus Link reset, etc.) and apply the same delta to every
+	// stored calibrated transform so non-HMD trackers stay aligned with the
+	// user's body. Without this, every recenter breaks tracking visibly and
+	// the user has to manually recalibrate.
+	//
+	// Gates: a profile must be loaded; previous HMD frame must have been valid
+	// AND recent (<0.5 s) so we don't conflate tracking-dropout return with a
+	// recenter; calibration must not be actively running (the cal math pins
+	// the reference frame across collection and a mid-buffer compensation
+	// would corrupt samples).
+	{
+		static bool s_havePrevHmdPose = false;
+		static Eigen::Affine3d s_prevHmdPose = Eigen::Affine3d::Identity();
+		static double s_prevHmdTime = 0.0;
+
+		const auto& hmdRaw = ctx.devicePoses[vr::k_unTrackedDeviceIndex_Hmd];
+		const bool hmdGood = hmdRaw.poseIsValid && hmdRaw.deviceIsConnected
+			&& hmdRaw.result == vr::ETrackingResult::TrackingResult_Running_OK;
+
+		if (hmdGood) {
+			Pose hmdPoseWorld = ConvertPose(hmdRaw);
+			Eigen::Affine3d hmdPose = Eigen::Affine3d::Identity();
+			hmdPose.linear() = hmdPoseWorld.rot;
+			hmdPose.translation() = hmdPoseWorld.trans;
+
+			const bool calibrationLoaded = ctx.validProfile && ctx.enabled;
+			const bool inActiveCal =
+				ctx.state == CalibrationState::Begin ||
+				ctx.state == CalibrationState::Rotation ||
+				ctx.state == CalibrationState::Translation ||
+				ctx.state == CalibrationState::Continuous;
+
+			if (s_havePrevHmdPose && (time - s_prevHmdTime) < 0.5
+				&& calibrationLoaded && !inActiveCal)
+			{
+				const Eigen::Vector3d posDelta = hmdPose.translation() - s_prevHmdPose.translation();
+				const double posMag = posDelta.norm();
+
+				const Eigen::Quaterniond qNew(hmdPose.linear());
+				const Eigen::Quaterniond qOld(s_prevHmdPose.linear());
+				Eigen::Quaterniond rotDelta = qNew * qOld.conjugate();
+				rotDelta.normalize();
+				const double angRad = 2.0 * std::acos(std::min(1.0, std::abs(rotDelta.w())));
+
+				constexpr double kPosJumpM = 0.30;
+				constexpr double kAngJumpRad = 30.0 * EIGEN_PI / 180.0;
+
+				if (posMag > kPosJumpM || angRad > kAngJumpRad) {
+					// Rigid recenter delta in ref-tracking-world: new = delta * old.
+					const Eigen::Affine3d delta = hmdPose * s_prevHmdPose.inverse();
+
+					// Apply: new_R = delta_R * R, new_T = delta_R * T + delta_T.
+					// transCm is in centimeters, rotDeg is intrinsic Euler ZYX
+					// in degrees -- the same encoding used everywhere else for
+					// the stored calibration result.
+					auto applyDelta = [&delta](Eigen::Vector3d& transCm, Eigen::Vector3d& rotDeg) {
+						const Eigen::Vector3d eulerRad = rotDeg * EIGEN_PI / 180.0;
+						const Eigen::Quaterniond rotQ =
+							Eigen::AngleAxisd(eulerRad(0), Eigen::Vector3d::UnitZ()) *
+							Eigen::AngleAxisd(eulerRad(1), Eigen::Vector3d::UnitY()) *
+							Eigen::AngleAxisd(eulerRad(2), Eigen::Vector3d::UnitX());
+						const Eigen::Affine3d cal = Eigen::Translation3d(transCm * 0.01) * rotQ;
+						const Eigen::Affine3d newCal = delta * cal;
+						transCm = newCal.translation() * 100.0;
+						const Eigen::Matrix3d newRot = newCal.linear();
+						rotDeg = newRot.eulerAngles(2, 1, 0) * 180.0 / EIGEN_PI;
+					};
+
+					applyDelta(ctx.calibratedTranslation, ctx.calibratedRotation);
+					for (auto& extra : ctx.additionalCalibrations) {
+						if (extra.valid) {
+							applyDelta(extra.calibratedTranslation, extra.calibratedRotation);
+						}
+					}
+
+					char logbuf[256];
+					snprintf(logbuf, sizeof logbuf,
+						"HMD recenter detected (%.0f cm, %.0f deg jump) - calibration delta-corrected\n",
+						posMag * 100.0, angRad * 180.0 / EIGEN_PI);
+					ctx.Log(logbuf);
+					Metrics::WriteLogAnnotation("hmd_recenter: calibration delta-corrected");
+
+					InvalidateAllTransformCaches();
+				}
+			}
+
+			s_prevHmdPose = hmdPose;
+			s_prevHmdTime = time;
+			s_havePrevHmdPose = true;
+		} else {
+			// Tracking is not Running_OK. Drop the cached prev so we don't
+			// compute a bogus delta on the first good frame after recovery.
+			s_havePrevHmdPose = false;
+		}
+	}
+
 	// Run the scan in every state where a profile can be active. Previously the scan
 	// was skipped once continuous calibration had a valid result, which meant a tracker
 	// powered on mid-session never received its offset until calibration was restarted.
@@ -1456,6 +1922,14 @@ void CalibrationTick(double time)
 	}
 
 	if (ctx.state == CalibrationState::None) {
+		// F: passive T-pose silent recalibration. Only meaningful when a
+		// profile is loaded; otherwise there's nothing to refine. We also
+		// suppress when the user has explicitly disabled the offset (the
+		// calibration is dormant and the driver isn't applying it -- a
+		// silent recal would surprise the user when they re-enable).
+		if (ctx.validProfile && ctx.enabled) {
+			TickSilentTPoseRecal(time);
+		}
 		ctx.wantedUpdateInterval = 1.0;
 		return;
 	}

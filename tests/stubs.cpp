@@ -46,6 +46,8 @@ namespace Metrics {
     TimeSeries<double> consecutiveRejections;
     TimeSeries<double> samplesInBuffer;
     TimeSeries<double> watchdogResetCount;
+    TimeSeries<double> translationDiversity;
+    TimeSeries<double> rotationDiversity;
     std::string lastRejectReason;
 
     TimeSeries<bool> calibrationApplied;
