@@ -976,6 +976,54 @@ void CalibrationTick(double time)
 	double duration = (end_time.QuadPart - start_time.QuadPart) / (double)freq.QuadPart;
 	Metrics::computationTime.Push(duration * 1000.0);
 
+	// Hand the raw reference + target poses to the metrics writer so the v2 CSV
+	// columns get filled. Reconstructing these in the replay harness (tools/replay/)
+	// gives us the same Sample values that fed CalibrationCalc::PushSample, which
+	// is the whole point of the harness — the metric-level columns alone aren't
+	// enough to re-run the math offline.
+	{
+		const vr::DriverPose_t& refPose = ctx.devicePoses[ctx.referenceID];
+		const vr::DriverPose_t& tgtPose = ctx.devicePoses[ctx.targetID];
+
+		auto driverPoseToWorld = [](const vr::DriverPose_t& dp,
+			Eigen::Vector3d& outTrans, Eigen::Quaterniond& outRot) {
+			Eigen::Quaterniond worldFromDriver(
+				dp.qWorldFromDriverRotation.w,
+				dp.qWorldFromDriverRotation.x,
+				dp.qWorldFromDriverRotation.y,
+				dp.qWorldFromDriverRotation.z);
+			Eigen::Vector3d worldFromDriverTrans(
+				dp.vecWorldFromDriverTranslation[0],
+				dp.vecWorldFromDriverTranslation[1],
+				dp.vecWorldFromDriverTranslation[2]);
+			Eigen::Quaterniond rot(dp.qRotation.w, dp.qRotation.x, dp.qRotation.y, dp.qRotation.z);
+			Eigen::Vector3d pos(dp.vecPosition[0], dp.vecPosition[1], dp.vecPosition[2]);
+			outRot = (worldFromDriver * rot).normalized();
+			outTrans = worldFromDriverTrans + worldFromDriver * pos;
+		};
+
+		Eigen::Vector3d refT, tgtT;
+		Eigen::Quaterniond refQ, tgtQ;
+		driverPoseToWorld(refPose, refT, refQ);
+		driverPoseToWorld(tgtPose, tgtT, tgtQ);
+
+		// Map CalibrationState (Calibration.h) to TickPhase (CalibrationMetrics.h).
+		// The two enums intentionally mirror each other; we don't share the type
+		// so the metrics module doesn't need to include Calibration.h.
+		Metrics::TickPhase phase = Metrics::TickPhase::None;
+		switch (CalCtx.state) {
+		case CalibrationState::None:              phase = Metrics::TickPhase::None; break;
+		case CalibrationState::Begin:             phase = Metrics::TickPhase::Begin; break;
+		case CalibrationState::Rotation:          phase = Metrics::TickPhase::Rotation; break;
+		case CalibrationState::Translation:       phase = Metrics::TickPhase::Translation; break;
+		case CalibrationState::Editing:           phase = Metrics::TickPhase::Editing; break;
+		case CalibrationState::Continuous:        phase = Metrics::TickPhase::Continuous; break;
+		case CalibrationState::ContinuousStandby: phase = Metrics::TickPhase::ContinuousStandby; break;
+		}
+
+		Metrics::SetTickRawPoses(refT, refQ, tgtT, tgtQ, phase);
+	}
+
 	Metrics::WriteLogEntry();
 		
 	if (CalCtx.state != CalibrationState::Continuous) {

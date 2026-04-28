@@ -70,6 +70,30 @@ namespace Metrics {
 
 	extern bool enableLogs;
 
+	// Phase of the per-tick CalibrationTick state machine at the moment WriteLogEntry()
+	// is called. Stored in the v2 CSV "tick_phase" column to let the replay harness
+	// reproduce the same control-flow path that produced each row. Mirrors the
+	// CalibrationState enum but is held independently so CalibrationMetrics.h doesn't
+	// have to pull in Calibration.h.
+	enum class TickPhase {
+		None,
+		Begin,
+		Rotation,
+		Translation,
+		Editing,
+		Continuous,
+		ContinuousStandby,
+	};
+
+	// Set the raw reference and target pose (translation + quaternion) and the tick
+	// phase that will be written by the next WriteLogEntry() call. Caller is expected
+	// to invoke this once per tick, just before WriteLogEntry(), so the v2 columns
+	// stay consistent with the metrics already snapshotted into the TimeSeries above.
+	void SetTickRawPoses(
+		const Eigen::Vector3d& refTrans, const Eigen::Quaterniond& refRot,
+		const Eigen::Vector3d& targetTrans, const Eigen::Quaterniond& targetRot,
+		TickPhase phase);
+
 	void WriteLogAnnotation(const char* s);
 	void WriteLogEntry();
 }
