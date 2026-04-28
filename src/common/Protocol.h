@@ -368,6 +368,11 @@ namespace protocol
 				if (pSampleTime) *pSampleTime = lastPose[index].sample_time;
 				return true;
 			}
+			// Out-of-range index: don't touch `pose`, signal failure. The caller
+			// must check the return value (the prior version fell off the end of
+			// a non-void function — undefined behaviour, papered over only by the
+			// fact that nothing actually called this with an out-of-range index).
+			return false;
 		}
 
 		void SetPose(int index, const vr::DriverPose_t& pose) {
