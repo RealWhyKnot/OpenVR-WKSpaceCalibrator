@@ -629,6 +629,40 @@ void CalibrationTick(double time)
 		}
 	});
 
+	// Sample driver-side telemetry counters and push the per-tick deltas (in Hz)
+	// into the metrics time series. Initialize the prior snapshot lazily on the
+	// first valid sample so the first delta is zero rather than a huge spike
+	// representing the entire driver-uptime accumulation.
+	{
+		static bool s_telemetryPrimed = false;
+		static uint64_t s_lastFallback = 0, s_lastPerId = 0, s_lastQuash = 0;
+		static double s_lastTelemetryTime = 0;
+
+		uint64_t fallback = 0, perId = 0, quash = 0;
+		if (shmem.GetTelemetry(fallback, perId, quash)) {
+			Metrics::RecordTimestamp();
+			double now = Metrics::CurrentTime;
+			if (!s_telemetryPrimed) {
+				s_telemetryPrimed = true;
+				s_lastFallback = fallback;
+				s_lastPerId = perId;
+				s_lastQuash = quash;
+				s_lastTelemetryTime = now;
+			} else {
+				double dt = now - s_lastTelemetryTime;
+				if (dt > 1e-6) {
+					Metrics::fallbackApplyRate.Push((fallback - s_lastFallback) / dt);
+					Metrics::perIdApplyRate.Push((perId - s_lastPerId) / dt);
+					Metrics::quashApplyRate.Push((quash - s_lastQuash) / dt);
+				}
+				s_lastFallback = fallback;
+				s_lastPerId = perId;
+				s_lastQuash = quash;
+				s_lastTelemetryTime = now;
+			}
+		}
+	}
+
 	// check for non-updating headset tracking space (caused by quest out of bounds or taken off head for example) and abort everything for this tick
 	auto p = ctx.devicePoses[vr::k_unTrackedDeviceIndex_Hmd].vecPosition;
 	if ((p[0] == 0.0 && p[1] == 0.0 && p[2] == 0.0) || (ctx.xprev == p[0] && ctx.yprev == p[1] && ctx.zprev == p[2])) {

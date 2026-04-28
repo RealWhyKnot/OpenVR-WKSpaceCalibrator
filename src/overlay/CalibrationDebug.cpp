@@ -247,6 +247,22 @@ namespace {
 		}
 	}
 
+	void G_ApplyRate() {
+		if (ImPlot::BeginPlot("##ApplyRate")) {
+			ImPlot::SetupAxes(nullptr, "Hz", 0, ImPlotAxisFlags_AutoFit | ImPlotAxisFlags_RangeFit);
+			SetupXAxis();
+			ImPlot::SetupAxisLimits(ImAxis_Y1, 0, 200, ImGuiCond_Appearing);
+
+			AddApplyTicks();
+
+			PlotLineG("Per-ID", Metrics::perIdApplyRate);
+			PlotLineG("Fallback", Metrics::fallbackApplyRate);
+			PlotLineG("Quash", Metrics::quashApplyRate);
+
+			ImPlot::EndPlot();
+		}
+	}
+
 	void G_AxisVariance() {
 		static bool firstrun = true;
 		static ImPlotColormap axisVarianceColormap;
@@ -322,7 +338,8 @@ namespace {
 		{ "Offset: By Rel Pose", G_PosOffset_ByRelPose },
 		{ "Processing time", G_ComputationTime },
 		{ "Reference Jitter", G_JitterReference },
-		{ "Target Jitter", G_JitterTarget }
+		{ "Target Jitter", G_JitterTarget },
+		{ "Apply rate (Hz)", G_ApplyRate }
 	};
 
 	const int N_GRAPHS = sizeof(graphs) / sizeof(graphs[0]);

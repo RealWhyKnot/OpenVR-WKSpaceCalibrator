@@ -58,6 +58,14 @@ namespace Metrics {
 	// accept. The stuck-loop watchdog fires when this exceeds its threshold.
 	extern TimeSeries<double> consecutiveRejections;
 
+	// Driver-side apply rates (Hz) sampled from the shared-memory telemetry
+	// counters. Each tick we read the cumulative counter and push the delta
+	// divided by the elapsed wall time. Lets the overlay confirm that the
+	// per-tracking-system fallback path is actually firing in the wild.
+	extern TimeSeries<double> fallbackApplyRate;
+	extern TimeSeries<double> perIdApplyRate;
+	extern TimeSeries<double> quashApplyRate;
+
 	extern TimeSeries<bool> calibrationApplied;
 
 	extern bool enableLogs;

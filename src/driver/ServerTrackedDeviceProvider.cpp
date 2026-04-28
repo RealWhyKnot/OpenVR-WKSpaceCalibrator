@@ -296,6 +296,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 		pose.vecPosition[0] = -pose.vecWorldFromDriverTranslation[0];
 		pose.vecPosition[1] = -pose.vecWorldFromDriverTranslation[1] + 9001; // put it 9001m above the origin
 		pose.vecPosition[2] = -pose.vecWorldFromDriverTranslation[2];
+		shmem.IncrementTelemetry(protocol::DriverPoseShmem::TELEMETRY_QUASH_APPLY);
 	} else if (tf.enabled)
 	{
 		// @TODO: Offset, scale, and re-offset
@@ -309,6 +310,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 		BlendTransform(tf, deviceWorldPose);
 		ApplyTransform(tf, pose);
+		shmem.IncrementTelemetry(protocol::DriverPoseShmem::TELEMETRY_PER_ID_APPLY);
 	}
 	else
 	{
@@ -365,6 +367,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 			BlendTransform(tf, deviceWorldPose);
 			ApplyTransform(tf, pose);
+			shmem.IncrementTelemetry(protocol::DriverPoseShmem::TELEMETRY_FALLBACK_APPLY);
 		}
 		else if (tf.fallbackActive) {
 			// Fallback was removed/disabled while we were following it. Clear our
