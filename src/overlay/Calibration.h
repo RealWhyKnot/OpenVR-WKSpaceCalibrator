@@ -101,6 +101,16 @@ struct CalibrationContext
 	bool enableStaticRecalibration;
 	bool lockRelativePosition = false;
 
+	// "Recalibrate on movement" — gates the driver-side BlendTransform's lerp
+	// progress on detected per-frame motion magnitude. With this on, a user who
+	// is lying still won't see calibration drift even when the math is updating;
+	// the catch-up happens during their next motion, hidden by the natural
+	// movement instead of looking like phantom body shifts. Default ON because
+	// the failure mode it prevents (visible drift while motionless) is more
+	// common in practice than the rare case where you actually want instant
+	// updates while stationary.
+	bool recalibrateOnMovement = true;
+
 	// UI-only flag toggled by the "Pause updates" button on the Status tab.
 	// While true the overlay-side calibration tick is expected to skip the
 	// ComputeIncremental call so the current driver-applied offset stays put
@@ -234,6 +244,9 @@ struct CalibrationContext
 		timeLastLatencyEstimate = 0.0;
 		// Runtime UI state — pausing on an empty profile makes no sense.
 		calibrationPaused = false;
+		// Default this back ON when clearing — it's the safer setting and
+		// matches the construction-time default.
+		recalibrateOnMovement = true;
 		// Note: autoSuppressOnExternalTool, showAdvancedSettings, and the
 		// externalSmoothing* runtime-detection fields are intentionally NOT reset
 		// — they're user preferences / detector state that span profiles.

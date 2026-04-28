@@ -238,6 +238,12 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		ctx.autoSuppressOnExternalTool = true;
 	}
 
+	if (obj["recalibrate_on_movement"].is<bool>()) {
+		ctx.recalibrateOnMovement = obj["recalibrate_on_movement"].get<bool>();
+	} else {
+		ctx.recalibrateOnMovement = true;
+	}
+
 	if (obj["scale"].is<double>()) {
 		ctx.calibratedScale = obj["scale"].get<double>();
 	} else {
@@ -399,6 +405,7 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	}
 	profile["suppressed_serials"].set<picojson::array>(suppressedSerials);
 	profile["auto_suppress_on_external_tool"].set<bool>(ctx.autoSuppressOnExternalTool);
+	profile["recalibrate_on_movement"].set<bool>(ctx.recalibrateOnMovement);
 
 	double speed = (int) ctx.calibrationSpeed;
 	profile["calibration_speed"].set<double>(speed);

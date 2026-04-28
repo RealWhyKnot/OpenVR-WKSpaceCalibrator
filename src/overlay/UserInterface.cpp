@@ -362,6 +362,16 @@ void CCal_DrawSettings() {
 				"Useful for verifying the result before committing.");
 		}
 
+		// Recalibrate on movement toggle. Default ON.
+		if (ImGui::Checkbox("Recalibrate on movement", &CalCtx.recalibrateOnMovement)) {
+			SaveProfile(CalCtx);
+		}
+		if (ImGui::IsItemHovered(0)) {
+			ImGui::SetTooltip("When the calibration math updates, only blend the new offset in while you're actually moving.\n"
+				"Stationary users (e.g. lying down) won't see phantom body shifts; the catch-up happens during natural motion.\n"
+				"Default ON. Turn off to get instantaneous time-based blending regardless of motion state.");
+		}
+
 		ImGui::EndGroupPanel();
 	}
 
