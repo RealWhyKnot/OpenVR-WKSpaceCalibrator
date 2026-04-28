@@ -25,6 +25,10 @@ add_subdirectory ("src")
 # Libs
 add_subdirectory ("lib")
 
+# Offline replay harness for captured CSV logs (tools/replay/spacecal_replay).
+# Standalone target — does not affect the overlay or driver build.
+add_subdirectory ("tools/replay")
+
 if ("${CMAKE_CXX_COMPILER}" MATCHES "Clang" OR "${CMAKE_C_COMPILER_ID}" STREQUAL "Clang")
 	# add_compile_options(-Werror=return-type -Wall -Wextra -Wpedantic /MP)
 	add_compile_options(-Werror=return-type /MP)

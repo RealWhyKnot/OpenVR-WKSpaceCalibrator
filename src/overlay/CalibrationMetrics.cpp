@@ -85,6 +85,45 @@ namespace Metrics {
 	static bool logFileIsOpen = false;
 	static bool failedToOpenLogFile = false;
 
+	// v2 wire-format addition: per-tick raw reference and target poses plus the tick
+	// phase. Filled by SetTickRawPoses() each tick and consumed by the field writers
+	// below. Defaults are an identity pose with phase=None so that any unexpected
+	// WriteLogEntry call (i.e. one not preceded by SetTickRawPoses) emits a syntactically
+	// valid row rather than uninitialized memory.
+	struct TickRawPoses {
+		Eigen::Vector3d refTrans = Eigen::Vector3d::Zero();
+		Eigen::Quaterniond refRot = Eigen::Quaterniond::Identity();
+		Eigen::Vector3d targetTrans = Eigen::Vector3d::Zero();
+		Eigen::Quaterniond targetRot = Eigen::Quaterniond::Identity();
+		TickPhase phase = TickPhase::None;
+	};
+	static TickRawPoses g_tickRaw;
+
+	static const char* TickPhaseName(TickPhase p) {
+		switch (p) {
+		case TickPhase::None: return "None";
+		case TickPhase::Begin: return "Begin";
+		case TickPhase::Rotation: return "Rotation";
+		case TickPhase::Translation: return "Translation";
+		case TickPhase::Editing: return "Editing";
+		case TickPhase::Continuous: return "Continuous";
+		case TickPhase::ContinuousStandby: return "ContinuousStandby";
+		}
+		return "None";
+	}
+
+	void SetTickRawPoses(
+		const Eigen::Vector3d& refTrans, const Eigen::Quaterniond& refRot,
+		const Eigen::Vector3d& targetTrans, const Eigen::Quaterniond& targetRot,
+		TickPhase phase)
+	{
+		g_tickRaw.refTrans = refTrans;
+		g_tickRaw.refRot = refRot;
+		g_tickRaw.targetTrans = targetTrans;
+		g_tickRaw.targetRot = targetRot;
+		g_tickRaw.phase = phase;
+	}
+
 	struct CsvField {
 		const char* name;
 		void (*writer)(std::ofstream& s);
@@ -121,7 +160,7 @@ namespace Metrics {
 		TS_FIELD(jitterTarget),
 
 		{
-			"calibrationApplied", 
+			"calibrationApplied",
 			[](auto& s) {
 				if (calibrationApplied.lastTs() == CurrentTime) {
 					if (calibrationApplied.last()) {
@@ -132,7 +171,27 @@ namespace Metrics {
 					}
 				}
 			}
-		}
+		},
+
+		// --- v2 columns: raw reference + target poses and tick phase ---------------
+		// Translations are in meters, rotations are unit quaternions in (w,x,y,z) order.
+		// These are written with full double precision so the replay harness can
+		// reconstruct the exact `Sample` values that fed CalibrationCalc::PushSample.
+		{ "ref_tx", [](auto& s) { s.precision(17); s << g_tickRaw.refTrans.x(); } },
+		{ "ref_ty", [](auto& s) { s.precision(17); s << g_tickRaw.refTrans.y(); } },
+		{ "ref_tz", [](auto& s) { s.precision(17); s << g_tickRaw.refTrans.z(); } },
+		{ "ref_qw", [](auto& s) { s.precision(17); s << g_tickRaw.refRot.w(); } },
+		{ "ref_qx", [](auto& s) { s.precision(17); s << g_tickRaw.refRot.x(); } },
+		{ "ref_qy", [](auto& s) { s.precision(17); s << g_tickRaw.refRot.y(); } },
+		{ "ref_qz", [](auto& s) { s.precision(17); s << g_tickRaw.refRot.z(); } },
+		{ "tgt_tx", [](auto& s) { s.precision(17); s << g_tickRaw.targetTrans.x(); } },
+		{ "tgt_ty", [](auto& s) { s.precision(17); s << g_tickRaw.targetTrans.y(); } },
+		{ "tgt_tz", [](auto& s) { s.precision(17); s << g_tickRaw.targetTrans.z(); } },
+		{ "tgt_qw", [](auto& s) { s.precision(17); s << g_tickRaw.targetRot.w(); } },
+		{ "tgt_qx", [](auto& s) { s.precision(17); s << g_tickRaw.targetRot.x(); } },
+		{ "tgt_qy", [](auto& s) { s.precision(17); s << g_tickRaw.targetRot.y(); } },
+		{ "tgt_qz", [](auto& s) { s.precision(17); s << g_tickRaw.targetRot.z(); } },
+		{ "tick_phase", [](auto& s) { s << TickPhaseName(g_tickRaw.phase); } },
 	};
 	
 	
@@ -209,6 +268,13 @@ namespace Metrics {
 		if (logFile.fail()) {
 			return false;
 		}
+
+		// Wire-format version annotation. v2 added per-tick raw reference + target
+		// poses (ref_t{x,y,z}, ref_q{w,x,y,z}, tgt_*) and tick_phase. The replay
+		// harness in tools/replay/ rejects logs that don't begin with this banner so
+		// older v1 captures (which lacked raw poses) fail loud rather than silently
+		// being interpreted with the wrong column layout.
+		logFile << "# spacecal_log_v2\n";
 
 		for (int i = 0; i < sizeof fields / sizeof fields[0]; i++) {
 			if (i > 0) logFile << ",";
