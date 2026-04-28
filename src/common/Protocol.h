@@ -92,7 +92,12 @@ namespace vr {
 
 namespace protocol
 {
-	const uint32_t Version = 4;
+	const uint32_t Version = 5;
+
+	// Maximum length of a tracking-system-name string (e.g., "lighthouse", "oculus",
+	// "Pimax Crystal HMD"). 32 bytes is more than enough for known systems and keeps
+	// the IPC payload compact.
+	static const size_t MaxTrackingSystemNameLen = 32;
 
 	enum RequestType
 	{
@@ -100,7 +105,8 @@ namespace protocol
 		RequestHandshake,
 		RequestSetDeviceTransform,
 		RequestSetAlignmentSpeedParams,
-		RequestDebugOffset
+		RequestDebugOffset,
+		RequestSetTrackingSystemFallback
 	};
 
 	enum ResponseType
@@ -151,23 +157,41 @@ namespace protocol
 		bool lerp;
 		bool quash;
 
+		// Tracking system name of the device with this OpenVR ID, populated by the
+		// overlay so the driver can match it against per-system fallbacks without
+		// querying VR properties on every pose update. Empty string means "unknown".
+		char target_system[MaxTrackingSystemNameLen];
+
 		SetDeviceTransform(uint32_t id, bool enabled) :
-			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(false), updateScale(false), translation({}), rotation({1,0,0,0}), scale(1), lerp(false), quash(false) { }
+			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(false), updateScale(false), translation({}), rotation({1,0,0,0}), scale(1), lerp(false), quash(false), target_system{} { }
 
 		SetDeviceTransform(uint32_t id, bool enabled, vr::HmdVector3d_t translation) :
-			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(false), updateScale(false), translation(translation), rotation({ 1,0,0,0 }), scale(1), lerp(false), quash(false) { }
+			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(false), updateScale(false), translation(translation), rotation({ 1,0,0,0 }), scale(1), lerp(false), quash(false), target_system{} { }
 
 		SetDeviceTransform(uint32_t id, bool enabled, vr::HmdQuaternion_t rotation) :
-			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(true), updateScale(false), translation({}), rotation(rotation), scale(1), lerp(false), quash(false) { }
+			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(true), updateScale(false), translation({}), rotation(rotation), scale(1), lerp(false), quash(false), target_system{} { }
 
 		SetDeviceTransform(uint32_t id, bool enabled, double scale) :
-			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(false), updateScale(true), translation({}), rotation({ 1,0,0,0 }), scale(scale), lerp(false), quash(false) { }
+			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(false), updateScale(true), translation({}), rotation({ 1,0,0,0 }), scale(scale), lerp(false), quash(false), target_system{} { }
 
 		SetDeviceTransform(uint32_t id, bool enabled, vr::HmdVector3d_t translation, vr::HmdQuaternion_t rotation) :
-			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(true), updateScale(false), translation(translation), rotation(rotation), scale(1), lerp(false), quash(false) { }
+			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(true), updateScale(false), translation(translation), rotation(rotation), scale(1), lerp(false), quash(false), target_system{} { }
 
 		SetDeviceTransform(uint32_t id, bool enabled, vr::HmdVector3d_t translation, vr::HmdQuaternion_t rotation, double scale) :
-			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(true), updateScale(true), translation(translation), rotation(rotation), scale(scale), lerp(false), quash(false) { }
+			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(true), updateScale(true), translation(translation), rotation(rotation), scale(scale), lerp(false), quash(false), target_system{} { }
+	};
+
+	// Per-tracking-system fallback transform. Applied to any device whose tracking
+	// system matches `system_name` and that doesn't currently have an active per-ID
+	// transform. Lets newly connected trackers inherit the calibrated offset
+	// immediately, without waiting for the overlay's next scan tick.
+	struct SetTrackingSystemFallback
+	{
+		char system_name[MaxTrackingSystemNameLen];
+		bool enabled;
+		vr::HmdVector3d_t translation;
+		vr::HmdQuaternion_t rotation;
+		double scale;
 	};
 
 	struct Request
@@ -177,6 +201,7 @@ namespace protocol
 		union {
 			SetDeviceTransform setDeviceTransform;
 			AlignmentSpeedParams setAlignmentSpeedParams;
+			SetTrackingSystemFallback setTrackingSystemFallback;
 		};
 
 		Request() : type(RequestInvalid), setAlignmentSpeedParams({}) { }

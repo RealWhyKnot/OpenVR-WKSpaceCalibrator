@@ -180,8 +180,27 @@ inline vr::HmdVector3d_t quaternionRotateVector(const vr::HmdQuaternion_t& quat,
 
 void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTransform& newTransform)
 {
+	if (newTransform.openVRID >= vr::k_unMaxTrackedDeviceCount) return;
+
 	auto &tf = transforms[newTransform.openVRID];
+	const bool wasEnabled = tf.enabled;
 	tf.enabled = newTransform.enabled;
+
+	// Record the device's tracking system so we can match it against per-system
+	// fallbacks for any future device that occupies this slot.
+	{
+		// target_system is a fixed-size buffer that may not be NUL-terminated if
+		// fully populated; bound the read to the buffer length.
+		size_t maxLen = sizeof newTransform.target_system;
+		size_t len = 0;
+		while (len < maxLen && newTransform.target_system[len] != '\0') ++len;
+		deviceSystem[newTransform.openVRID].assign(newTransform.target_system, len);
+	}
+
+	// Whenever the per-ID transform is updated (whether enabling or disabling), the
+	// slot is no longer following a fallback. Subsequent HandleDevicePoseUpdated
+	// calls will re-evaluate fallback eligibility.
+	tf.fallbackActive = false;
 
 	if (newTransform.updateTranslation) {
 		tf.targetTransform.translation = convert(newTransform.translation);
@@ -202,6 +221,59 @@ void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTr
 		tf.scale = newTransform.scale;
 
 	tf.quash = newTransform.quash;
+
+	// On enable transition, the slot's `transform` may be stale from a prior session
+	// or never initialized. Snap to the target so we don't ramp in from a junk state.
+	if (!wasEnabled && tf.enabled) {
+		tf.transform = tf.targetTransform;
+	}
+
+	// On disable transition, drop any pending lerp target so a future re-enable
+	// doesn't pick up where the last one left off.
+	if (wasEnabled && !tf.enabled) {
+		tf.targetTransform = tf.transform;
+	}
+
+	// Always reset the lerp clock and rate. If the device went offline for a long time,
+	// the next BlendTransform would otherwise compute a huge dt and saturate to 1.0
+	// (instant jump). Restarting the clock keeps lerp behavior bounded.
+	QueryPerformanceCounter(&tf.lastPoll);
+	tf.currentRate = DeltaSize::TINY;
+}
+
+void ServerTrackedDeviceProvider::SetTrackingSystemFallback(const protocol::SetTrackingSystemFallback& newFallback)
+{
+	size_t maxLen = sizeof newFallback.system_name;
+	size_t len = 0;
+	while (len < maxLen && newFallback.system_name[len] != '\0') ++len;
+	std::string name(newFallback.system_name, len);
+	if (name.empty()) return;
+
+	if (!newFallback.enabled) {
+		// Disabling the fallback. Drop any per-ID slots that were following it so
+		// they don't keep applying the stale offset on subsequent pose updates.
+		auto it = systemFallbacks.find(name);
+		if (it != systemFallbacks.end()) {
+			it->second.enabled = false;
+		}
+		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id) {
+			if (transforms[id].fallbackActive && deviceSystem[id] == name) {
+				transforms[id].fallbackActive = false;
+				transforms[id].targetTransform = transforms[id].transform;
+				transforms[id].currentRate = DeltaSize::TINY;
+				QueryPerformanceCounter(&transforms[id].lastPoll);
+			}
+		}
+		return;
+	}
+
+	auto& fb = systemFallbacks[name];
+	fb.enabled = true;
+	fb.transform.translation = Eigen::Vector3d(
+		newFallback.translation.v[0], newFallback.translation.v[1], newFallback.translation.v[2]);
+	fb.transform.rotation = Eigen::Quaterniond(
+		newFallback.rotation.w, newFallback.rotation.x, newFallback.rotation.y, newFallback.rotation.z);
+	fb.scale = newFallback.scale;
 }
 
 bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t &pose)
@@ -237,6 +309,47 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 		BlendTransform(tf, deviceWorldPose);
 		ApplyTransform(tf, pose);
+	}
+	else if (!deviceSystem[openVRID].empty())
+	{
+		// Per-ID transform is disabled. Check for a per-tracking-system fallback —
+		// this lets a tracker that connected after the last overlay scan inherit
+		// the calibrated offset on its very first pose update.
+		auto it = systemFallbacks.find(deviceSystem[openVRID]);
+		if (it != systemFallbacks.end() && it->second.enabled) {
+			const auto& fb = it->second;
+
+			// Update the slot's blend target from the (possibly newly updated) fallback.
+			tf.targetTransform = fb.transform;
+			tf.scale = fb.scale;
+
+			// First activation: snap so the device doesn't ramp in from an identity
+			// or otherwise stale `transform` value.
+			if (!tf.fallbackActive) {
+				tf.transform = fb.transform;
+				tf.fallbackActive = true;
+				tf.currentRate = DeltaSize::TINY;
+				QueryPerformanceCounter(&tf.lastPoll);
+			}
+
+			pose.vecPosition[0] *= tf.scale;
+			pose.vecPosition[1] *= tf.scale;
+			pose.vecPosition[2] *= tf.scale;
+
+			auto deviceWorldPose = toIsoPose(pose);
+			tf.currentRate = GetTransformDeltaSize(tf.currentRate, deviceWorldPose, tf.transform, tf.targetTransform);
+
+			BlendTransform(tf, deviceWorldPose);
+			ApplyTransform(tf, pose);
+		}
+		else if (tf.fallbackActive) {
+			// Fallback was removed/disabled while we were following it. Clear our
+			// blend state so a future re-enable starts clean.
+			tf.fallbackActive = false;
+			tf.targetTransform = tf.transform;
+			tf.currentRate = DeltaSize::TINY;
+			QueryPerformanceCounter(&tf.lastPoll);
+		}
 	}
 
 	return true;

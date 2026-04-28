@@ -110,6 +110,9 @@ namespace {
 const double CalibrationCalc::AxisVarianceThreshold = 0.001;
 void CalibrationCalc::PushSample(const Sample& sample) {
 	m_samples.push_back(sample);
+	if (sample.valid && sample.timestamp > m_lastSampleTime) {
+		m_lastSampleTime = sample.timestamp;
+	}
 }
 
 void CalibrationCalc::Clear() {
@@ -119,6 +122,11 @@ void CalibrationCalc::Clear() {
 	m_axisVariance = 0.0;
 	m_refToTargetPose = Eigen::AffineCompact3d::Identity();
 	m_relativePosCalibrated = false;
+	m_rotationConditionRatio = 0.0;
+	m_consecutiveRejections = 0;
+	// `m_lastSampleTime` and `m_lastSuccessfulIncrementalTime` deliberately retained
+	// across Clear() so the watchdog can still see the gap if continuous calibration
+	// is restarted faster than fresh samples can be collected.
 }
 
 std::vector<bool> CalibrationCalc::DetectOutliers() const {
@@ -168,34 +176,63 @@ std::vector<bool> CalibrationCalc::DetectOutliers() const {
 	rot.transposeInPlace();
 
 	// Optimize an extrinsic from reference to target.
-	// Detect the outliers by comparing the extrinc computed from each pair of rotation to the optimized extrinsic. 
-	Eigen::MatrixXd coefficients(m_samples.size() * 4, 4);
-	Eigen::VectorXd constraints(m_samples.size() * 4);
-	std::vector<bool> valids(m_samples.size());
-	Eigen::Matrix4d I4 = Eigen::Matrix4d::Identity();
-	for (size_t i = 0; i < m_samples.size(); i++) {
-		Eigen::Matrix3d rotExtTmp = (m_samples[i].ref.rot.transpose() * rot * m_samples[i].target.rot);
-		Eigen::Quaterniond quatExtTmp(rotExtTmp);
-		quatExtTmp.normalize();
-		coefficients.block<4, 4>(4 * i, 0) = Eigen::Matrix4d::Identity();
-		constraints.block<4, 1>(4 * i, 0) = Eigen::Vector4d(quatExtTmp.w(), quatExtTmp.x(), quatExtTmp.y(), quatExtTmp.z());
-	}
-	Eigen::Vector4d result = coefficients.bdcSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(constraints);
-	Eigen::Quaterniond quatExt(result(0), result(1), result(2), result(3));
-	quatExt.normalize();
-	Eigen::Matrix3d extRot = quatExt.toRotationMatrix();
+	// Detect the outliers by comparing the extrinsic computed from each pair of
+	// rotations to the optimized extrinsic. Iterate up to MaxIters times: each pass
+	// recomputes the average extrinsic from the previously-marked valid samples and
+	// re-marks based on the refined average. A single pass is fragile when >20% of
+	// samples are outliers (the average is dragged toward the bad samples), so this
+	// gives the threshold a chance to settle.
 	const double threshold = 0.99;
+	const int MaxIters = 4;
 
+	std::vector<Eigen::Quaterniond> perSampleQuat(m_samples.size());
 	for (size_t i = 0; i < m_samples.size(); i++) {
 		Eigen::Matrix3d rotExtTmp = (m_samples[i].ref.rot.transpose() * rot * m_samples[i].target.rot);
-		Eigen::Quaterniond quatExtTmp(rotExtTmp);
-		double cosHalfAngle = quatExtTmp.w() * quatExt.w() + quatExtTmp.vec().dot(quatExt.vec());
-		if (abs(cosHalfAngle) < threshold) {
-			valids[i] = false;
-		} else {
-			valids[i] = true;
-		}
+		Eigen::Quaterniond q(rotExtTmp);
+		q.normalize();
+		perSampleQuat[i] = q;
 	}
+
+	std::vector<bool> valids(m_samples.size(), true);
+
+	for (int iter = 0; iter < MaxIters; iter++) {
+		// Collect quaternions from currently-valid samples.
+		size_t validCount = 0;
+		for (size_t i = 0; i < valids.size(); i++) if (valids[i]) validCount++;
+		if (validCount == 0) break;
+
+		// Average via least-squares on the 4-vector. We follow the original solver
+		// shape (identity coefficients on a Nx4 system) so the math stays equivalent
+		// to the prior single-pass implementation when MaxIters == 1.
+		Eigen::MatrixXd coefficients(validCount * 4, 4);
+		Eigen::VectorXd constraints(validCount * 4);
+		size_t row = 0;
+		for (size_t i = 0; i < m_samples.size(); i++) {
+			if (!valids[i]) continue;
+			coefficients.block<4, 4>(4 * row, 0) = Eigen::Matrix4d::Identity();
+			constraints.block<4, 1>(4 * row, 0) = Eigen::Vector4d(
+				perSampleQuat[i].w(), perSampleQuat[i].x(), perSampleQuat[i].y(), perSampleQuat[i].z());
+			row++;
+		}
+		Eigen::Vector4d result = coefficients.bdcSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(constraints);
+		Eigen::Quaterniond quatExt(result(0), result(1), result(2), result(3));
+		quatExt.normalize();
+
+		// Re-mark every sample (valid set can grow as well as shrink across iterations,
+		// since a previously-rejected sample can become valid once outliers stop
+		// pulling the average).
+		bool changed = false;
+		for (size_t i = 0; i < m_samples.size(); i++) {
+			double cosHalfAngle = perSampleQuat[i].w() * quatExt.w() + perSampleQuat[i].vec().dot(quatExt.vec());
+			bool nowValid = std::abs(cosHalfAngle) >= threshold;
+			if (nowValid != valids[i]) {
+				changed = true;
+				valids[i] = nowValid;
+			}
+		}
+		if (!changed) break;
+	}
+
 	return valids;
 }
 
@@ -248,6 +285,17 @@ Eigen::Vector3d CalibrationCalc::CalibrateRotation(const bool ignoreOutliers) co
 	// Singular Value Decomposition (SVD)
 	Eigen::JacobiSVD<Eigen::MatrixXd> svd(crossCV, Eigen::ComputeThinU | Eigen::ComputeThinV);
 
+	// Record the condition ratio (min/max singular value) of the 2D covariance.
+	// Near-zero means the rotation deltas all lie close to a single line in the
+	// yaw plane — i.e., the user only rotated in one axis. The yaw solution is
+	// then ill-conditioned and ComputeIncremental will reject it.
+	{
+		const auto& sv = svd.singularValues();
+		double smax = sv.size() > 0 ? sv(0) : 0.0;
+		double smin = sv.size() > 1 ? sv(sv.size() - 1) : 0.0;
+		m_rotationConditionRatio = (smax > 0.0) ? (smin / smax) : 0.0;
+	}
+
 	// Calculate 2D rotation matrix
 	Eigen::Matrix2d i = Eigen::Matrix2d::Identity();
 	Eigen::Matrix2d rot = svd.matrixV() * i * svd.matrixU().transpose();
@@ -265,7 +313,17 @@ Eigen::Vector3d CalibrationCalc::CalibrateRotation(const bool ignoreOutliers) co
 
 Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rotation) const
 {
-	std::vector<std::pair<Eigen::Vector3d, Eigen::Matrix3d>> deltas;
+	// Each delta-pair carries an associated weight derived from the smaller of the
+	// two rotation magnitudes between samples i and j. Pairs with tiny rotation
+	// contribute mostly noise to the translation solve (the LS rows are small),
+	// so we down-weight them with sqrt(weight) row-scaling.
+	struct DeltaRow {
+		Eigen::Vector3d c;
+		Eigen::Matrix3d q;
+		double weight;
+	};
+	std::vector<DeltaRow> deltas;
+	deltas.reserve(m_samples.size() * m_samples.size());
 
 	for (size_t i = 0; i < m_samples.size(); i++)
 	{
@@ -278,18 +336,25 @@ Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rot
 			Sample s_j = m_samples[j];
 			s_j.target.rot = rotation * s_j.target.rot;
 			s_j.target.trans = rotation * s_j.target.trans;
-			
+
+			// Weight = min(refAngle, targetAngle), clamped to a small floor so we
+			// never fully zero a row (preserves rank). Both angles are in radians.
+			double refA = AngleFromRotationMatrix3(s_i.ref.rot * s_j.ref.rot.transpose());
+			double targetA = AngleFromRotationMatrix3(s_i.target.rot * s_j.target.rot.transpose());
+			double weight = std::min(refA, targetA);
+			if (!std::isfinite(weight) || weight < 0.01) weight = 0.01;
+
 			auto QAi = s_i.ref.rot.transpose();
 			auto QAj = s_j.ref.rot.transpose();
 			auto dQA = QAj - QAi;
 			auto CA = QAj * (s_j.ref.trans - s_j.target.trans) - QAi * (s_i.ref.trans - s_i.target.trans);
-			deltas.push_back(std::make_pair(CA, dQA));
+			deltas.push_back({ CA, dQA, weight });
 
 			auto QBi = s_i.target.rot.transpose();
 			auto QBj = s_j.target.rot.transpose();
 			auto dQB = QBj - QBi;
 			auto CB = QBj * (s_j.ref.trans - s_j.target.trans) - QBi * (s_i.ref.trans - s_i.target.trans);
-			deltas.push_back(std::make_pair(CB, dQB));
+			deltas.push_back({ CB, dQB, weight });
 		}
 	}
 
@@ -298,10 +363,11 @@ Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rot
 
 	for (size_t i = 0; i < deltas.size(); i++)
 	{
+		double sw = std::sqrt(deltas[i].weight);
 		for (int axis = 0; axis < 3; axis++)
 		{
-			constants(i * 3 + axis) = deltas[i].first(axis);
-			coefficients.row(i * 3 + axis) = deltas[i].second.row(axis);
+			constants(i * 3 + axis) = deltas[i].c(axis) * sw;
+			coefficients.row(i * 3 + axis) = deltas[i].q.row(axis) * sw;
 		}
 	}
 
@@ -723,15 +789,26 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 
 	double newVariance = 0;
 	bool shouldRapidCorrect = true;
+	// Threshold below which the 2D Kabsch yaw solution is considered too ill-conditioned
+	// to trust. Empirically: if min/max singular value < 0.05, the user moved on
+	// roughly one axis only and the yaw is dominated by noise.
+	const double RotationConditionMin = 0.05;
 	if (!newCalibrationValid) {
 		calibration = ComputeCalibration(ignoreOutliers);
 
 		newVariance = ComputeAxisVariance(calibration)(1);
 		Metrics::axisIndependence.Push(newVariance);
+		Metrics::rotationConditionRatio.Push(m_rotationConditionRatio);
 
 		if (newVariance < AxisVarianceThreshold && newVariance < m_axisVariance) {
 			newCalibrationValid = false;
 			shouldRapidCorrect = false;
+		} else if (m_rotationConditionRatio > 0.0 && m_rotationConditionRatio < RotationConditionMin) {
+			// Degenerate motion: insufficient yaw-plane axis spread. Don't update
+			// rotation; keep the prior calibration (if any). Allow rapid-correct via
+			// relative pose since that path doesn't depend on this conditioning.
+			CalCtx.Log("Insufficient motion variety (single-axis rotation) — holding rotation\n");
+			newCalibrationValid = false;
 		} else {
 			newCalibrationValid = ValidateCalibration(calibration, &newError, &m_posOffset);
 			Metrics::posOffset_rawComputed.Push(m_posOffset * 1000);
@@ -746,7 +823,7 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 		}
 
 		Metrics::error_rawComputed.Push(newError * 1000);
-		
+
 		ComputeInstantOffset();
 	}
 
@@ -785,9 +862,30 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 		} else {
 			CalCtx.Log("Applying temporary transformation...");
 		}
-		
+
+		// Apply a single-step EMA on the published transform when we already had a
+		// valid prior estimate. The 1.5x threshold gate prevents most bad updates
+		// from being accepted, but accepted updates still carry per-cycle noise
+		// that's visible as small jitter on attached objects. Alpha = 0.3 weights
+		// the new estimate at 30% — fast enough for legitimate drift correction,
+		// slow enough to suppress per-tick wobble. Skip for rapid-correct (usingRelPose)
+		// since that path is supposed to snap to a known-better solution.
+		if (m_isValid && !usingRelPose) {
+			const double alpha = 0.3;
+			Eigen::Quaterniond priorQ(m_estimatedTransformation.rotation());
+			Eigen::Quaterniond newQ(calibration.rotation());
+			Eigen::Quaterniond blendedQ = priorQ.slerp(alpha, newQ);
+			Eigen::Vector3d blendedT = m_estimatedTransformation.translation() * (1.0 - alpha) +
+				calibration.translation() * alpha;
+			Eigen::AffineCompact3d blended;
+			blended.linear() = blendedQ.toRotationMatrix();
+			blended.translation() = blendedT;
+			m_estimatedTransformation = blended;
+		}
+		else {
+			m_estimatedTransformation = calibration; // first calibration or rapid-correct snap
+		}
 		m_isValid = true;
-		m_estimatedTransformation = calibration; // @NOTE: Continuous calibration
 		m_axisVariance = newVariance;
 
 		if (!usingRelPose) {
@@ -796,9 +894,31 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 
 		Metrics::calibrationApplied.Push(!usingRelPose);
 
+		m_consecutiveRejections = 0;
+		m_lastSuccessfulIncrementalTime = m_lastSampleTime;
+
 		return true;
 	}
 	else {
+		// Stuck-loop watchdog: if we've been valid for a while but every recent attempt
+		// to improve the calibration has been rejected, the prior estimate may be a
+		// bad fixpoint that the 1.5x threshold gate is preventing us from leaving.
+		// After enough consecutive rejections, demote to invalid + clear samples so
+		// the overlay drops to ContinuousStandby and re-acquires from scratch.
+		m_consecutiveRejections++;
+		const int MaxConsecutiveRejections = 50; // ~25s at the post-buffer-fill cadence
+
+		Metrics::consecutiveRejections.Push((double)m_consecutiveRejections);
+
+		if (m_isValid && m_consecutiveRejections >= MaxConsecutiveRejections) {
+			CalCtx.Log("Continuous calibration appears stuck — recollecting samples\n");
+			Metrics::WriteLogAnnotation("watchdog: continuous calibration stuck, clearing");
+			m_isValid = false;
+			m_watchdogResets++;
+			Clear();
+			// Clear() resets m_consecutiveRejections; ensure we don't immediately retrigger.
+		}
+
 		return false;
 	}
 }

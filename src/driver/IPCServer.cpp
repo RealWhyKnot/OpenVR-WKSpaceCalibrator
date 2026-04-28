@@ -26,6 +26,11 @@ void IPCServer::HandleRequest(const protocol::Request &request, protocol::Respon
 		response.type = protocol::ResponseSuccess;
 		break;
 
+	case protocol::RequestSetTrackingSystemFallback:
+		driver->SetTrackingSystemFallback(request.setTrackingSystemFallback);
+		response.type = protocol::ResponseSuccess;
+		break;
+
 	default:
 		LOG("Invalid IPC request: %d", request.type);
 		break;

@@ -50,6 +50,14 @@ namespace Metrics {
 	extern TimeSeries<double> computationTime;
 	extern TimeSeries<double> jitterRef, jitterTarget;
 
+	// Smallest/largest singular value ratio of the 2D Kabsch yaw covariance.
+	// Drops near zero when the user moves on a single axis only.
+	extern TimeSeries<double> rotationConditionRatio;
+
+	// Running count of ComputeIncremental rejections since the last successful
+	// accept. The stuck-loop watchdog fires when this exceeds its threshold.
+	extern TimeSeries<double> consecutiveRejections;
+
 	extern TimeSeries<bool> calibrationApplied;
 
 	extern bool enableLogs;

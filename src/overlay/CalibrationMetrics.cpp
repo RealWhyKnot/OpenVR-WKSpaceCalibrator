@@ -16,6 +16,8 @@ namespace Metrics {
 	TimeSeries<double> axisIndependence;
 	TimeSeries<double> computationTime;
 	TimeSeries<double> jitterRef, jitterTarget;
+	TimeSeries<double> rotationConditionRatio;
+	TimeSeries<double> consecutiveRejections;
 
 	// true - full calibration, false - static calibration
 	TimeSeries<bool> calibrationApplied;
@@ -112,6 +114,8 @@ namespace Metrics {
 		TS_FIELD(error_byRelPose),
 		TS_FIELD(error_currentCalRelPose),
 		TS_FIELD(axisIndependence),
+		TS_FIELD(rotationConditionRatio),
+		TS_FIELD(consecutiveRejections),
 		TS_FIELD(computationTime),
 		TS_FIELD(jitterRef),
 		TS_FIELD(jitterTarget),

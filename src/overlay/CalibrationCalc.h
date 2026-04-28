@@ -116,6 +116,21 @@ public:
 	double m_axisVariance = 0.0;
 	long m_calcCycle;
 
+	// Smallest/largest singular-value ratio of the 2D Kabsch cross-covariance from the
+	// most recent CalibrateRotation. Near-zero means the user only rotated in one
+	// axis (degenerate motion), so the yaw solution is ill-conditioned. Set by
+	// CalibrateRotation, consulted by ComputeIncremental to reject bad solutions.
+	mutable double m_rotationConditionRatio = 0.0;
+
+	// Diagnostics: number of consecutive ComputeIncremental rejections, and the last
+	// time we successfully collected a sample. Used by the stuck-loop watchdog to
+	// drop m_isValid (and trigger ContinuousStandby) when continuous calibration can
+	// no longer produce a better estimate but isn't admitting it.
+	int m_consecutiveRejections = 0;
+	double m_lastSuccessfulIncrementalTime = 0.0;
+	double m_lastSampleTime = 0.0;
+	int m_watchdogResets = 0;
+
 private:
 	bool m_isValid;
 	Eigen::AffineCompact3d m_estimatedTransformation;

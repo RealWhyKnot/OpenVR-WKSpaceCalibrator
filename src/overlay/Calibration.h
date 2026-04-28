@@ -56,6 +56,7 @@ struct CalibrationContext
 	bool hasAppliedCalibrationResult = false;
 
 	float xprev, yprev, zprev;
+	int consecutiveHmdStalls = 0;
 
 	float continuousCalibrationThreshold;
 	float maxRelativeErrorThreshold = 0.005f;

@@ -10,6 +10,10 @@
 
 #include <openvr_driver.h>
 
+#include <array>
+#include <string>
+#include <unordered_map>
+
 
 class ServerTrackedDeviceProvider : public vr::IServerTrackedDeviceProvider
 {
@@ -43,6 +47,7 @@ public:
 
 	ServerTrackedDeviceProvider() : server(this) { }
 	void SetDeviceTransform(const protocol::SetDeviceTransform &newTransform);
+	void SetTrackingSystemFallback(const protocol::SetTrackingSystemFallback &newFallback);
 	bool HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t &pose);
 	void HandleApplyRandomOffset();
 	void HandleSetAlignmentSpeedParams(const protocol::AlignmentSpeedParams params) {
@@ -67,11 +72,31 @@ private:
 		double scale;
 		LARGE_INTEGER lastPoll;
 		DeltaSize currentRate = DeltaSize::TINY;
+		// True when the slot's transform/targetTransform are tracking a tracking-
+		// system fallback rather than an overlay-supplied per-ID value. Used to
+		// snap on the first activation of fallback.
+		bool fallbackActive = false;
+	};
+
+	struct FallbackTransform
+	{
+		bool enabled = false;
+		IsoTransform transform;
+		double scale = 1.0;
 	};
 
 	DeviceTransform transforms[vr::k_unMaxTrackedDeviceCount];
 	Eigen::Vector3d debugTransform;
 	Eigen::Quaterniond debugRotation;
+
+	// Per-ID tracking-system name, populated from SetDeviceTransform messages.
+	// Empty if the overlay hasn't told us yet for this slot.
+	std::array<std::string, vr::k_unMaxTrackedDeviceCount> deviceSystem;
+
+	// Map from tracking-system name -> fallback transform. Consulted in
+	// HandleDevicePoseUpdated when the per-ID transform is disabled, so a freshly
+	// connected device of a calibrated system inherits the offset immediately.
+	std::unordered_map<std::string, FallbackTransform> systemFallbacks;
 
 	DeltaSize currentDeltaSpeed[vr::k_unMaxTrackedDeviceCount];
 
