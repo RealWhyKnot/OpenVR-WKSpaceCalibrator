@@ -251,7 +251,27 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	}
 
 	if (obj["calibration_speed"].is<double>()) {
-		ctx.calibrationSpeed = (CalibrationContext::Speed)(int) obj["calibration_speed"].get<double>();
+		const int raw = (int)obj["calibration_speed"].get<double>();
+		// Validate the loaded enum value. AUTO was added in 2026.4.28.x; older
+		// profiles only stored 0..2 (FAST/SLOW/VERY_SLOW). Anything outside
+		// 0..3 is corrupt — fall back to AUTO so users get sane behavior.
+		if (raw >= CalibrationContext::FAST && raw <= CalibrationContext::AUTO) {
+			ctx.calibrationSpeed = (CalibrationContext::Speed)raw;
+		} else {
+			ctx.calibrationSpeed = CalibrationContext::AUTO;
+		}
+	}
+	// Note: when calibration_speed is absent (older profile or new install) the
+	// CalibrationContext default of AUTO applies.
+
+	// View mode preference. New in 2026.4.28.x; older profiles get the GRAPH
+	// default. Bounds-check so a hand-edited profile with garbage doesn't
+	// crash on next render.
+	if (obj["view_mode"].is<double>()) {
+		const int raw = (int)obj["view_mode"].get<double>();
+		if (raw >= 0 && raw <= 2) {
+			ctx.viewMode = (CalibrationContext::ViewMode)raw;
+		}
 	}
 
 	if (obj["chaperone"].is<picojson::object>()) {
@@ -409,6 +429,9 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 
 	double speed = (int) ctx.calibrationSpeed;
 	profile["calibration_speed"].set<double>(speed);
+
+	double viewMode = (int) ctx.viewMode;
+	profile["view_mode"].set<double>(viewMode);
 
 	if (ctx.chaperone.valid) {
 		picojson::object chaperone;

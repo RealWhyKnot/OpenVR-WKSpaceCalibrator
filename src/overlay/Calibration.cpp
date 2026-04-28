@@ -28,6 +28,56 @@ inline vr::HmdQuaternion_t operator*(const vr::HmdQuaternion_t& lhs, const vr::H
 }
 
 CalibrationContext CalCtx;
+
+// Auto-speed resolver. Reads the recent jitter samples from Metrics:: and picks
+// the calibration speed that should give a stable result without bogging down
+// convergence. Sticky: requires the new bucket to be right for ~5 consecutive
+// evaluations before switching, so transient noise doesn't oscillate the
+// sample-buffer size. Hysteresis is baked in by separate up-shift / down-shift
+// thresholds (1mm / 5mm) so a marginal value doesn't flap between buckets.
+CalibrationContext::Speed CalibrationContext::ResolvedCalibrationSpeed() const {
+	if (calibrationSpeed != AUTO) {
+		return calibrationSpeed;
+	}
+
+	// Sticky state. Mutable-via-cast is fine here — these are pure caches.
+	static Speed s_lastResolved = SLOW;          // safe default before first sample
+	static Speed s_pendingResolved = SLOW;
+	static int s_pendingTicks = 0;
+	constexpr int kRequiredStableTicks = 5;      // ~5 samples of consistency
+	constexpr double kFastThreshold = 0.001;     // 1 mm
+	constexpr double kSlowThreshold = 0.005;     // 5 mm
+
+	const double jRef = Metrics::jitterRef.last();
+	const double jTgt = Metrics::jitterTarget.last();
+	// Worst-of-the-two dominates: the noisiest tracker sets the cadence.
+	const double j = std::max(jRef, jTgt);
+
+	Speed candidate;
+	if (j <= 0.0 || j < kFastThreshold) {
+		candidate = FAST;
+	} else if (j < kSlowThreshold) {
+		candidate = SLOW;
+	} else {
+		candidate = VERY_SLOW;
+	}
+
+	if (candidate == s_lastResolved) {
+		s_pendingResolved = candidate;
+		s_pendingTicks = 0;
+	} else if (candidate == s_pendingResolved) {
+		++s_pendingTicks;
+		if (s_pendingTicks >= kRequiredStableTicks) {
+			s_lastResolved = candidate;
+			s_pendingTicks = 0;
+		}
+	} else {
+		s_pendingResolved = candidate;
+		s_pendingTicks = 1;
+	}
+
+	return s_lastResolved;
+}
 IPCClient Driver;
 static protocol::DriverPoseShmem shmem;
 
@@ -1154,8 +1204,17 @@ void CalibrationTick(double time)
 				ctx.state = CalibrationState::ContinuousStandby;
 				CalCtx.Log("HMD tracking lost — pausing continuous calibration\n");
 			}
+			// Annotate the log so the post-stall garbage rows have an obvious cause.
+			Metrics::WriteLogAnnotation("hmd_stall: tracking lost, sample buffer purged");
 		}
 		return;
+	}
+	if (ctx.consecutiveHmdStalls > 0) {
+		// Annotate recovery so the log shows the gap clearly.
+		char buf[128];
+		snprintf(buf, sizeof buf,
+		         "hmd_stall_recovered after %d ticks", ctx.consecutiveHmdStalls);
+		Metrics::WriteLogAnnotation(buf);
 	}
 	ctx.consecutiveHmdStalls = 0;
 	ctx.xprev = (float) p[0];
@@ -1234,8 +1293,13 @@ void CalibrationTick(double time)
 
 		ScanAndApplyProfile(ctx);
 
+		// Bug fixed 2026-04-28: the second push went into jitterRef instead of
+		// jitterTarget — so the log column "jitterTarget" was always stale (0 or
+		// last-tick reference jitter) and "jitterRef" actually carried the target
+		// jitter on every other read. Plot rendering elsewhere assumed the
+		// labelled split was real; fix the routing.
 		Metrics::jitterRef.Push(calibration.ReferenceJitter());
-		Metrics::jitterRef.Push(calibration.TargetJitter());
+		Metrics::jitterTarget.Push(calibration.TargetJitter());
 
 		if (!CalCtx.ReferencePoseIsValidSimple())
 		{

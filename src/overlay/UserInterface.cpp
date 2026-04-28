@@ -10,6 +10,7 @@
 #include "BuildStamp.h"
 #include "UpdateChecker.h"
 #include "Updater.h"
+#include "MotionRecording.h"
 
 #include <thread>
 #include <string>
@@ -42,6 +43,7 @@ void BuildContinuousCalDisplay();
 void ShowVersionLine();
 static void DrawModePill();
 static void DrawUpdateBanner();
+static void CCal_DrawRecordingsPanel();
 
 static bool runningInOverlay;
 
@@ -164,15 +166,20 @@ static void DrawModePill() {
 	const bool enabled = CalCtx.enabled;
 
 	const char* label = nullptr;
+	const char* tooltip = nullptr;
 	ImVec4 textColor;
 	ImVec4 bgColor;
 
 	if (!validProfile) {
 		label = "[NO PROFILE]";
+		tooltip = "No saved calibration profile is loaded.\n"
+		          "Hit \"Start Calibration\" or \"Continuous Calibration\" below to create one.";
 		textColor = ImVec4(0.85f, 0.85f, 0.85f, 1.0f);
 		bgColor   = ImVec4(0.30f, 0.30f, 0.30f, 1.0f);
 	} else if (state == CalibrationState::ContinuousStandby) {
 		label = "[STANDBY — waiting for tracking]";
+		tooltip = "Continuous calibration is on, but the reference or target tracker isn't currently\n"
+		          "reporting valid poses. Calibration resumes automatically when both come back online.";
 		textColor = ImVec4(0.95f, 0.95f, 0.95f, 1.0f);
 		bgColor   = ImVec4(0.40f, 0.40f, 0.42f, 1.0f);
 	} else if (state == CalibrationState::Continuous) {
@@ -184,19 +191,30 @@ static void DrawModePill() {
 		const bool recentlyUpdated = sinceAccept >= 0.0 && sinceAccept < 5.0;
 		if (searching) {
 			label = "[LIVE — searching]";
+			tooltip = "Continuous calibration is running but hasn't accepted a new estimate in a while.\n"
+			          "Usually means the user isn't moving enough to give the solver useful samples.\n"
+			          "Try slowly rotating + translating the target tracker through varied directions.";
 			textColor = ImVec4(0.10f, 0.10f, 0.10f, 1.0f);
 			bgColor   = ImVec4(0.95f, 0.70f, 0.20f, 1.0f);
 		} else if (recentlyUpdated) {
 			label = "[LIVE — updating]";
+			tooltip = "Continuous calibration is running and just accepted a fresh estimate.\n"
+			          "The driver is blending toward the new offset; if Recalibrate-on-movement is on,\n"
+			          "the blend only progresses while the device is actively moving.";
 			textColor = ImVec4(0.95f, 0.95f, 1.00f, 1.0f);
 			bgColor   = ImVec4(0.20f, 0.50f, 0.85f, 1.0f);
 		} else {
 			label = "[LIVE]";
+			tooltip = "Continuous calibration is running and the current estimate is being applied.\n"
+			          "No recent updates needed — the calibration is stable.";
 			textColor = ImVec4(0.95f, 0.95f, 1.00f, 1.0f);
 			bgColor   = ImVec4(0.25f, 0.45f, 0.75f, 1.0f);
 		}
 	} else if (enabled && state == CalibrationState::None) {
 		label = "[FIXED OFFSET ACTIVE]";
+		tooltip = "A one-shot calibration is applied as a fixed offset. The driver applies the\n"
+		          "stored transform; no continuous re-solving. Switch to Continuous mode if the\n"
+		          "offset drifts over time.";
 		textColor = ImVec4(0.10f, 0.20f, 0.10f, 1.0f);
 		bgColor   = ImVec4(0.45f, 0.80f, 0.45f, 1.0f);
 	} else {
@@ -204,6 +222,8 @@ static void DrawModePill() {
 		// idle/no-op rather than hide the pill entirely so the user always has
 		// a status they can point to in a bug report.
 		label = "[IDLE]";
+		tooltip = "A profile is loaded but no calibration is being applied. This usually means the\n"
+		          "current HMD tracking system doesn't match the profile's reference system.";
 		textColor = ImVec4(0.85f, 0.85f, 0.85f, 1.0f);
 		bgColor   = ImVec4(0.30f, 0.30f, 0.30f, 1.0f);
 	}
@@ -220,8 +240,13 @@ static void DrawModePill() {
 	dl->AddRectFilled(rectMin, rectMax, ImGui::GetColorU32(bgColor), 8.0f);
 	dl->AddText(ImVec2(rectMin.x + padding.x, rectMin.y + padding.y),
 	            ImGui::GetColorU32(textColor), label);
-	// Reserve layout space.
+	// Use a Dummy widget for layout reservation AND hover-detection. ImGui's
+	// IsItemHovered() checks the last submitted widget, so the Dummy must come
+	// before the SetTooltip — which is the call below.
 	ImGui::Dummy(ImVec2(textSize.x + padding.x * 2.0f, textSize.y + padding.y * 2.0f));
+	if (tooltip && ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("%s", tooltip);
+	}
 }
 
 // Format a byte count as "1.23 MB" / "456 KB" / "789 B". Used by the
@@ -405,7 +430,28 @@ void BuildContinuousCalDisplay() {
 	// (LIVE updating, searching, standby, fixed-offset) at a glance regardless
 	// of which tab the user is looking at.
 	DrawModePill();
+
+	// View-mode picker. Sits inline with the pill so it's always reachable but
+	// doesn't push other UI down. Saves on change so the choice survives restart.
+	ImGui::SameLine();
+	{
+		const char* modeNames[] = { "Basic", "Graphs", "Advanced" };
+		int mode = (int)CalCtx.viewMode;
+		ImGui::SetNextItemWidth(120.0f);
+		if (ImGui::Combo("View##viewMode", &mode, modeNames, IM_ARRAYSIZE(modeNames))) {
+			CalCtx.viewMode = (CalibrationContext::ViewMode)mode;
+			SaveProfile(CalCtx);
+		}
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Basic: only the essentials.\n"
+			                  "Graphs: live plots so you can see calibration progress over time.\n"
+			                  "Advanced: every knob exposed, including overrides for the AUTO defaults.");
+		}
+	}
 	ImGui::Spacing();
+
+	const auto vm = CalCtx.viewMode;
+	const bool showGraphs = (vm != CalibrationContext::ViewMode::BASIC);
 
 	if (ImGui::BeginTabBar("CCalTabs", 0)) {
 		if (ImGui::BeginTabItem("Status")) {
@@ -413,11 +459,11 @@ void BuildContinuousCalDisplay() {
 			ImGui::EndTabItem();
 		}
 
-		if (ImGui::BeginTabItem("More Graphs")) {
+		if (showGraphs && ImGui::BeginTabItem("More Graphs")) {
 			ShowCalibrationDebug(2, 3);
 			ImGui::EndTabItem();
 		}
-		
+
 		if (ImGui::BeginTabItem("Settings")) {
 			CCal_DrawSettings();
 			ImGui::EndTabItem();
@@ -426,6 +472,16 @@ void BuildContinuousCalDisplay() {
 		if (ImGui::BeginTabItem("Prediction")) {
 			CCal_DrawPredictionSuppression();
 			ImGui::EndTabItem();
+		}
+
+		// Recordings tab: only shown when debug logging is enabled, since the
+		// whole point is to load and replay debug-log files. Gated to ADVANCED
+		// view so the casual user doesn't see it.
+		if (Metrics::enableLogs && vm == CalibrationContext::ViewMode::ADVANCED) {
+			if (ImGui::BeginTabItem("Recordings")) {
+				CCal_DrawRecordingsPanel();
+				ImGui::EndTabItem();
+			}
 		}
 
 		ImGui::EndTabBar();
@@ -549,8 +605,13 @@ void CCal_DrawSettings() {
 
 	// === ADVANCED SETTINGS ==================================================
 	// Behind a CollapsingHeader so they're out of the way for casual use but
-	// still reachable for power users / bug reports.
-	if (ImGui::CollapsingHeader("Advanced settings", CalCtx.showAdvancedSettings ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
+	// still reachable for power users / bug reports. View mode also gates this:
+	// BASIC hides the section entirely, GRAPH shows it collapsed, ADVANCED
+	// shows it expanded by default.
+	const bool inBasicView = CalCtx.viewMode == CalibrationContext::ViewMode::BASIC;
+	const bool inAdvancedView = CalCtx.viewMode == CalibrationContext::ViewMode::ADVANCED;
+	if (!inBasicView && ImGui::CollapsingHeader("Advanced settings",
+		(CalCtx.showAdvancedSettings || inAdvancedView) ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
 		// Persist the open/closed state for the rest of this session. Note: the
 		// tree-node header doesn't itself expose its open state, so we infer it
 		// from "we're inside the if-true branch" — flipping the flag here means
@@ -575,19 +636,61 @@ void CCal_DrawSettings() {
 
 				auto speed = CalCtx.calibrationSpeed;
 
-				ImGui::Columns(3, nullptr, false);
+				ImGui::Columns(4, nullptr, false);
+				if (ImGui::RadioButton(" Auto          ", speed == CalibrationContext::AUTO)) {
+					CalCtx.calibrationSpeed = CalibrationContext::AUTO;
+					SaveProfile(CalCtx);
+				}
+				if (ImGui::IsItemHovered()) {
+					ImGui::SetTooltip("Pick the speed automatically based on observed tracker jitter.\n"
+					                  "Sub-mm jitter -> Fast.  1-5mm -> Slow.  Above 5mm -> Very Slow.\n"
+					                  "Re-evaluates while continuous calibration runs; sticky so it doesn't oscillate.\n"
+					                  "Recommended for everyone except people who want a specific speed for a reason.");
+				}
+				ImGui::NextColumn();
 				if (ImGui::RadioButton(" Fast          ", speed == CalibrationContext::FAST)) {
 					CalCtx.calibrationSpeed = CalibrationContext::FAST;
+					SaveProfile(CalCtx);
+				}
+				if (ImGui::IsItemHovered()) {
+					ImGui::SetTooltip("100-sample buffer. Fastest convergence, most sensitive to noise.\n"
+					                  "Good for clean lighthouse setups.");
 				}
 				ImGui::NextColumn();
 				if (ImGui::RadioButton(" Slow          ", speed == CalibrationContext::SLOW)) {
 					CalCtx.calibrationSpeed = CalibrationContext::SLOW;
+					SaveProfile(CalCtx);
+				}
+				if (ImGui::IsItemHovered()) {
+					ImGui::SetTooltip("250-sample buffer. Smoother result at the cost of slower response.\n"
+					                  "Good for typical mixed setups.");
 				}
 				ImGui::NextColumn();
 				if (ImGui::RadioButton(" Very Slow     ", speed == CalibrationContext::VERY_SLOW)) {
 					CalCtx.calibrationSpeed = CalibrationContext::VERY_SLOW;
+					SaveProfile(CalCtx);
+				}
+				if (ImGui::IsItemHovered()) {
+					ImGui::SetTooltip("500-sample buffer. Maximum smoothing, slowest convergence.\n"
+					                  "For noisy / reflective rooms or drift-prone IMU trackers.");
 				}
 				ImGui::Columns(1);
+
+				// Show the resolved speed when AUTO is on so the user understands
+				// what the program decided. Faded text so it doesn't draw the eye.
+				if (speed == CalibrationContext::AUTO) {
+					const auto resolved = CalCtx.ResolvedCalibrationSpeed();
+					const char* resolvedName =
+						resolved == CalibrationContext::FAST ? "Fast" :
+						resolved == CalibrationContext::SLOW ? "Slow" :
+						resolved == CalibrationContext::VERY_SLOW ? "Very Slow" : "?";
+					ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+					ImGui::Text("    Currently resolved to: %s  (jitter ref %.2f mm, target %.2f mm)",
+					            resolvedName,
+					            Metrics::jitterRef.last() * 1000.0,
+					            Metrics::jitterTarget.last() * 1000.0);
+					ImGui::PopStyleColor();
+				}
 
 				ImGui::EndGroupPanel();
 			}
@@ -776,46 +879,107 @@ inline const char* GetPrettyTrackingSystemName(const std::string& value) {
 void CCal_DrawPredictionSuppression() {
 	auto& ctx = CalCtx;
 
-	// External-tool detection banner. Shown only when something matched the
-	// process scan AND auto-suppress is on (or the user has explicitly disabled
-	// auto-suppress; we show a different message there).
-	if (ctx.externalSmoothingDetected) {
-		const char* tool = ctx.externalSmoothingToolName.empty() ? "an external smoothing tool" : ctx.externalSmoothingToolName.c_str();
-		if (ctx.autoSuppressOnExternalTool) {
-			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.4f, 1.0f));
-			ImGui::TextWrapped(
-				"%s is running. Auto-applying built-in prediction suppression to the calibration "
-				"reference and target trackers so the math stays clean. You can disable %s — this "
-				"fork has the same fix natively (see the per-device list below).",
-				tool, tool);
-			ImGui::PopStyleColor();
+	// === Detection status box =============================================
+	// Always-visible header so the user sees at a glance whether the program
+	// has noticed an external smoothing tool. The previous design buried this
+	// information; users couldn't tell if the program even *knew* OVR-SmoothTracking
+	// was running.
+	{
+		ImVec4 bgColor;
+		ImVec4 textColor = ImVec4(0.95f, 0.95f, 0.95f, 1.0f);
+		const char* statusText = nullptr;
+		const char* tool = ctx.externalSmoothingToolName.empty()
+			? "an external smoothing tool"
+			: ctx.externalSmoothingToolName.c_str();
+		char statusBuf[256];
+
+		if (ctx.externalSmoothingDetected) {
+			snprintf(statusBuf, sizeof statusBuf,
+				"DETECTED: %s is running.", tool);
+			statusText = statusBuf;
+			bgColor = ImVec4(0.55f, 0.40f, 0.10f, 1.0f); // amber
 		} else {
-			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.55f, 1.0f));
-			ImGui::TextWrapped(
-				"%s is running but auto-suppress is off. Calibration math may be disturbed by its "
-				"velocity scaling. Either re-enable auto-suppress, manually pick devices in the list "
-				"below, or stop %s.",
-				tool, tool);
-			ImGui::PopStyleColor();
+			statusText = "No external smoothing tool detected.";
+			bgColor = ImVec4(0.20f, 0.40f, 0.25f, 1.0f); // green
 		}
-		ImGui::Separator();
+
+		const ImVec2 textSize = ImGui::CalcTextSize(statusText);
+		const ImVec2 padding(10.0f, 6.0f);
+		ImVec2 cursor = ImGui::GetCursorScreenPos();
+		ImVec2 rectMin = cursor;
+		ImVec2 rectMax(cursor.x + ImGui::GetContentRegionAvail().x,
+		               cursor.y + textSize.y + padding.y * 2.0f);
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		dl->AddRectFilled(rectMin, rectMax, ImGui::GetColorU32(bgColor), 6.0f);
+		dl->AddText(ImVec2(rectMin.x + padding.x, rectMin.y + padding.y),
+		            ImGui::GetColorU32(textColor), statusText);
+		ImGui::Dummy(ImVec2(0, textSize.y + padding.y * 2.0f));
 	}
 
+	ImGui::Spacing();
 	ImGui::TextWrapped(
-		"Native prediction suppression replaces external tools like OVR-SmoothTracking. When a "
-		"device is enabled below, the SteamVR driver zeroes its velocity/acceleration on every pose "
-		"update — defeating SteamVR's pose extrapolation and any external smoothing tool that "
-		"scales the same fields. Calibration math then sees clean (un-extrapolated) pose data.");
+		"\"Prediction suppression\" zeros the velocity and acceleration fields on a tracker's pose "
+		"update so SteamVR's built-in extrapolation can't push the pose forward in time. Tools like "
+		"OVR-SmoothTracking do the same thing externally. Calibration math wants the raw, unfiltered "
+		"pose — we suppress prediction on the calibration trackers so the math stays clean.");
+	ImGui::Spacing();
+	ImGui::Separator();
 	ImGui::Spacing();
 
-	bool autoSup = ctx.autoSuppressOnExternalTool;
-	if (ImGui::Checkbox("Auto-apply on calibration trackers when an external smoothing tool is detected", &autoSup)) {
-		ctx.autoSuppressOnExternalTool = autoSup;
+	// === Mode selection ===================================================
+	// Make the user's choice explicit. The previous single checkbox buried
+	// the question of "are you using the built-in fix or a 3rd-party tool?".
+	ImGui::TextDisabled("How do you want prediction handled?");
+	ImGui::Spacing();
+
+	// We keep `autoSuppressOnExternalTool` as the underlying flag because
+	// driver code already reads it; the radio just makes the choice obvious.
+	int mode = ctx.autoSuppressOnExternalTool ? 1 : 0;
+	if (ImGui::RadioButton("Built-in only — apply suppression natively to the trackers I pick below", mode == 0)) {
+		mode = 0;
+		ctx.autoSuppressOnExternalTool = false;
 		SaveProfile(ctx);
 	}
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Recommended if you're not running OVR-SmoothTracking or any other smoothing tool.\n"
+		                  "Pick which trackers to suppress in the list at the bottom; the driver applies the\n"
+		                  "fix natively to those devices. Faster than an external tool and one fewer process to\n"
+		                  "manage.");
+	}
+
+	if (ImGui::RadioButton("Auto-suppress when an external smoothing tool is detected", mode == 1)) {
+		mode = 1;
+		ctx.autoSuppressOnExternalTool = true;
+		SaveProfile(ctx);
+	}
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Pick this if you ARE running OVR-SmoothTracking (or similar) and want to keep using it.\n"
+		                  "When an external tool is detected, we automatically apply the built-in fix to your\n"
+		                  "calibration reference and target trackers — that way the math sees clean poses even\n"
+		                  "while the external tool's smoothing applies to other trackers. The two don't conflict;\n"
+		                  "the built-in fix just zeros velocity, which the external tool was going to do anyway.");
+	}
+
+	if (ctx.externalSmoothingDetected && ctx.autoSuppressOnExternalTool) {
+		ImGui::Indent();
+		ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.55f, 1.0f),
+			"%s detected. Built-in fix is auto-applied to calibration trackers.",
+			ctx.externalSmoothingToolName.empty() ? "External tool" : ctx.externalSmoothingToolName.c_str());
+		ImGui::Unindent();
+	} else if (ctx.externalSmoothingDetected && !ctx.autoSuppressOnExternalTool) {
+		ImGui::Indent();
+		ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.55f, 1.0f),
+			"%s is running but auto-suppress is off. Calibration math may be noisy.",
+			ctx.externalSmoothingToolName.empty() ? "An external tool" : ctx.externalSmoothingToolName.c_str());
+		ImGui::Unindent();
+	}
+
 	ImGui::Spacing();
 	ImGui::Separator();
 	ImGui::TextDisabled("Per-device suppression");
+	ImGui::TextWrapped(
+		"Manually toggle which trackers get the built-in suppression applied. Settings stick to a tracker by "
+		"its serial number, so a device that disconnects and reconnects keeps its setting.");
 	ImGui::Spacing();
 
 	// Enumerate currently-known devices. Show a checkbox per device. The
@@ -859,6 +1023,222 @@ void CCal_DrawPredictionSuppression() {
 	}
 	if (!anyShown) {
 		ImGui::TextDisabled("(No tracked devices found.)");
+	}
+}
+
+// === Recordings (debug log replay) ========================================
+// State persists for the lifetime of the process. The recordings list is
+// rebuilt on demand (when the user opens the tab or hits "Refresh"); the
+// loaded recording + last replay result are kept until the user picks a
+// different file or closes the panel.
+namespace {
+
+struct RecordingsPanelState {
+	std::vector<spacecal::replay::LogFileEntry> files;
+	int selectedIdx = -1;
+	bool listBuilt = false;
+	std::string loadError;
+	spacecal::replay::LoadedRecording loaded;
+	bool loadedValid = false;
+	spacecal::replay::ReplayOptions replayOpts;
+	spacecal::replay::ReplayResult lastResult;
+	bool resultPresent = false;
+};
+
+RecordingsPanelState& RecordingsState() {
+	static RecordingsPanelState s;
+	return s;
+}
+
+void RebuildRecordingsList() {
+	auto& s = RecordingsState();
+	s.files = spacecal::replay::ListRecordings();
+	s.listBuilt = true;
+	if (s.selectedIdx >= (int)s.files.size()) s.selectedIdx = -1;
+}
+
+// Format file age relative to "now" using FILETIME math. We don't bother with
+// localized strings — "5 min ago" / "2 hours ago" / "3 days ago" is plenty
+// detail for picking the right recording out of a list.
+std::string FormatFileAge(uint64_t mtimeFt) {
+	FILETIME nowFt{};
+	GetSystemTimeAsFileTime(&nowFt);
+	const uint64_t now = ((uint64_t)nowFt.dwHighDateTime << 32) | nowFt.dwLowDateTime;
+	if (mtimeFt > now) return "in the future"; // clock skew sentinel
+	const uint64_t deltaTicks = now - mtimeFt; // 100-ns ticks
+	const uint64_t deltaSec = deltaTicks / 10'000'000ull;
+	char buf[64];
+	if (deltaSec < 60)             snprintf(buf, sizeof buf, "%llus ago", (unsigned long long)deltaSec);
+	else if (deltaSec < 3600)      snprintf(buf, sizeof buf, "%llum ago", (unsigned long long)(deltaSec / 60));
+	else if (deltaSec < 86400)     snprintf(buf, sizeof buf, "%lluh ago", (unsigned long long)(deltaSec / 3600));
+	else                           snprintf(buf, sizeof buf, "%llud ago", (unsigned long long)(deltaSec / 86400));
+	return buf;
+}
+
+std::string FormatBytesShort(uint64_t n) {
+	char buf[64];
+	if (n >= (1ull << 20)) snprintf(buf, sizeof buf, "%.1f MB", (double)n / (double)(1ull << 20));
+	else if (n >= (1ull << 10)) snprintf(buf, sizeof buf, "%.0f KB", (double)n / (double)(1ull << 10));
+	else snprintf(buf, sizeof buf, "%llu B", (unsigned long long)n);
+	return buf;
+}
+
+} // namespace
+
+static void CCal_DrawRecordingsPanel() {
+	auto& state = RecordingsState();
+
+	ImGui::TextWrapped(
+		"Record a motion sequence by leaving \"Enable debug logs\" on while you reproduce a problem. "
+		"Each session writes a CSV file at\n"
+		"  %%LocalAppDataLow%%\\SpaceCalibrator\\Logs\\spacecal_log.<date>T<time>.txt\n"
+		"Pick one below to replay the captured raw poses through a fresh calibration math instance — "
+		"useful for confirming a fix changes behaviour against the same input.");
+	ImGui::Spacing();
+
+	// Recording status: just reflects the live debug-log toggle. We don't have
+	// a separate "recording" notion; the log file IS the recording.
+	if (Metrics::enableLogs) {
+		ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f),
+			"● Recording: ON  (debug logs being written)");
+	} else {
+		ImGui::TextColored(ImVec4(0.85f, 0.55f, 0.45f, 1.0f),
+			"○ Recording: OFF  (enable \"Enable debug logs\" on the Settings tab to start)");
+	}
+
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::TextDisabled("Available recordings");
+
+	ImGui::SameLine();
+	if (ImGui::SmallButton("Refresh##recordings")) {
+		RebuildRecordingsList();
+	}
+
+	if (!state.listBuilt) RebuildRecordingsList();
+
+	if (state.files.empty()) {
+		ImGui::TextDisabled("(No recordings found in the Logs directory.)");
+	} else {
+		// Compact selectable list. Newest at top (sorted by ListRecordings).
+		const float listHeight = ImGui::GetTextLineHeightWithSpacing() * 6.5f;
+		if (ImGui::BeginChild("##recordings_list",
+				ImVec2(0, listHeight), ImGuiChildFlags_Border)) {
+			for (int i = 0; i < (int)state.files.size(); ++i) {
+				const auto& f = state.files[i];
+				char label[512];
+				snprintf(label, sizeof label, "%s   (%s, %s)",
+					f.name.c_str(),
+					FormatBytesShort(f.sizeBytes).c_str(),
+					FormatFileAge(f.mtimeFileTime).c_str());
+				if (ImGui::Selectable(label, state.selectedIdx == i)) {
+					state.selectedIdx = i;
+					// Reset previous load/replay state so the user sees a clean
+					// "loaded but not yet replayed" view.
+					state.loadError.clear();
+					state.loaded = {};
+					state.loadedValid = false;
+					state.resultPresent = false;
+				}
+			}
+		}
+		ImGui::EndChild();
+	}
+
+	ImGui::Spacing();
+
+	// Action row: Load + Replay buttons, gated on a selection being present.
+	const bool haveSelection = state.selectedIdx >= 0
+		&& state.selectedIdx < (int)state.files.size();
+
+	ImGui::BeginDisabled(!haveSelection);
+	if (ImGui::Button("Load selected##recordings")) {
+		const auto& f = state.files[state.selectedIdx];
+		// Convert wide path to UTF-8 for std::ifstream below.
+		const int n = WideCharToMultiByte(CP_UTF8, 0, f.fullPath.c_str(), -1, nullptr, 0, nullptr, nullptr);
+		std::string utf8Path(n > 1 ? n - 1 : 0, '\0');
+		if (n > 1) WideCharToMultiByte(CP_UTF8, 0, f.fullPath.c_str(), -1, utf8Path.data(), n, nullptr, nullptr);
+		state.loaded = spacecal::replay::LoadRecording(utf8Path);
+		state.loadedValid = state.loaded.error.empty();
+		state.loadError = state.loaded.error;
+		state.resultPresent = false;
+	}
+	ImGui::SameLine();
+	ImGui::BeginDisabled(!state.loadedValid);
+	if (ImGui::Button("Replay##recordings")) {
+		state.lastResult = spacecal::replay::RunReplay(state.loaded, state.replayOpts);
+		state.resultPresent = true;
+	}
+	ImGui::EndDisabled();
+	ImGui::EndDisabled();
+
+	if (!state.loadError.empty()) {
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.55f, 1.0f));
+		ImGui::TextWrapped("Load error: %s", state.loadError.c_str());
+		ImGui::PopStyleColor();
+	}
+
+	if (state.loadedValid) {
+		ImGui::Spacing();
+		ImGui::Separator();
+		ImGui::TextDisabled("Loaded recording");
+		const auto& m = state.loaded.meta;
+		ImGui::Text("Rows:        %d", (int)state.loaded.rows.size());
+		if (!m.buildStamp.empty())  ImGui::Text("Captured by: build %s (%s)",
+			m.buildStamp.c_str(),
+			m.buildChannel.empty() ? "?" : m.buildChannel.c_str());
+		if (!m.hmdModel.empty())    ImGui::Text("HMD:         %s [%s]",
+			m.hmdModel.c_str(),
+			m.hmdTrackingSystem.empty() ? "?" : m.hmdTrackingSystem.c_str());
+		if (!m.windowsVersion.empty()) ImGui::Text("OS:          Windows %s", m.windowsVersion.c_str());
+
+		ImGui::Spacing();
+		ImGui::Separator();
+		ImGui::TextDisabled("Replay options");
+		// SliderFloat takes float& but ReplayOptions stores double for API symmetry with
+		// the live calibration knobs; bounce through float locals.
+		float thr = (float)state.replayOpts.threshold;
+		if (ImGui::SliderFloat("Recalibration threshold", &thr, 1.01f, 10.0f, "%1.2f")) {
+			state.replayOpts.threshold = thr;
+		}
+		float maxRel = (float)state.replayOpts.maxRelError;
+		if (ImGui::SliderFloat("Max rel-pose error (m)", &maxRel, 0.001f, 0.05f, "%1.4f")) {
+			state.replayOpts.maxRelError = maxRel;
+		}
+		ImGui::Checkbox("Continuous mode (vs. one-shot)", &state.replayOpts.continuous);
+		ImGui::Checkbox("Ignore outliers", &state.replayOpts.ignoreOutliers);
+	}
+
+	if (state.resultPresent) {
+		ImGui::Spacing();
+		ImGui::Separator();
+		ImGui::TextDisabled("Replay result");
+
+		const auto& r = state.lastResult;
+		if (!r.error.empty()) {
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.55f, 1.0f));
+			ImGui::TextWrapped("%s", r.error.c_str());
+			ImGui::PopStyleColor();
+		} else {
+			ImGui::Text("Rows replayed:    %d", r.rowsReplayed);
+			if (state.replayOpts.continuous) {
+				ImGui::Text("Accepts:          %d", r.accepts);
+				ImGui::Text("Rejects:          %d", r.rejects);
+			}
+			ImGui::Text("Watchdog resets:  %d", r.watchdogResets);
+
+			if (r.finalTransformValid) {
+				const auto t = r.finalTransform.translation();
+				const auto eul = r.finalTransform.rotation().eulerAngles(2, 1, 0) * (180.0 / EIGEN_PI);
+				ImGui::Text("Final translation (m):   x=%.4f  y=%.4f  z=%.4f", t.x(), t.y(), t.z());
+				ImGui::Text("Final rotation ZYX (deg): yaw=%.3f  pitch=%.3f  roll=%.3f",
+					eul.x(), eul.y(), eul.z());
+				ImGui::Text("Final RMS error:  %.3f mm", r.finalErrorMm);
+			} else {
+				ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.45f, 1.0f),
+					"No valid calibration produced from this replay.");
+			}
+		}
 	}
 }
 
@@ -962,6 +1342,13 @@ void CCal_BasicInfo() {
 			ImGui::TextDisabled("Watchdog resets: %d (last: %.0fs ago)", wdResets,
 			                    s_lastWatchdogResetTime > 0.0 ? (now - s_lastWatchdogResetTime) : 0.0);
 		}
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Stuck-loop watchdog: fires when continuous calibration has been rejecting every new\n"
+			                  "sample for ~25 seconds. When it fires, the current estimate is discarded and\n"
+			                  "we recollect from scratch. A high count here usually means motion conditioning is\n"
+			                  "poor (move slower, rotate around more axes) or trackers are drifting against each\n"
+			                  "other faster than the solver can keep up.");
+		}
 
 		const bool stallRecent = s_stallPurgeCount > 0 && (now - s_lastStallPurgeTime) < 15.0;
 		if (stallRecent) {
@@ -974,6 +1361,12 @@ void CCal_BasicInfo() {
 		} else {
 			ImGui::TextDisabled("HMD-stall purges: %d (last: %.0fs ago)", s_stallPurgeCount,
 			                    now - s_lastStallPurgeTime);
+		}
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("HMD-stall purge: fires when the headset stops reporting fresh poses for ~1.5 seconds\n"
+			                  "(SteamVR hiccup, tracking loss, sleep-wake). The sample buffer is purged because the\n"
+			                  "stale samples around the stall are unreliable. Normal during a brief tracking glitch;\n"
+			                  "frequent stalls suggest a tracking-environment problem (lighting, USB bandwidth, etc).");
 		}
 		ImGui::Separator();
 	}
@@ -1033,15 +1426,19 @@ void CCal_BasicInfo() {
 
 	float width = ImGui::GetWindowContentRegionWidth(), scale = 1.0f;
 
-	// Recovery affordances. Two columns of user-facing buttons (Cancel +
-	// Restart sampling), plus an inline Pause toggle and an optional
-	// Mark-logs column when debug logs are on.
-	const int columns = Metrics::enableLogs ? 4 : 3;
-	if (ImGui::BeginTable("##CCal_Cancel", columns, 0, ImVec2(width * scale, ImGui::GetTextLineHeight() * 2))) {
+	// Recovery affordances: Cancel, Restart sampling, Pause. The old
+	// "Debug: Mark logs" debug button was removed — annotations are written
+	// automatically when the watchdog fires or the user presses the
+	// recalibrate buttons; that's enough to grep the log.
+	if (ImGui::BeginTable("##CCal_Cancel", 3, 0, ImVec2(width * scale, ImGui::GetTextLineHeight() * 2))) {
 		ImGui::TableNextRow();
 		ImGui::TableSetColumnIndex(0);
 		if (ImGui::Button("Cancel Continuous Calibration", ImVec2(-FLT_MIN, 0.0f))) {
 			EndContinuousCalibration();
+		}
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Stop continuous calibration. The last applied offset stays in place\n"
+			                  "as a fixed offset until you start calibration again.");
 		}
 
 		ImGui::TableSetColumnIndex(1);
@@ -1053,7 +1450,8 @@ void CCal_BasicInfo() {
 			DebugApplyRandomOffset();
 		}
 		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("Discards the current incremental estimate and forces continuous calibration to recollect samples from scratch.");
+			ImGui::SetTooltip("Discards the current incremental estimate and forces continuous calibration to recollect samples from scratch.\n"
+			                  "Use this if the calibration looks off and you want a fresh search instead of nudging from the current estimate.");
 		}
 
 		ImGui::TableSetColumnIndex(2);
@@ -1078,26 +1476,50 @@ void CCal_BasicInfo() {
 			                  "Useful when something looks momentarily wrong and you want to investigate before the solver self-corrects.");
 		}
 
-		if (Metrics::enableLogs) {
-			ImGui::TableSetColumnIndex(3);
-			if (ImGui::Button("Debug: Mark logs", ImVec2(-FLT_MIN, 0.0f))) {
-				Metrics::WriteLogAnnotation("MARK LOGS");
-			}
-		}
-
 		ImGui::EndTable();
 	}
 
 	ImGui::Checkbox("Hide tracker", &CalCtx.quashTargetInContinuous);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Suppress the target tracker's pose in OpenVR while continuous calibration runs.\n"
+		                  "Use when the target tracker would otherwise show up as a duplicate of the reference\n"
+		                  "(e.g. taping a Vive tracker to a Quest controller for calibration).");
+	}
 	ImGui::SameLine();
 	ImGui::Checkbox("Static recalibration", &CalCtx.enableStaticRecalibration);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Use the locked reference->target relative pose for fast \"snap-back\" corrections.\n"
+		                  "When the live solver's estimate diverges noticeably from the locked relative pose,\n"
+		                  "we snap to the locked solution instead of waiting for incremental convergence.");
+	}
 	ImGui::SameLine();
 	ImGui::Checkbox("Enable debug logs", &Metrics::enableLogs);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Write a per-tick CSV log of calibration state to\n"
+		                  "%%LocalAppDataLow%%\\SpaceCalibrator\\Logs\\spacecal_log.<date>.txt\n"
+		                  "Useful for bug reports. Costs a tiny amount of disk I/O per tick; safe to leave on.");
+	}
 	ImGui::SameLine();
 	ImGui::Checkbox("Lock relative transform", &CalCtx.lockRelativePosition);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Freeze the calibrated relative pose between reference and target devices.\n"
+		                  "When on, continuous calibration only updates the world-anchor frame, not the\n"
+		                  "relationship between the two trackers — useful when the target is rigidly\n"
+		                  "attached to the reference (e.g. Vive tracker on a Quest controller).");
+	}
 	ImGui::SameLine();
 	ImGui::Checkbox("Require triggers", &CalCtx.requireTriggerPressToApply);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Only apply the calibrated offset to tracked devices while a controller trigger is held.\n"
+		                  "Useful for sanity-checking a fresh calibration before committing — release the trigger to\n"
+		                  "see raw poses, hold to see calibrated poses.");
+	}
 	ImGui::Checkbox("Ignore outliers", &CalCtx.ignoreOutliers);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Drop sample pairs whose rotation axis disagrees with the consensus before the LS solve.\n"
+		                  "Default on. Turn off only if you suspect the outlier rejector is throwing out good samples\n"
+		                  "(e.g. the user is doing genuinely jittery motion that the cosine-similarity test mistakes for outliers).");
+	}
 
 	// Status field...
 
@@ -1231,20 +1653,35 @@ void BuildMenu(bool runningInOverlay)
 		ImGui::Text("");
 		auto speed = CalCtx.calibrationSpeed;
 
-		ImGui::Columns(4, nullptr, false);
+		ImGui::Columns(5, nullptr, false);
 		ImGui::Text("Calibration Speed");
 
 		ImGui::NextColumn();
-		if (ImGui::RadioButton(" Fast          ", speed == CalibrationContext::FAST))
+		if (ImGui::RadioButton(" Auto          ", speed == CalibrationContext::AUTO)) {
+			CalCtx.calibrationSpeed = CalibrationContext::AUTO;
+			SaveProfile(CalCtx);
+		}
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Pick automatically from observed jitter. Recommended.");
+		}
+
+		ImGui::NextColumn();
+		if (ImGui::RadioButton(" Fast          ", speed == CalibrationContext::FAST)) {
 			CalCtx.calibrationSpeed = CalibrationContext::FAST;
+			SaveProfile(CalCtx);
+		}
 
 		ImGui::NextColumn();
-		if (ImGui::RadioButton(" Slow          ", speed == CalibrationContext::SLOW))
+		if (ImGui::RadioButton(" Slow          ", speed == CalibrationContext::SLOW)) {
 			CalCtx.calibrationSpeed = CalibrationContext::SLOW;
+			SaveProfile(CalCtx);
+		}
 
 		ImGui::NextColumn();
-		if (ImGui::RadioButton(" Very Slow     ", speed == CalibrationContext::VERY_SLOW))
+		if (ImGui::RadioButton(" Very Slow     ", speed == CalibrationContext::VERY_SLOW)) {
 			CalCtx.calibrationSpeed = CalibrationContext::VERY_SLOW;
+			SaveProfile(CalCtx);
+		}
 
 		ImGui::Columns(1);
 	}

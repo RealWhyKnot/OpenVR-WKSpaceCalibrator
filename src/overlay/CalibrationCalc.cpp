@@ -656,65 +656,47 @@ double CalibrationCalc::RetargetingErrorRMS(
 	return sqrt(errorAccum / sampleCount);
 }
 
-double CalibrationCalc::ReferenceJitter() const {
-	Eigen::Vector3d m_oldM, m_newM, m_oldS, m_newS;
-	int sampleCount = 0;
+// Welford's online algorithm for the position-jitter standard deviation across
+// the current sample buffer. Returns the magnitude of the per-axis std-dev
+// vector, in meters. Used as the per-tracker noise floor that informs the
+// rejection threshold and the auto-calibration-speed heuristic.
+//
+// Bug fixed 2026-04-28: the original implementation divided by `sampleCount`
+// (the count BEFORE the current sample was added) instead of `sampleCount + 1`
+// (Welford's k). Off-by-one in the mean update inflated the variance by a
+// factor of ~2x at small N and asymptotically less. Symptom: jitter values in
+// the debug log were reading ~2 km instead of a few cm.
+static double WelfordStdMagnitude(const std::deque<Sample>& samples,
+                                  bool useTarget) {
+	Eigen::Vector3d mean = Eigen::Vector3d::Zero();
+	Eigen::Vector3d M2 = Eigen::Vector3d::Zero();
+	int n = 0;
 
-	for (auto& sample : m_samples) {
+	for (const auto& sample : samples) {
 		if (!sample.valid) continue;
-
-		if (sampleCount == 0) {
-			m_oldM = m_newM = sample.ref.trans;
-			m_oldS = Eigen::Vector3d();
-		} else {
-			m_newM = m_oldM + (sample.ref.trans - m_oldM) / sampleCount;
-			m_newS = m_oldS + (sample.ref.trans - m_oldM).cwiseProduct(sample.ref.trans - m_newM);
-
-			// set up for next iteration
-			m_oldM = m_newM;
-			m_oldS = m_newS;
-		}
-
-		sampleCount++;
+		const Eigen::Vector3d& x = useTarget ? sample.target.trans : sample.ref.trans;
+		++n;
+		// Welford's recurrence: divide by k (the new count, including this sample).
+		const Eigen::Vector3d delta = x - mean;
+		mean += delta / static_cast<double>(n);
+		const Eigen::Vector3d delta2 = x - mean;
+		M2 += delta.cwiseProduct(delta2);
 	}
 
-	double var_x = sqrt(((sampleCount > 1) ? m_newS.x() / (sampleCount - 1) : 0.0));
-	double var_y = sqrt(((sampleCount > 1) ? m_newS.y() / (sampleCount - 1) : 0.0));
-	double var_z = sqrt(((sampleCount > 1) ? m_newS.z() / (sampleCount - 1) : 0.0));
+	if (n < 2) return 0.0;
+	const Eigen::Vector3d var = M2 / static_cast<double>(n - 1);
+	const double sx = std::sqrt(std::abs(var.x()));
+	const double sy = std::sqrt(std::abs(var.y()));
+	const double sz = std::sqrt(std::abs(var.z()));
+	return std::sqrt(sx * sx + sy * sy + sz * sz);
+}
 
-	// Take magnitude of standard deviation vector
-	return sqrt(var_x * var_x + var_y * var_y + var_z * var_z);
+double CalibrationCalc::ReferenceJitter() const {
+	return WelfordStdMagnitude(m_samples, /*useTarget=*/false);
 }
 
 double CalibrationCalc::TargetJitter() const {
-	Eigen::Vector3d m_oldM, m_newM, m_oldS, m_newS;
-	int sampleCount = 0;
-
-	for (auto& sample : m_samples) {
-		if (!sample.valid) continue;
-
-		if (sampleCount == 0) {
-			m_oldM = m_newM = sample.target.trans;
-			m_oldS = Eigen::Vector3d();
-		}
-		else {
-			m_newM = m_oldM + (sample.target.trans - m_oldM) / sampleCount;
-			m_newS = m_oldS + (sample.target.trans - m_oldM).cwiseProduct(sample.target.trans - m_newM);
-
-			// set up for next iteration
-			m_oldM = m_newM;
-			m_oldS = m_newS;
-		}
-
-		sampleCount++;
-	}
-
-	double var_x = sqrt(((sampleCount > 1) ? std::abs(m_newS.x() / (sampleCount - 1)) : 0.0));
-	double var_y = sqrt(((sampleCount > 1) ? std::abs(m_newS.y() / (sampleCount - 1)) : 0.0));
-	double var_z = sqrt(((sampleCount > 1) ? std::abs(m_newS.z() / (sampleCount - 1)) : 0.0));
-
-	// Take magnitude of standard deviation vector
-	return sqrt(var_x * var_x + var_y * var_y + var_z * var_z);
+	return WelfordStdMagnitude(m_samples, /*useTarget=*/true);
 }
 
 Eigen::Vector3d CalibrationCalc::ComputeRefToTargetOffset(const Eigen::AffineCompact3d& calibration) const {
@@ -990,10 +972,11 @@ bool CalibrationCalc::ComputeOneshot(const bool ignoreOutliers) {
 		else if (newVariance < AxisVarianceThreshold) {
 			CalCtx.Log("Not updating: rotation single-axis (move tracker through more orientations)\n");
 		}
-		else if (m_rotationConditionRatio > 0.0 && m_rotationConditionRatio < RotationConditionMin) {
+		else if (m_rotationConditionRatio < RotationConditionMin) {
+			// Catch-all for both empty-deltas (ratio == 0) and ill-conditioned (small but nonzero).
 			CalCtx.Log("Not updating: motion too planar (rotate around more axes)\n");
 		}
-		else if (m_translationConditionRatio > 0.0 && m_translationConditionRatio < RotationConditionMin) {
+		else if (m_translationConditionRatio < RotationConditionMin) {
 			CalCtx.Log("Translation conditioning poor — need more diverse motion\n");
 		}
 		else {
@@ -1042,6 +1025,12 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 			return true;
 		}
 	}
+
+	// Push debugging counters every tick so the CSV row is self-describing
+	// without having to chase down annotation-line context. samplesInBuffer
+	// is the deque size at compute time; watchdogResetCount is monotonic.
+	Metrics::samplesInBuffer.Push((double)m_samples.size());
+	Metrics::watchdogResetCount.Push((double)m_watchdogResets);
 
 	double priorCalibrationError = INFINITY;
 	Eigen::Vector3d priorPosOffset;
@@ -1096,29 +1085,52 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 		if (newVariance < AxisVarianceThreshold && newVariance < m_axisVariance) {
 			newCalibrationValid = false;
 			shouldRapidCorrect = false;
-		} else if (m_rotationConditionRatio > 0.0 && m_rotationConditionRatio < RotationConditionMin) {
-			// Degenerate motion: insufficient yaw-plane axis spread. Don't update
-			// rotation; keep the prior calibration (if any). Allow rapid-correct via
-			// relative pose since that path doesn't depend on this conditioning.
+			m_rejectReasonTag = "axis_variance_low";
+		} else if (m_rotationConditionRatio < RotationConditionMin) {
+			// Degenerate motion guard. ComputeCalibration above always updates
+			// m_rotationConditionRatio for THIS tick — either to a real ratio when
+			// the SVD ran, or to 0.0 when CalibrateRotation hit the empty-deltas
+			// early return (no pair of samples with >23deg of rotation between
+			// them). The previous gate was `> 0.0 && < RotationConditionMin`
+			// which inadvertently SKIPPED itself in the empty-deltas case — i.e.
+			// the worst possible conditioning silently passed. Let the gate trip
+			// uniformly: any ratio below threshold (including exactly zero) means
+			// the rotation solve is untrustworthy this tick.
 			CalCtx.Log("Not updating: motion too planar (rotate around more axes)\n");
 			newCalibrationValid = false;
-		} else if (m_translationConditionRatio > 0.0 && m_translationConditionRatio < RotationConditionMin) {
-			// Item #6: translation LS condition guard. Mirrors the rotation
-			// guard above — if the LS coefficient matrix is rank-deficient
-			// (user moved through too few independent translation directions)
-			// the result is dominated by noise. Don't trust it.
+			m_rejectReasonTag = m_rotationConditionRatio == 0.0
+				? "rotation_no_deltas"
+				: "rotation_planar";
+		} else if (m_translationConditionRatio < RotationConditionMin) {
+			// Mirror of the rotation guard. Same rationale — if the QR solve was
+			// rank-deficient (or empty), don't trust the translation. Including
+			// the explicit-zero case so empty-deltas doesn't bypass the gate.
 			CalCtx.Log("Translation conditioning poor — need more diverse motion\n");
 			newCalibrationValid = false;
+			m_rejectReasonTag = m_translationConditionRatio == 0.0
+				? "translation_no_deltas"
+				: "translation_planar";
 		} else {
 			newCalibrationValid = ValidateCalibration(calibration, &newError, &m_posOffset);
 			Metrics::posOffset_rawComputed.Push(m_posOffset * 1000);
+			if (!newCalibrationValid) m_rejectReasonTag = "validate_failed";
 		}
 
 		if (m_isValid) {
-			if (priorCalibrationError < newError * threshold) {
-				// If we have a more noisy calibration than before, avoid updating.
+			// Reject the new estimate if it's worse than what we already have, BUT
+			// floor the comparison: once the prior is sub-mm, the gate `prior < new
+			// * 1.5` becomes "new must be < prior/1.5" — i.e. better than tracker
+			// jitter floor, which no honest sample can clear. Symptom in v2026.4.28.x
+			// logs: error_currentCal converges to ~0.6mm, then every subsequent
+			// sample is rejected, the stuck-loop watchdog spurious-fires every ~25s,
+			// and the post-clear recompute often produces garbage. Floor at
+			// kRejectionFloor — anything tighter than that is noise, not signal.
+			constexpr double kRejectionFloor = 0.005; // 5 mm
+			const double effectivePrior = std::max(priorCalibrationError, kRejectionFloor);
+			if (effectivePrior < newError * threshold) {
 				newCalibrationValid = false;
 				shouldRapidCorrect = false;
+				m_rejectReasonTag = "below_floor_or_worse";
 			}
 		}
 
@@ -1201,6 +1213,9 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 
 		m_consecutiveRejections = 0;
 		m_lastSuccessfulIncrementalTime = m_lastSampleTime;
+		m_rejectReasonTag.clear();
+		Metrics::lastRejectReason.clear();
+		m_healthyHoldAnnotated = false;
 
 		return true;
 	}
@@ -1210,18 +1225,53 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 		// bad fixpoint that the 1.5x threshold gate is preventing us from leaving.
 		// After enough consecutive rejections, demote to invalid + clear samples so
 		// the overlay drops to ContinuousStandby and re-acquires from scratch.
+		//
+		// Health gate: don't fire when the prior calibration is already excellent.
+		// A sub-cm prior with low live residual means rejection is the *correct*
+		// behavior (new samples can't honestly improve it), not a stuck loop. Only
+		// the combination of high prior error + sustained rejection signals a bad
+		// fixpoint. Empirically tuned to skip the watchdog when error_currentCal is
+		// already comfortably under the user-tolerable threshold (~10 mm).
 		m_consecutiveRejections++;
 		const int MaxConsecutiveRejections = 50; // ~25s at the post-buffer-fill cadence
+		constexpr double kHealthyPriorErrorMax = 0.010; // 10 mm
 
 		Metrics::consecutiveRejections.Push((double)m_consecutiveRejections);
+		// Mirror the per-rejection tag into the metrics namespace so
+		// WriteLogEntry's reject_reason column is filled this tick.
+		Metrics::lastRejectReason = m_rejectReasonTag;
+
+		const bool calibrationHealthy =
+			m_isValid && priorCalibrationError < kHealthyPriorErrorMax;
 
 		if (m_isValid && m_consecutiveRejections >= MaxConsecutiveRejections) {
-			CalCtx.Log("Continuous calibration appears stuck — recollecting samples\n");
-			Metrics::WriteLogAnnotation("watchdog: continuous calibration stuck, clearing");
-			m_isValid = false;
-			m_watchdogResets++;
-			Clear();
-			// Clear() resets m_consecutiveRejections; ensure we don't immediately retrigger.
+			if (calibrationHealthy) {
+				// Don't blow up a perfectly good calibration; just stop incrementing
+				// the rejection counter so we don't oscillate at the threshold.
+				// Annotate ONCE per "healthy hold" run — we set a flag the first
+				// time and clear it on accept. Without the flag, every tick at the
+				// boundary would print this and the log would be noise.
+				if (!m_healthyHoldAnnotated) {
+					char buf[160];
+					snprintf(buf, sizeof buf,
+					         "watchdog_skipped: prior_error=%.2fmm — calibration healthy, rejecting noise",
+					         priorCalibrationError * 1000.0);
+					Metrics::WriteLogAnnotation(buf);
+					m_healthyHoldAnnotated = true;
+				}
+				m_consecutiveRejections = MaxConsecutiveRejections - 5;
+				m_rejectReasonTag = "healthy_below_floor";
+			} else {
+				CalCtx.Log("Continuous calibration appears stuck — recollecting samples\n");
+				Metrics::WriteLogAnnotation("watchdog: continuous calibration stuck, clearing");
+				m_isValid = false;
+				m_watchdogResets++;
+				Clear();
+				// Clear() drops m_samples, resets m_consecutiveRejections, and zeroes
+				// m_estimatedTransformation — see CalibrationCalc.cpp:118. Sample
+				// buffer purge is essential: the stale samples that drove the
+				// rejection are exactly what would re-feed a bad fixpoint on retry.
+			}
 		}
 
 		return false;

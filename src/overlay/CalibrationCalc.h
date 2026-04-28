@@ -2,6 +2,7 @@
 
 #include <Eigen/Dense>
 #include <openvr.h>
+#include <string>
 #include <vector>
 #include <deque>
 #include <iostream>
@@ -131,6 +132,21 @@ public:
 	double m_lastSampleTime = 0.0;
 	int m_watchdogResets = 0;
 
+	// Short tag describing why the most recent ComputeIncremental rejected (or
+	// "" if the last call accepted). Surfaced in the debug log so a stuck-loop
+	// row can be traced back to the gate that tripped: "below_floor_or_worse",
+	// "axis_variance_low", "rotation_planar", "translation_planar",
+	// "rms_above_gate", "healthy_below_floor", "validate_failed".
+	// Distinct from the older enum-typed `m_lastRejectReason` further down,
+	// which tracks ValidateCalibration's RMS-gate decisions specifically.
+	std::string m_rejectReasonTag;
+
+	// Latch that prevents the "watchdog_skipped: ... healthy" annotation from
+	// repeating on every tick once the healthy-skip path has fired. Cleared on
+	// the next successful accept so a subsequent fresh stuck-run still gets one
+	// annotation. Strictly diagnostic; doesn't affect math.
+	bool m_healthyHoldAnnotated = false;
+
 private:
 	bool m_isValid;
 	Eigen::AffineCompact3d m_estimatedTransformation;
@@ -206,9 +222,14 @@ private:
 
 	Eigen::Vector4d ComputeAxisVariance(const Eigen::AffineCompact3d& calibration) const;
 
-	[[nodiscard]] bool ValidateCalibration(const Eigen::AffineCompact3d& calibration, double *errorOut = nullptr, Eigen::Vector3d* posOffsetV = nullptr);
 	void ComputeInstantOffset();
 
 	Eigen::AffineCompact3d EstimateRefToTargetPose(const Eigen::AffineCompact3d& calibration) const;
 	bool CalibrateByRelPose(Eigen::AffineCompact3d &out) const;
+
+public:
+	// Hoisted to public so the in-app replay panel + the standalone replay
+	// CLI can score arbitrary candidate transforms against the current sample
+	// buffer without needing to call the private ComputeIncremental flow.
+	[[nodiscard]] bool ValidateCalibration(const Eigen::AffineCompact3d& calibration, double *errorOut = nullptr, Eigen::Vector3d* posOffsetV = nullptr);
 };

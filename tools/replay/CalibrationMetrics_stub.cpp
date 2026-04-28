@@ -42,6 +42,13 @@ namespace Metrics {
 	TimeSeries<double> jitterRef, jitterTarget;
 	TimeSeries<double> rotationConditionRatio;
 	TimeSeries<double> consecutiveRejections;
+	TimeSeries<double> samplesInBuffer;
+	TimeSeries<double> watchdogResetCount;
+	std::string lastRejectReason;
+
+	// Driver-side apply-rate counters. Not used by the offline replay tool but
+	// CalibrationCalc.cpp doesn't reference them; leave them out unless a future
+	// CalibrationCalc change needs them.
 
 	TimeSeries<bool> calibrationApplied;
 

@@ -37,6 +37,20 @@ struct CalibrationContext
 
 	StandbyDevice targetStandby, referenceStandby;
 
+	// UI density preference. BASIC hides graphs and most knobs (best for casual
+	// use), GRAPH adds the live plots and a few common knobs (default — gives
+	// you enough info to triage drift visually), ADVANCED exposes every tunable
+	// and lets the user override AUTO-driven decisions. Stored in CalibrationContext
+	// rather than a separate prefs blob because everything else profile-related
+	// already lives here, and the choice is per-user not per-profile in spirit
+	// — but persisting per-profile is harmless and avoids a second config file.
+	enum class ViewMode {
+		BASIC = 0,
+		GRAPH = 1,
+		ADVANCED = 2,
+	};
+	ViewMode viewMode = ViewMode::GRAPH;
+
 	Eigen::Vector3d calibratedRotation;
 	Eigen::Vector3d calibratedTranslation;
 	double calibratedScale;
@@ -157,9 +171,13 @@ struct CalibrationContext
 	{
 		FAST = 0,
 		SLOW = 1,
-		VERY_SLOW = 2
+		VERY_SLOW = 2,
+		// Picks one of the above each tick based on observed reference+target jitter.
+		// Lets a casual user not have to think about it: the program watches its own
+		// noise floor and slows the calibration down when conditions are bad.
+		AUTO = 3,
 	};
-	Speed calibrationSpeed = FAST;
+	Speed calibrationSpeed = AUTO;
 
 	vr::DriverPose_t devicePoses[vr::k_unMaxTrackedDeviceCount];
 
@@ -257,9 +275,20 @@ struct CalibrationContext
 		relativePosCalibrated = false;
 	}
 
+	// Resolve the user's selected speed to a concrete FAST/SLOW/VERY_SLOW. When
+	// the user picks AUTO, we look at the recent observed jitter on both
+	// reference and target trackers and pick the buffer size that matches:
+	//   - clean trackers (sub-mm jitter) get FAST so calibration converges quickly
+	//   - typical setups (1-5mm) get SLOW
+	//   - noisy / reflective rooms / drifty IMU (>5mm) get VERY_SLOW
+	// This is sticky-by-default: we only re-evaluate every few seconds and
+	// require the new bucket to have been right for a while before switching,
+	// so the buffer size doesn't oscillate during transient noise.
+	Speed ResolvedCalibrationSpeed() const;
+
 	size_t SampleCount()
 	{
-		switch (calibrationSpeed)
+		switch (ResolvedCalibrationSpeed())
 		{
 		case FAST:
 			return 100;
@@ -267,8 +296,9 @@ struct CalibrationContext
 			return 250;
 		case VERY_SLOW:
 			return 500;
+		default:
+			return 100;
 		}
-		return 100;
 	}
 
 	struct Message

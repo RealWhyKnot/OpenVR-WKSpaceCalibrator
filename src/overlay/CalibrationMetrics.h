@@ -1,6 +1,7 @@
 #pragma once
 
 #include <deque>
+#include <string>
 #include <utility>
 #include <Eigen/Dense>
 
@@ -20,8 +21,15 @@ namespace Metrics {
 		void Push(const T& data) {
 			Data.push_back(std::make_pair(CurrentTime, data));
 
-			double cutoff = CurrentTime - TimeSpan;
-			while (!Data.empty() && (Data.front().first < cutoff || Data.size() > INT_MAX)) {
+			// Time-based cutoff: drop anything older than `TimeSpan` seconds.
+			// Defensive size cap (kMaxPoints): if CurrentTime stalls or rolls
+			// backward (clock change, replay tool quirks, NaN propagation) the
+			// time-based loop won't bound the deque. 4096 points at 60Hz is
+			// ~68 seconds — plenty of headroom over the 30s default TimeSpan
+			// without letting growth run away if something goes wrong upstream.
+			constexpr size_t kMaxPoints = 4096;
+			const double cutoff = CurrentTime - TimeSpan;
+			while (!Data.empty() && (Data.front().first < cutoff || Data.size() > kMaxPoints)) {
 				Data.pop_front();
 			}
 		}
@@ -57,6 +65,23 @@ namespace Metrics {
 	// Running count of ComputeIncremental rejections since the last successful
 	// accept. The stuck-loop watchdog fires when this exceeds its threshold.
 	extern TimeSeries<double> consecutiveRejections;
+
+	// Number of pose samples currently in CalibrationCalc's deque. Helps debug
+	// the post-watchdog "garbage" failure mode where Clear() drops the buffer
+	// and a recompute fires before enough fresh samples have accumulated. Also
+	// lets you correlate "calibration looked good then went off" against a
+	// specific buffer churn event.
+	extern TimeSeries<double> samplesInBuffer;
+
+	// Cumulative count of stuck-loop watchdog firings. Logged as a per-row
+	// number so you can grep the CSV for the row index where a fire happened
+	// even after the # annotation lines are stripped.
+	extern TimeSeries<double> watchdogResetCount;
+
+	// Reason the most recent ComputeIncremental rejected, written as a tag
+	// string into the "reject_reason" column. Empty when the last call
+	// accepted. See CalibrationCalc::m_lastRejectReason for the tag set.
+	extern std::string lastRejectReason;
 
 	// Driver-side apply rates (Hz) sampled from the shared-memory telemetry
 	// counters. Each tick we read the cumulative counter and push the delta

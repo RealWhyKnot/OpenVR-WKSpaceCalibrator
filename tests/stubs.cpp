@@ -44,6 +44,9 @@ namespace Metrics {
     TimeSeries<double> jitterTarget;
     TimeSeries<double> rotationConditionRatio;
     TimeSeries<double> consecutiveRejections;
+    TimeSeries<double> samplesInBuffer;
+    TimeSeries<double> watchdogResetCount;
+    std::string lastRejectReason;
 
     TimeSeries<bool> calibrationApplied;
 
