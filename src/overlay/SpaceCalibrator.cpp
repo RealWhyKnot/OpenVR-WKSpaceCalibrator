@@ -572,7 +572,10 @@ void VerifySetupCorrect() {
 		char* lastSlash = strrchr(manifestPathBuffer, '\\');
 		if (lastSlash) {
 			*(lastSlash + 1) = '\0';
-			strcat(manifestPathBuffer, newFileName);
+			// strcat_s instead of strcat — silences MSVC C4996 deprecation and
+			// hard-fails (instead of buffer-overflowing) on the off chance
+			// SteamVR ever returns a path that uses every byte of the buffer.
+			strcat_s(manifestPathBuffer, sizeof manifestPathBuffer, newFileName);
 		}
 
 		appErr = vr::VRApplications()->RemoveApplicationManifest(manifestPathBuffer);

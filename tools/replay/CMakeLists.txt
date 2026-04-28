@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.15)
 
 # Offline replay harness for spacecal_log_v2 captures. Links directly against
 # CalibrationCalc.cpp so we re-run the production math against captured raw

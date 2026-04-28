@@ -134,16 +134,19 @@ jobs:
           $installer  = "${{ steps.installer.outputs.path }}"
           $instSha    = "${{ steps.installer.outputs.sha256 }}"
           $instName   = "${{ steps.installer.outputs.name }}"
+          # PowerShell variable-with-colon trap: `$instName:` parses as a
+          # scoped-variable prefix (`$scope:name`) and aborts the here-string.
+          # Use `${instName}` etc. to delimit the variable name explicitly.
           $notes  = @"
           ## OpenVR-SpaceCalibrator $tag
 
           Two download options:
 
-          - **$instName** — guided installer. Run it; it places the overlay and the SteamVR driver in the right places automatically.
-          - **$zipName** — drop-in zip. Extract anywhere, copy the ``driver_01spacecalibrator/`` folder into ``<Steam>\steamapps\common\SteamVR\drivers\``, and run ``SpaceCalibrator.exe`` from wherever you put it.
+          - **${instName}** — guided installer. Run it; it places the overlay and the SteamVR driver in the right places automatically.
+          - **${zipName}** — drop-in zip. Extract anywhere, copy the ``driver_01spacecalibrator/`` folder into ``<Steam>\steamapps\common\SteamVR\drivers\``, and run ``SpaceCalibrator.exe`` from wherever you put it.
 
           SHA256:
-          - $instName: ``$instSha``
-          - $zipName: ``$zipSha``
+          - ${instName}: ``${instSha}``
+          - ${zipName}: ``${zipSha}``
           "@
           gh release create $tag $zip $installer --title $tag --notes $notes

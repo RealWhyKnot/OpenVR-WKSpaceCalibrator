@@ -118,7 +118,9 @@ if (-not $SkipConfigure) {
         # on the dot in some non-interactive environments — cmake then sees `3` and `.5` as
         # separate args, and the policy override is silently dropped. Pass it as a single
         # quoted token to keep PS from helpful tokenisation.
-        & cmake -G "Visual Studio 17 2022" -A x64 -B bin -S . "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+        # -Wno-dev suppresses developer-mode warnings from the minhook submodule and from
+        # GoogleTest's FetchContent module — both are upstream code we don't control.
+        & cmake -G "Visual Studio 17 2022" -A x64 -B bin -S . "-DCMAKE_POLICY_VERSION_MINIMUM=3.5" -Wno-dev
         if ($LASTEXITCODE -ne 0) { throw "cmake configure failed (exit $LASTEXITCODE)" }
     } finally {
         $ErrorActionPreference = $PrevEap
