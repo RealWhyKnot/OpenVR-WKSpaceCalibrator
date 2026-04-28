@@ -310,11 +310,35 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 		BlendTransform(tf, deviceWorldPose);
 		ApplyTransform(tf, pose);
 	}
-	else if (!deviceSystem[openVRID].empty())
+	else
 	{
 		// Per-ID transform is disabled. Check for a per-tracking-system fallback —
 		// this lets a tracker that connected after the last overlay scan inherit
 		// the calibrated offset on its very first pose update.
+		//
+		// If the overlay hasn't told us this device's tracking system yet (no
+		// SetDeviceTransform has arrived for this slot), query it directly via the
+		// driver-side property API so the fallback can apply on the *very* first
+		// pose update — before any overlay scan has run. The query is lazy: cache
+		// success in deviceSystem[id], and on failure leave it empty and try again
+		// next tick (cheap; properties are an in-process lookup).
+		if (deviceSystem[openVRID].empty()) {
+			if (auto* helpers = vr::VRProperties()) {
+				auto handle = helpers->TrackedDeviceToPropertyContainer(openVRID);
+				if (handle != vr::k_ulInvalidPropertyContainer) {
+					vr::ETrackedPropertyError err = vr::TrackedProp_Success;
+					std::string sys = helpers->GetStringProperty(handle, vr::Prop_TrackingSystemName_String, &err);
+					if (err == vr::TrackedProp_Success && !sys.empty()) {
+						deviceSystem[openVRID] = std::move(sys);
+					}
+				}
+			}
+		}
+
+		if (deviceSystem[openVRID].empty()) {
+			return true; // No system known yet; nothing to fall back to.
+		}
+
 		auto it = systemFallbacks.find(deviceSystem[openVRID]);
 		if (it != systemFallbacks.end() && it->second.enabled) {
 			const auto& fb = it->second;
