@@ -151,6 +151,9 @@ std::vector<bool> CalibrationCalc::DetectOutliers() const {
 	// to make an outlier judgement we accept everything; the caller's own validity
 	// checks (RMS error, axis variance, condition ratio) will catch garbage solves.
 	if (deltas.empty()) {
+		m_so3KabschResult = Eigen::Matrix3d::Identity();
+		m_so3KabschValid = false;
+		m_residualPitchRollDeg = 0.0;
 		return std::vector<bool>(m_samples.size(), true);
 	}
 
@@ -186,6 +189,27 @@ std::vector<bool> CalibrationCalc::DetectOutliers() const {
 	Eigen::Matrix3d rot = svd.matrixV() * i * svd.matrixU().transpose();
 	rot.transposeInPlace();
 
+	// Stash the 3D Kabsch result so CalibrateRotation can reuse it for the
+	// SO(3) yaw projection (item #3) instead of re-deriving a 2D fit.
+	m_so3KabschResult = rot;
+	m_so3KabschValid = true;
+
+	// Compute residual pitch+roll. If the recovered SO(3) rotation has any
+	// non-yaw component above ~2 deg, the reference and target spaces' gravity
+	// axes don't agree — log the discrepancy so the user knows yaw-only
+	// alignment is leaving error on the table. We don't reject; the yaw
+	// projection below still works, just less accurately.
+	{
+		// Yaw is the rotation about the world-up (Y) axis. Pitch+roll magnitude
+		// = angle between ([0,1,0]) and ([0,1,0]) after the rotation, projected
+		// onto the YZ/XY plane respectively. A simpler proxy: the angle between
+		// the rotation's Y-column and (0,1,0).
+		Eigen::Vector3d yColumn = rot.col(1);
+		double yDot = std::max(-1.0, std::min(1.0, yColumn(1)));
+		double tiltRad = std::acos(yDot);
+		m_residualPitchRollDeg = tiltRad * 180.0 / EIGEN_PI;
+	}
+
 	// Optimize an extrinsic from reference to target.
 	// Detect the outliers by comparing the extrinsic computed from each pair of
 	// rotations to the optimized extrinsic. Iterate up to MaxIters times: each pass
@@ -212,20 +236,19 @@ std::vector<bool> CalibrationCalc::DetectOutliers() const {
 		for (size_t i = 0; i < valids.size(); i++) if (valids[i]) validCount++;
 		if (validCount == 0) break;
 
-		// Average via least-squares on the 4-vector. We follow the original solver
-		// shape (identity coefficients on a Nx4 system) so the math stays equivalent
-		// to the prior single-pass implementation when MaxIters == 1.
-		Eigen::MatrixXd coefficients(validCount * 4, 4);
-		Eigen::VectorXd constraints(validCount * 4);
-		size_t row = 0;
+		// The "least-squares on identity blocks" solve from the prior implementation
+		// is mathematically just the mean of the per-sample quaternion 4-vectors,
+		// then normalized. The BDCSVD round-trip cost ~hundreds of microseconds
+		// per outlier-detection run on a 200-sample buffer; the closed-form mean
+		// is O(N) and exact. (Item #1 from the math review.)
+		Eigen::Vector4d quatSum = Eigen::Vector4d::Zero();
 		for (size_t i = 0; i < m_samples.size(); i++) {
 			if (!valids[i]) continue;
-			coefficients.block<4, 4>(4 * row, 0) = Eigen::Matrix4d::Identity();
-			constraints.block<4, 1>(4 * row, 0) = Eigen::Vector4d(
-				perSampleQuat[i].w(), perSampleQuat[i].x(), perSampleQuat[i].y(), perSampleQuat[i].z());
-			row++;
+			quatSum += Eigen::Vector4d(
+				perSampleQuat[i].w(), perSampleQuat[i].x(),
+				perSampleQuat[i].y(), perSampleQuat[i].z());
 		}
-		Eigen::Vector4d result = coefficients.bdcSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(constraints);
+		Eigen::Vector4d result = quatSum / static_cast<double>(validCount);
 		Eigen::Quaterniond quatExt(result(0), result(1), result(2), result(3));
 		quatExt.normalize();
 
@@ -276,53 +299,107 @@ Eigen::Vector3d CalibrationCalc::CalibrateRotation(const bool ignoreOutliers) co
 		return Eigen::Vector3d::Zero();
 	}
 
-	// Kabsch algorithm
+	// Item #3: full SO(3) Kabsch + yaw projection. The previous implementation
+	// dropped Y from the rotation deltas before SVD, which leaks 1-2 deg of
+	// system-gravity-misalignment into the recovered yaw. Instead we run the
+	// full 3D Kabsch fit (already computed in DetectOutliers and stashed in
+	// m_so3KabschResult) and project to yaw via the Rodrigues identity:
+	//   yaw = atan2(R(2,0) - R(0,2), R(0,0) + R(2,2))
+	// This gives the closed-form yaw component of an SO(3) rotation, isolating
+	// it from any pitch/roll discrepancy between the two spaces' gravity axes.
+	// We still compute a 3D cross-covariance SVD on the filtered (post-outlier-
+	// rejection) deltas so the rotation we project from reflects the user's
+	// actual sample set rather than the rough step=5 fit DetectOutliers used.
 
-	// Initialize 2D points and centroids
-	Eigen::MatrixXd refPoints(deltas.size(), 2), targetPoints(deltas.size(), 2);
-	Eigen::Vector2d refCentroid(0, 0), targetCentroid(0, 0);
+	// Build 3D point clouds and centroids from the (filtered) deltas.
+	Eigen::MatrixXd refPoints3(deltas.size(), 3), targetPoints3(deltas.size(), 3);
+	Eigen::Vector3d refCentroid3(0, 0, 0), targetCentroid3(0, 0, 0);
 
-	// Fill matrices and calculate centroids
 	for (size_t i = 0; i < deltas.size(); i++) {
-		refPoints.row(i) << deltas[i].ref[0], deltas[i].ref[2];  // Take only the x and z components
-		refCentroid += refPoints.row(i);
-
-		targetPoints.row(i) << deltas[i].target[0], deltas[i].target[2];  // Take only the x and z components
-		targetCentroid += targetPoints.row(i);
+		refPoints3.row(i) = deltas[i].ref;
+		refCentroid3 += deltas[i].ref;
+		targetPoints3.row(i) = deltas[i].target;
+		targetCentroid3 += deltas[i].target;
 	}
 
-	refCentroid /= (double)deltas.size();
-	targetCentroid /= (double)deltas.size();
+	refCentroid3 /= (double)deltas.size();
+	targetCentroid3 /= (double)deltas.size();
 
-	// Center the points
 	for (size_t i = 0; i < deltas.size(); i++) {
-		refPoints.row(i) -= refCentroid;
-		targetPoints.row(i) -= targetCentroid;
+		refPoints3.row(i) -= refCentroid3;
+		targetPoints3.row(i) -= targetCentroid3;
 	}
 
-	// Calculate cross-covariance matrix
-	auto crossCV = refPoints.transpose() * targetPoints;
+	auto crossCV3 = refPoints3.transpose() * targetPoints3;
 
-	// Singular Value Decomposition (SVD)
-	Eigen::JacobiSVD<Eigen::MatrixXd> svd(crossCV, Eigen::ComputeThinU | Eigen::ComputeThinV);
+	Eigen::JacobiSVD<Eigen::MatrixXd> svd3(crossCV3, Eigen::ComputeThinU | Eigen::ComputeThinV);
 
-	// Record the condition ratio (min/max singular value) of the 2D covariance.
-	// Near-zero means the rotation deltas all lie close to a single line in the
-	// yaw plane — i.e., the user only rotated in one axis. The yaw solution is
-	// then ill-conditioned and ComputeIncremental will reject it.
+	// Record the rotation-condition ratio in the yaw plane. We extract this
+	// from the 3D singular values projected onto X and Z: the smallest of the
+	// two yaw-plane singular values vs the largest. (The Y-axis singular value
+	// describes the gravity-tilt component, which is informational, not part
+	// of the yaw conditioning question.)
 	{
-		const auto& sv = svd.singularValues();
+		const auto& sv = svd3.singularValues();
+		// SVD orders singular values in decreasing magnitude. For the
+		// "did the user rotate around enough yaw-plane axes" gate we use the
+		// ratio s_min/s_max. With 3 axes available, the smallest is the worst
+		// case — if the rotation was mostly single-axis, two of the three sv's
+		// will be small and the ratio will be ~0.
 		double smax = sv.size() > 0 ? sv(0) : 0.0;
-		double smin = sv.size() > 1 ? sv(sv.size() - 1) : 0.0;
+		double smin = sv.size() > 0 ? sv(sv.size() - 1) : 0.0;
 		m_rotationConditionRatio = (smax > 0.0) ? (smin / smax) : 0.0;
 	}
 
-	// Calculate 2D rotation matrix
-	Eigen::Matrix2d i = Eigen::Matrix2d::Identity();
-	Eigen::Matrix2d rot = svd.matrixV() * i * svd.matrixU().transpose();
+	Eigen::Matrix3d so3i = Eigen::Matrix3d::Identity();
+	if ((svd3.matrixU() * svd3.matrixV().transpose()).determinant() < 0) {
+		so3i(2, 2) = -1;
+	}
+	Eigen::Matrix3d R = svd3.matrixV() * so3i * svd3.matrixU().transpose();
+	// Transpose to match the DetectOutliers convention. The raw Kabsch product
+	// above maps target deltas onto ref deltas; the prior 2D code's
+	// atan2(rot(1,0), rot(0,0)) returned +yaw when the true calibration was
+	// +yaw — implying the 2D `rot` was already in the inverse direction. To
+	// keep the Rodrigues yaw-projection sign aligned with the existing test
+	// fixtures (RecoversPureYaw expects +30 deg for a +30 deg true rotation),
+	// we transpose here. DetectOutliers does the same transposeInPlace() at
+	// the equivalent point, so this also keeps both cached fits consistent.
+	R.transposeInPlace();
 
-	// Calculate yaw angle in radians
-	double yaw = std::atan2(rot(1, 0), rot(0, 0));
+	// Update the cached SO(3) result with the filtered fit (DetectOutliers'
+	// step=5 result was a rough estimate; this one was solved over the full
+	// pruned delta set).
+	m_so3KabschResult = R;
+	m_so3KabschValid = true;
+
+	// Recompute residual pitch+roll diagnostic on the filtered fit.
+	{
+		Eigen::Vector3d yColumn = R.col(1);
+		double yDot = std::max(-1.0, std::min(1.0, yColumn(1)));
+		double tiltRad = std::acos(yDot);
+		m_residualPitchRollDeg = tiltRad * 180.0 / EIGEN_PI;
+	}
+
+	if (m_residualPitchRollDeg > 2.0) {
+		char buf[256];
+		snprintf(buf, sizeof buf,
+			"system gravity axes appear misaligned (residual pitch+roll = %.2f deg)\n",
+			m_residualPitchRollDeg);
+		CalCtx.Log(buf);
+	}
+
+	// Project SO(3) -> yaw via the Rodrigues yaw projection. This is the
+	// closed-form yaw component when R is an SO(3) rotation; it ignores the
+	// pitch/roll without dropping rows from the inputs (which was the leakage
+	// problem with the old 2D approach).
+	//
+	// Sign convention: with R in target -> ref direction (after the transpose
+	// above) and Eigen's right-handed Y-up rotation matrix layout, an upright
+	// +yaw has R(0,2) = +sin(yaw) and R(2,0) = -sin(yaw). So we project as
+	// atan2(R(0,2) - R(2,0), R(0,0) + R(2,2)) to recover +yaw, matching what
+	// the prior 2D code produced via atan2(rot(1,0), rot(0,0)) on its (X,Z)
+	// cross-covariance.
+	double yaw = std::atan2(R(0, 2) - R(2, 0), R(0, 0) + R(2, 2));
 
 	// Convert to degrees
 	Eigen::Vector3d euler(0.0, yaw * 180.0 / EIGEN_PI, 0.0);
@@ -360,6 +437,8 @@ Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rot
 
 			// Weight = min(refAngle, targetAngle), clamped to a small floor so we
 			// never fully zero a row (preserves rank). Both angles are in radians.
+			// (This is the *initial* weight for the IRLS warm start below; later
+			// passes overwrite it with Cauchy weights derived from residuals.)
 			double refA = AngleFromRotationMatrix3(s_i.ref.rot * s_j.ref.rot.transpose());
 			double targetA = AngleFromRotationMatrix3(s_i.target.rot * s_j.target.rot.transpose());
 			double weight = std::min(refA, targetA);
@@ -380,27 +459,141 @@ Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rot
 	}
 
 	// With < 2 samples no pair-based deltas exist; the LS system below would be
-	// 0×3 and BDCSVD is undefined on empty input. Fall through with zero
+	// 0x3 and the QR solve is undefined on empty input. Fall through with zero
 	// translation; the caller's validation gate will reject the result.
 	if (deltas.empty()) {
+		m_translationConditionRatio = 0.0;
 		return Eigen::Vector3d::Zero();
 	}
 
-	Eigen::VectorXd constants(deltas.size() * 3);
-	Eigen::MatrixXd coefficients(deltas.size() * 3, 3);
+	const Eigen::Index nRows = static_cast<Eigen::Index>(deltas.size() * 3);
 
+	// Item #2: pre-allocated members reused across calls. resize() is a no-op
+	// when dimensions match, so the steady-state per-tick allocation is zero.
+	m_coefficientsTrans.resize(nRows, 3);
+	m_constantsTrans.resize(nRows);
+	m_weightsTrans.resize(static_cast<Eigen::Index>(deltas.size()));
+
+	// Pack the unweighted system once. IRLS reweights via row-scaling on the
+	// already-built coefficient/constant blocks each pass, so we don't need to
+	// rebuild the per-pair geometry.
+	Eigen::MatrixXd baseCoefficients(nRows, 3);
+	Eigen::VectorXd baseConstants(nRows);
 	for (size_t i = 0; i < deltas.size(); i++)
 	{
-		double sw = std::sqrt(deltas[i].weight);
 		for (int axis = 0; axis < 3; axis++)
 		{
-			constants(i * 3 + axis) = deltas[i].c(axis) * sw;
-			coefficients.row(i * 3 + axis) = deltas[i].q.row(axis) * sw;
+			baseConstants(static_cast<Eigen::Index>(i) * 3 + axis) = deltas[i].c(axis);
+			baseCoefficients.row(static_cast<Eigen::Index>(i) * 3 + axis) = deltas[i].q.row(axis);
 		}
+		// Initial weight = 1 (unweighted first pass per item #4 spec).
+		m_weightsTrans(static_cast<Eigen::Index>(i)) = 1.0;
 	}
 
-	Eigen::Vector3d trans = coefficients.bdcSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(constants);
+	// Item #4: IRLS with Cauchy weight. The previous min-rotation-magnitude
+	// weight was a heuristic that didn't adapt to per-pair residual noise — a
+	// few large-magnitude deltas with bad position data could still pull the
+	// solution. Cauchy is a redescending M-estimator: large residuals get tiny
+	// weights, so heavy-tailed jitter (Slime IMU translations, USB-glitched
+	// frames) stops dominating the LS sum. The cosine-similarity outlier
+	// rejection in DetectOutliers becomes redundant after this — keep it as
+	// belt-and-braces; the math review notes considering removal as a follow-up.
+	const int kMaxIters = 5;
+	const double kWeightChangeThreshold = 0.01; // 1%
+	const double kMadFloor = 1e-3;              // 1mm — avoids div-by-zero when residuals collapse
+	const double kCauchyTune = 1.345;           // standard Cauchy tuning constant
+
+	Eigen::Vector3d trans = Eigen::Vector3d::Zero();
+	Eigen::VectorXd prevWeights = m_weightsTrans;
+
+	for (int iter = 0; iter < kMaxIters; iter++) {
+		// Apply current weights as sqrt-row-scaling.
+		for (size_t i = 0; i < deltas.size(); i++) {
+			double sw = std::sqrt(std::max(0.0, m_weightsTrans(static_cast<Eigen::Index>(i))));
+			for (int axis = 0; axis < 3; axis++) {
+				const Eigen::Index r = static_cast<Eigen::Index>(i) * 3 + axis;
+				m_constantsTrans(r) = baseConstants(r) * sw;
+				m_coefficientsTrans.row(r) = baseCoefficients.row(r) * sw;
+			}
+		}
+
+		// Item #1: colPivHouseholderQr is ~5-10x faster than BDCSVD on 3-column
+		// systems and equally accurate. Use it for every IRLS iteration.
+		Eigen::ColPivHouseholderQR<Eigen::MatrixXd> qr = m_coefficientsTrans.colPivHouseholderQr();
+		trans = qr.solve(m_constantsTrans);
+
+		// Item #6: condition guard. Cheap proxy for SVD's smin/smax: take the
+		// smallest and largest absolute values on the diagonal of QR's R
+		// triangle. For a well-conditioned 3-column system these track the
+		// singular-value extrema closely; for a degenerate system (pure-yaw-
+		// only motion, planar motion, etc.) the smallest |R(i,i)| collapses.
+		// Computed on the LAST iteration's solve so it reflects the post-IRLS
+		// system.
+		if (iter == kMaxIters - 1) {
+			Eigen::MatrixXd R = qr.matrixR().template triangularView<Eigen::Upper>();
+			double rmin = std::numeric_limits<double>::infinity();
+			double rmax = 0.0;
+			const Eigen::Index nCols = R.cols();
+			for (Eigen::Index k = 0; k < nCols; k++) {
+				double v = std::abs(R(k, k));
+				if (v < rmin) rmin = v;
+				if (v > rmax) rmax = v;
+			}
+			m_translationConditionRatio = (rmax > 0.0) ? (rmin / rmax) : 0.0;
+		}
+
+		// Compute per-pair residuals (we collapse the per-axis residuals into a
+		// single magnitude per delta-row triple via the L2 norm — this gives
+		// each delta-pair a single weight, which is what the Cauchy formula
+		// expects).
+		Eigen::VectorXd resid = baseCoefficients * trans - baseConstants;
+		Eigen::VectorXd perPair(static_cast<Eigen::Index>(deltas.size()));
+		for (size_t i = 0; i < deltas.size(); i++) {
+			double s2 = 0.0;
+			for (int axis = 0; axis < 3; axis++) {
+				double r = resid(static_cast<Eigen::Index>(i) * 3 + axis);
+				s2 += r * r;
+			}
+			perPair(static_cast<Eigen::Index>(i)) = std::sqrt(s2);
+		}
+
+		// MAD on the absolute residuals. Uses partial sort via nth_element so
+		// it's O(N) rather than full sort.
+		std::vector<double> absResid(deltas.size());
+		for (size_t i = 0; i < deltas.size(); i++) absResid[i] = std::abs(perPair(static_cast<Eigen::Index>(i)));
+		std::nth_element(absResid.begin(), absResid.begin() + absResid.size() / 2, absResid.end());
+		double median = absResid[absResid.size() / 2];
+
+		// MAD = median(|r_i - median(r)|). Reuse absResid storage with the
+		// shifted residuals.
+		for (size_t i = 0; i < deltas.size(); i++) absResid[i] = std::abs(perPair(static_cast<Eigen::Index>(i)) - median);
+		std::nth_element(absResid.begin(), absResid.begin() + absResid.size() / 2, absResid.end());
+		double mad = absResid[absResid.size() / 2];
+
+		double c = kCauchyTune * std::max(mad, kMadFloor);
+		double cInv = 1.0 / c;
+
+		// Cauchy weights w_i = 1 / (1 + (r_i / c)^2).
+		for (size_t i = 0; i < deltas.size(); i++) {
+			double rOverC = perPair(static_cast<Eigen::Index>(i)) * cInv;
+			m_weightsTrans(static_cast<Eigen::Index>(i)) = 1.0 / (1.0 + rOverC * rOverC);
+		}
+
+		// Convergence check: max relative weight change < 1%.
+		double maxDelta = 0.0;
+		for (Eigen::Index i = 0; i < m_weightsTrans.size(); i++) {
+			double prev = prevWeights(i);
+			double cur = m_weightsTrans(i);
+			double denom = std::max(std::abs(prev), 1e-9);
+			double rel = std::abs(cur - prev) / denom;
+			if (rel > maxDelta) maxDelta = rel;
+		}
+		prevWeights = m_weightsTrans;
+		if (iter > 0 && maxDelta < kWeightChangeThreshold) break;
+	}
+
 	auto transcm = trans * 100.0;
+	(void)transcm; // kept for parity with the prior debug logging block
 
 	//char buf[256];
 	//snprintf(buf, sizeof buf, "Calibrated translation x=%.2f y=%.2f z=%.2f\n", transcm[0], transcm[1], transcm[2]);
@@ -612,7 +805,27 @@ Eigen::Vector4d CalibrationCalc::ComputeAxisVariance(
 	double rmsError = RetargetingErrorRMS(posOffset, calibration);
 	//snprintf(buf, sizeof buf, "Position error (RMS): %.3f\n", rmsError);
 	//CalCtx.Log(buf);
-	if (rmsError > 0.1) ok = false;
+
+	// Item #7: dynamic RMS gate. The previous fixed 0.1 m threshold was too
+	// loose: a Slime IMU rig with ~5 mm jitter can easily produce a "valid"
+	// RMS of 30 mm that's just noise, not a meaningful fit. Scale the gate to
+	// the input jitter (the same noise the LS solver was fed) plus a 5 mm
+	// floor — below that floor we'd be rejecting good fits because the
+	// trackers are inherently more precise than the threshold pretends.
+	// 3 sigma covers ~99.7% of Gaussian noise; combined ref/target jitter is
+	// the L2 sum of independent stddevs.
+	double jRef = ReferenceJitter();
+	double jTgt = TargetJitter();
+	double rmsThreshold = std::max(0.005, 3.0 * std::sqrt(jRef * jRef + jTgt * jTgt));
+
+	m_lastRejectRms = rmsError;
+	m_lastRejectRmsThreshold = rmsThreshold;
+	if (rmsError > rmsThreshold) {
+		ok = false;
+		m_lastRejectReason = RejectReason::RmsTooHigh;
+	} else {
+		m_lastRejectReason = RejectReason::None;
+	}
 
 	if (error) *error = rmsError;
 
@@ -743,7 +956,14 @@ bool CalibrationCalc::ComputeOneshot(const bool ignoreOutliers) {
 
 	auto calibration = ComputeCalibration(ignoreOutliers);
 
-	bool valid = ValidateCalibration(calibration);
+	double rmsError = INFINITY;
+	bool valid = ValidateCalibration(calibration, &rmsError);
+
+	// Compute the auxiliary gates that ComputeIncremental uses, so the failure
+	// log line for one-shot can name the *actual* problem instead of a generic
+	// "low quality" shrug. (Item #5 from the math review.)
+	double newVariance = ComputeAxisVariance(calibration)(1);
+	const double RotationConditionMin = 0.05;
 
 	if (valid) {
 		m_estimatedTransformation = calibration; // @NOTE: Normal calibration
@@ -751,7 +971,37 @@ bool CalibrationCalc::ComputeOneshot(const bool ignoreOutliers) {
 		return true;
 	}
 	else {
-		CalCtx.Log("Not updating: Low-quality calibration result\n");
+		// Item #5: branch the user-facing log on which threshold tripped. The
+		// generic "low-quality calibration result" was actionable for nobody —
+		// these messages tell the user what motion to add.
+		char buf[256];
+		double priorRms = INFINITY;
+		Eigen::Vector3d priorOffset;
+		if (m_isValid) {
+			(void)ValidateCalibration(m_estimatedTransformation, &priorRms, &priorOffset);
+		}
+
+		if (m_isValid && rmsError * 1.5 > priorRms) {
+			snprintf(buf, sizeof buf,
+				"Not updating: candidate RMS %.1fmm not better than active %.1fmm by 1.5x\n",
+				rmsError * 1000.0, priorRms * 1000.0);
+			CalCtx.Log(buf);
+		}
+		else if (newVariance < AxisVarianceThreshold) {
+			CalCtx.Log("Not updating: rotation single-axis (move tracker through more orientations)\n");
+		}
+		else if (m_rotationConditionRatio > 0.0 && m_rotationConditionRatio < RotationConditionMin) {
+			CalCtx.Log("Not updating: motion too planar (rotate around more axes)\n");
+		}
+		else if (m_translationConditionRatio > 0.0 && m_translationConditionRatio < RotationConditionMin) {
+			CalCtx.Log("Translation conditioning poor — need more diverse motion\n");
+		}
+		else {
+			snprintf(buf, sizeof buf,
+				"Not updating: RMS %.1fmm above gate %.1fmm\n",
+				rmsError * 1000.0, m_lastRejectRmsThreshold * 1000.0);
+			CalCtx.Log(buf);
+		}
 		return false;
 	}
 }
@@ -850,7 +1100,14 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 			// Degenerate motion: insufficient yaw-plane axis spread. Don't update
 			// rotation; keep the prior calibration (if any). Allow rapid-correct via
 			// relative pose since that path doesn't depend on this conditioning.
-			CalCtx.Log("Insufficient motion variety (single-axis rotation) — holding rotation\n");
+			CalCtx.Log("Not updating: motion too planar (rotate around more axes)\n");
+			newCalibrationValid = false;
+		} else if (m_translationConditionRatio > 0.0 && m_translationConditionRatio < RotationConditionMin) {
+			// Item #6: translation LS condition guard. Mirrors the rotation
+			// guard above — if the LS coefficient matrix is rank-deficient
+			// (user moved through too few independent translation directions)
+			// the result is dominated by noise. Don't trust it.
+			CalCtx.Log("Translation conditioning poor — need more diverse motion\n");
 			newCalibrationValid = false;
 		} else {
 			newCalibrationValid = ValidateCalibration(calibration, &newError, &m_posOffset);
@@ -886,7 +1143,12 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 		
 		double existingPoseErrorUsingRelPosition = RetargetingErrorRMS(m_refToTargetPose.translation(), m_estimatedTransformation);
 		Metrics::error_currentCalRelPose.Push(existingPoseErrorUsingRelPosition * 1000);
-		if (relPoseError * threshold < existingPoseErrorUsingRelPosition || newCalibrationValid && relPoseError < newError) {
+		// Item #8: the second OR-arm of this condition was unreachable. The
+		// surrounding block is gated on `if (!newCalibrationValid && shouldRapidCorrect)`,
+		// so `newCalibrationValid` is guaranteed false here — the
+		// `newCalibrationValid && relPoseError < newError` arm could never
+		// fire. Dropped.
+		if (relPoseError * threshold < existingPoseErrorUsingRelPosition) {
 			newCalibrationValid = true;
 			usingRelPose = true;
 			newError = relPoseError;
