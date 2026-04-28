@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Wiki — Troubleshooting
+    url: https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Troubleshooting
+    about: Common failure modes are documented here. Check before filing.
+  - name: Discord (upstream community)
+    url: https://discord.com/invite/m7g2Wyj
+    about: Live help with SteamVR setup and calibration questions.
