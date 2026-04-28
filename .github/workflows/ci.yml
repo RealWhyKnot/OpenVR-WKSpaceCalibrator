@@ -52,6 +52,13 @@ jobs:
       - name: Build
         run: cmake --build bin --config Release --parallel
 
+      - name: Run tests
+        # Don't gate the workflow on test failure yet — the suite is brand new
+        # and we want CI to keep producing artifacts while tolerances stabilize.
+        # Flip continue-on-error to false in a follow-up once the suite is proven.
+        continue-on-error: true
+        run: ./bin/artifacts/Release/spacecal_tests.exe --gtest_color=yes
+
       - name: Stage artifacts
         shell: pwsh
         run: |
