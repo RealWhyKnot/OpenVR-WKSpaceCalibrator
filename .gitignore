@@ -7,3 +7,15 @@ ipch
 .code
 /install/*.exe
 [bB]in
+
+# build.ps1 outputs
+/release/
+/build/
+# Per-session local-build counter (don't commit; is regenerated each build)
+/build/local_build_state.json
+
+# Editor / agent local state
+.claude/
+CLAUDE.md
+.claude.local.json
+.anthropic/

@@ -1,0 +1,29 @@
+# OpenVR-SpaceCalibrator Wiki
+
+OpenVR-SpaceCalibrator aligns the coordinate frames of two VR tracking systems — for example a Lighthouse setup with a Quest headset, or a SteamVR HMD with Slime IMU trackers — so devices from one system show up in the right place in the other system's playspace.
+
+This wiki is the long-form documentation. The [README](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/blob/develop/README.md) is the quick-start; the pages below go deeper.
+
+## How it works (60 seconds)
+
+The system has two halves:
+
+1. **An overlay app** (`SpaceCalibrator.exe`). Runs as a SteamVR overlay with a window. Reads tracked-device poses from OpenVR, asks you to wave a target tracker around for a few seconds, and solves for the rigid transform that maps target-system coordinates → reference-system coordinates.
+2. **A SteamVR driver** (`driver_01spacecalibrator.dll`). Hooks `IVRServerDriverHost::TrackedDevicePoseUpdated` and applies the calibrated offset to every pose update from the target system before SteamVR sees it.
+
+The two halves talk over a named pipe. The math lives in the overlay; the driver is just a transform applier with smoothing. See [[Architecture]] for the full picture and [[Continuous Calibration]] for what happens when continuous mode is on.
+
+## Read these first
+
+- **[[Architecture]]** — how the overlay and driver fit together
+- **[[Continuous Calibration]]** — the math, the watchdogs, the auto-adopt path for new trackers
+- **[[Driver Protocol]]** — the IPC protocol versions and message types
+
+## Reference
+
+- **[[Building]]** — submodules, `build.ps1`, version stamping
+- **[[Troubleshooting]]** — common failure modes and what to check
+
+## For new contributors
+
+Read [[Architecture]] then [[Continuous Calibration]]. The README is fine for orientation; the wiki has the load-bearing detail.

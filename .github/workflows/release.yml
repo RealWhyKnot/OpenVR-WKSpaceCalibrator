@@ -1,0 +1,71 @@
+name: Release
+
+# Triggered by pushing a tag like v2026.4.27.0 (release; .N = release iteration for the day,
+# starting at 0). Dev-style tags v2026.4.27.7-4974 are accepted but rare on the release stream
+# — the -XXXX suffix is for local dev builds where rebuilds at the same daily counter need
+# disambiguating. The tag (minus the leading "v") drives the build's version: it's passed to
+# build.ps1 -Version so the zip filename, version.txt, and embedded version all match the tag.
+# build.ps1 validates the shape and fails fast on a malformed tag.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Build distribution
+        shell: pwsh
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          # Strip the leading "v" so the version baked into the build matches the tag.
+          # build.ps1 validates the shape (YYYY.M.D.N or YYYY.M.D.N-XXXX) and fails fast
+          # on a malformed tag.
+          $version = $env:TAG_NAME -replace '^v', ''
+          ./build.ps1 -Version $version
+
+      - name: Locate release zip
+        id: zip
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem release/OpenVR-SpaceCalibrator-*.zip | Select-Object -First 1
+          if (-not $zip) { throw "No release zip found in release/ — build.ps1 did not produce one." }
+          $hash = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash
+          "path=$($zip.FullName)" >> $env:GITHUB_OUTPUT
+          "name=$($zip.Name)"     >> $env:GITHUB_OUTPUT
+          "sha256=$hash"          >> $env:GITHUB_OUTPUT
+          Write-Host "Release zip: $($zip.Name)"
+          Write-Host "SHA256: $hash"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $tag    = "${{ github.ref_name }}"
+          $zip    = "${{ steps.zip.outputs.path }}"
+          $sha    = "${{ steps.zip.outputs.sha256 }}"
+          $name   = "${{ steps.zip.outputs.name }}"
+          $notes  = @"
+          ## OpenVR-SpaceCalibrator $tag
+
+          Download **$name** below and extract it. Drop the ``driver_01spacecalibrator/`` folder into ``<Steam>\steamapps\common\SteamVR\drivers\``, then run ``SpaceCalibrator.exe`` from wherever you put it.
+
+          SHA256: ``$sha``
+          "@
+          gh release create $tag $zip --title $tag --notes $notes
