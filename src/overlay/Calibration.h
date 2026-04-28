@@ -101,6 +101,18 @@ struct CalibrationContext
 	bool enableStaticRecalibration;
 	bool lockRelativePosition = false;
 
+	// UI-only flag toggled by the "Pause updates" button on the Status tab.
+	// While true the overlay-side calibration tick is expected to skip the
+	// ComputeIncremental call so the current driver-applied offset stays put
+	// — useful when something looks momentarily wrong and the user wants to
+	// freeze the live view to investigate rather than have it self-correct
+	// out from under them. Default false (live updates).
+	bool calibrationPaused = false;
+	// Status-tab UI state: collapses the busier sliders into an "Advanced
+	// settings" section. Persisting this is intentional — a user who opened
+	// it once probably wants it open next session too.
+	bool showAdvancedSettings = false;
+
 	// Native prediction-suppression (see wiki/Prediction-Suppression). Replaces
 	// external tools like OVR-SmoothTracking by zeroing velocity/acceleration on
 	// per-device pose updates inside our SteamVR driver, which is the same trick
