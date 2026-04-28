@@ -1,55 +1,56 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://github.com/hyblocker/OpenVR-SpaceCalibrator/blob/develop/.github/logo_light.png?raw=true">
-  <source media="(prefers-color-scheme: light)" srcset="https://github.com/hyblocker/OpenVR-SpaceCalibrator/blob/develop/.github/logo_dark.png?raw=true">
-  <img alt="Space Calibrator" src="https://github.com/hyblocker/OpenVR-SpaceCalibrator/blob/develop/.github/logo.png?raw=true">
-</picture>
+# OpenVR-SpaceCalibrator (WhyKnot fork)
 
-This program is designed to allow you to synchronise multiple playspaces with one another in SteamVR. This fork of Space Calibrator (spacecal) also supports [continuous calibration](#continuous-calibration).
+This is the **WhyKnot fork** of [hyblocker's OpenVR-SpaceCalibrator](https://github.com/hyblocker/OpenVR-SpaceCalibrator), which itself forks [pushrax's original](https://github.com/pushrax/OpenVR-SpaceCalibrator). Space Calibrator aligns the coordinate frames of two SteamVR tracking systems — for example a Lighthouse setup with a Quest headset, or a SteamVR HMD with Slime IMU trackers — so devices from one system show up in the right place in the other system's playspace.
 
-Continuous calibration is a tracking mode which automatically aligns playspaces together, using a tracker on the headset.
+This fork focuses on **continuous-calibration robustness**: auto-adopting trackers connected mid-session, watchdog escapes for stuck calibrations, and tighter math on the solver itself.
 
-## Installing
+## What's different in this fork
 
-### Steam
+- **Auto-adopt for newly connected trackers.** Driver-side per-tracking-system fallback transform (protocol v5) means a tracker powered on after calibration completes inherits the offset on its very first pose update, instead of floating in the wrong space until the next manual recalibration.
+- **Stuck-state watchdogs.** A 50-rejection consecutive watchdog forces a sample re-collection when the 1.5x rejection gate locks in a bad fixpoint. An HMD-stall watchdog purges the buffer if the headset position freezes for ~1.5 s. Driver-side `lastPoll` resets on every transform update so a tracker returning from offline doesn't visibly jump.
+- **Math improvements.** Iterative outlier rejection on samples, weighted least-squares for the translation solve (per-pair `√min(refRotMag, targetRotMag)` weighting), 2D Kabsch SVD on yaw only, and a single-step EMA on the published transform to soften per-tick wobble that survives the gate.
+- **Build pipeline.** A reproducible `build.ps1`, `.githooks/` for version stamping, fork CI workflows, and release zip generation. Driver and overlay are version-stamped so a mismatched pair fails fast at handshake.
+- **Source-controlled wiki.** The wiki lives in `docs/wiki/` in this repo and is mirrored to the GitHub wiki by CI, so documentation changes flow through code review like everything else.
 
-> [!NOTE]  
-> **Space Calibrator is also available to Steam.**
+## Quick start (end users)
 
-You may find [Space Calibrator on Steam here](https://s.team/a/3368750).
+1. Grab the latest release zip from the [Releases page](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/releases).
+2. Make sure SteamVR is **closed**, then drop the `01spacecalibrator/` driver folder into Steam's `steamapps/common/SteamVR/drivers/`.
+3. Install the [Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe) if you don't already have it.
+4. Run `SpaceCalibrator.exe` from the unzipped folder (or let it auto-register itself as a SteamVR overlay on first launch).
+5. Start SteamVR. Open the Space Calibrator overlay from the dashboard and follow the on-screen flow. See the [wiki](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki) for the calibration walkthrough and [Continuous Calibration](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Continuous-Calibration) for the auto-aligning mode.
 
-### From GitHub
+> If you previously installed Space Calibrator from Steam, see [Steam vs GitHub builds](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Home) — the fork detects and handles the conflict on launch.
 
-To install Space Calibrator, please get the latest installer from the downloads page, and install it. Make sure that you have:
-- Installed [Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe).
-- Installed SteamVR and run it at least once with a VR headset connected.
-- SteamVR is not running before you run the installer. If SteamVR is running the installer will not be able to install Space Calibrator correctly.
+## Build from source
 
-## Calibration
+See the [Building wiki page](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Building) for the full walkthrough (toolchain, MSVC version, signing). The short version, after cloning:
 
-If you do not wish to use continuous calibration, you will have to use regular calibration. This means that every so often you will have to sync your headset's playspace with your tracker's playspace.
+```
+git submodule update --init --recursive && powershell -ExecutionPolicy Bypass -File build.ps1
+```
 
-To calibrate:
-1. Copy the chaperone/guardian bounds from your HMD's play space
-   > You will only have to do this once. Connect your VR headset and start SteamVR. Then go to space calibrator's window (it will be minimised), and click the "Copy Chaperone" button.
+The script handles version stamping and produces both the driver and overlay binaries plus a release zip.
 
-2. Open the SteamVR dashboard. At the bottom, click on the Space Calibrator icon.
-3. In the Space Calibrator overlay, you'll see two lists at the top. On the left `Reference Space` column, select the controller you'll be calibrating along (e.g. Quest controller, Pico controller). On the right `Target Space`, select your SteamVR tracker (e.g. Vive Ultimate Tracker, Vive Tracker 3.0, Vive Ultimate Tracker). You can use the Identify button to make the controllers blink and tracker LEDs flash to see if you've selected the correct ones.
-4. Click the "Start calibration" button, and start calibrating.
+## Documentation
 
-## Continuous Calibration
+The wiki is the long-form reference; the README is just the front door.
 
-> [!IMPORTANT]  
-> **A tracker attached on your headset is required for this.**
+- [Wiki home](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki) — landing page and orientation
+- [Architecture](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Architecture) — how the overlay and driver fit together
+- [Continuous Calibration](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Continuous-Calibration) — the math, the watchdogs, the auto-adopt path
+- [Driver Protocol](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Driver-Protocol) — IPC protocol versions and message types (v5 is fork-specific)
+- [Building](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Building) — submodules, `build.ps1`, version stamping
+- [Troubleshooting](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Troubleshooting) — common failure modes and what to check
 
-To enable continuous calibration mode, first select your headset on the left column, then the tracker on your headset on the right column. Once you've done so, click `Start Calibration`, and click cancel. Then click `Continuous Calibration` to enable continuous calibration.
+## Credits
 
-1. Start SteamVR with the VR headset you wish to use.
-2. Turn on **ONLY** the tracker which is attached on the VR headset.
-3. Select the VR headset and tracker and calibrate.
-4. Turn on your other devices.
-5. You should see them line up with you as you after moving around your playspace for a bit for an initial calibration.
+- **[pushrax](https://github.com/pushrax/OpenVR-SpaceCalibrator)** — original author of OpenVR-SpaceCalibrator, including the static calibration solver and SteamVR driver architecture this fork still rests on.
+- **[hyblocker](https://github.com/hyblocker/OpenVR-SpaceCalibrator)** — the fork this branch is based on; introduced continuous calibration and the modern UI.
+- **All upstream contributors** — see the commit history of both upstream repositories for the long list of people who shaped this codebase.
 
+This fork (WhyKnot) layers continuous-calibration robustness work, the v5 driver protocol, and the build/CI pipeline on top of that foundation.
 
-## Help
+## License
 
-If you need help with setting up this program, please check the [wiki](https://github.com/pushrax/OpenVR-SpaceCalibrator/wiki), or join the [Discord server](https://discord.gg/ja3WgNjC3z).
+Same as upstream. See [LICENSE](LICENSE) for the full terms.
