@@ -4,6 +4,13 @@
 #include <cstdio>
 #include <string>
 
+// Forward-declared rather than #include "Calibration.h" because Calibration.h
+// pulls in <openvr.h> while IPCClient.cpp's translation unit (via Protocol.h)
+// already includes <openvr_driver.h>; the two openvr headers redefine common
+// constants and conflict at compile time. The single function we need is
+// signature-stable, so a local forward declaration is the safe minimum coupling.
+void ReopenShmem();
+
 namespace
 {
 	class BrokenPipeException : public std::runtime_error
@@ -120,6 +127,13 @@ protocol::Response IPCClient::SendBlocking(const protocol::Request &request)
 		}
 		inReconnect = false;
 
+		// Re-open the pose shared-memory segment. vrserver crashing also destroys the
+		// named file mapping that backs it; without this, the overlay's mapped view
+		// silently detaches and ReadNewPoses returns zeros forever — the overlay loops
+		// "healthy" with no data. Done after Connect() (and its handshake) succeeds so
+		// we know the new vrserver is up.
+		ReopenShmem();
+
 		// Retry once. If this also fails (broken pipe or otherwise),
 		// propagate the exception to the caller as the original would have.
 		Send(request);
@@ -161,6 +175,32 @@ protocol::Response IPCClient::Receive()
 			}
 			throw std::runtime_error(msg);
 		}
+
+		// ERROR_MORE_DATA: the message in the pipe is larger than our Response buffer.
+		// The kernel keeps the unread tail queued for the next ReadFile, which would
+		// desync subsequent messages — every following Receive() would parse part of
+		// this message's tail as a fresh response. Drain the rest of the message
+		// before throwing so the next caller starts on a clean message boundary.
+		char drainBuf[1024];
+		while (true)
+		{
+			DWORD drained = 0;
+			BOOL drainSuccess = ReadFile(pipe, drainBuf, sizeof drainBuf, &drained, 0);
+			if (drainSuccess) break; // last fragment of the oversized message
+			DWORD drainErr = GetLastError();
+			if (drainErr == ERROR_MORE_DATA) continue; // more to drain
+			if (IsBrokenPipeError(drainErr))
+			{
+				throw BrokenPipeException("Pipe broken while draining oversized IPC response", drainErr);
+			}
+			// Some other error during drain — give up draining and surface the original
+			// SIZE_MISMATCH error so the caller knows something was wrong.
+			break;
+		}
+		throw std::runtime_error(
+			"Invalid IPC response. Error MESSAGE_TOO_LARGE, expected " + std::to_string(sizeof response) +
+			" bytes but message was larger (drained the rest)."
+		);
 	}
 
 	if (bytesRead != sizeof response)

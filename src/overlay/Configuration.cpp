@@ -212,6 +212,17 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		ctx.targetLatencyOffsetMs = 0.0;
 	}
 
+	if (obj["latency_auto_detect"].is<bool>()) {
+		ctx.latencyAutoDetect = obj["latency_auto_detect"].get<bool>();
+	} else {
+		ctx.latencyAutoDetect = false;
+	}
+	if (obj["estimated_latency_offset_ms"].is<double>()) {
+		ctx.estimatedLatencyOffsetMs = obj["estimated_latency_offset_ms"].get<double>();
+	} else {
+		ctx.estimatedLatencyOffsetMs = 0.0;
+	}
+
 	// Native prediction-suppression settings.
 	ctx.suppressedSerials.clear();
 	if (obj["suppressed_serials"].is<picojson::array>()) {
@@ -255,7 +266,16 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 
 		auto &geometry = chaperone["geometry"].get<picojson::array>();
 
-		if (geometry.size() > 0) {
+		// Each chaperone quad is HmdQuad_t = 4 corners * 3 floats = 12 floats. A
+		// geometry array whose length isn't a multiple of 12 is corrupt — almost
+		// always a partial-write from a previous overlay crash. Loading it anyway
+		// would either over-read the JSON array (LoadFloatArray throws) or store a
+		// truncated final quad (silent garbage that we'd then paint as a chaperone
+		// boundary). Better to skip the chaperone load and warn.
+		if (geometry.size() > 0 && (geometry.size() % 12) != 0) {
+			std::cerr << "Chaperone geometry length (" << geometry.size()
+				<< ") is not a multiple of 12 — skipping chaperone load." << std::endl;
+		} else if (geometry.size() > 0) {
 			ctx.chaperone.geometry.resize(geometry.size() * sizeof(float) / sizeof(ctx.chaperone.geometry[0]));
 			LoadFloatArray(chaperone["geometry"], (float *) ctx.chaperone.geometry.data(), geometry.size());
 
@@ -270,21 +290,42 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	}
 	if (obj["relative_transform"].is<picojson::object>()) {
 		auto relTransform = obj["relative_transform"].get<picojson::object>();
-		Eigen::Vector3d refToTragetRoation;
 		Eigen::Vector3d refToTargetTranslation;
-
-		refToTragetRoation(0) = relTransform["roll"].get<double>();
-		refToTragetRoation(1) = relTransform["yaw"].get<double>();
-		refToTragetRoation(2) = relTransform["pitch"].get<double>();
 		refToTargetTranslation(0) = relTransform["x"].get<double>();
 		refToTargetTranslation(1) = relTransform["y"].get<double>();
 		refToTargetTranslation(2) = relTransform["z"].get<double>();
 
-		Eigen::Matrix3d rotationMatrix;
-		rotationMatrix =
-			Eigen::AngleAxisd(refToTragetRoation[0], Eigen::Vector3d::UnitX()) *
-			Eigen::AngleAxisd(refToTragetRoation[1], Eigen::Vector3d::UnitY()) *
-			Eigen::AngleAxisd(refToTragetRoation[2], Eigen::Vector3d::UnitZ());
+		Eigen::Matrix3d rotationMatrix = Eigen::Matrix3d::Identity();
+
+		// New (quaternion) form: prefer quat_w/x/y/z when present. The previous Euler
+		// form (eulerAngles(0,1,2) with `roll/yaw/pitch` keys) is fragile: Eigen's
+		// eulerAngles can return values in unexpected ranges/branches when the
+		// rotation passes near gimbal-lock, so a save→load round-trip can silently
+		// drift. Quaternions round-trip exactly.
+		if (relTransform["quat_w"].is<double>() && relTransform["quat_x"].is<double>()
+			&& relTransform["quat_y"].is<double>() && relTransform["quat_z"].is<double>())
+		{
+			Eigen::Quaterniond q(
+				relTransform["quat_w"].get<double>(),
+				relTransform["quat_x"].get<double>(),
+				relTransform["quat_y"].get<double>(),
+				relTransform["quat_z"].get<double>());
+			q.normalize();
+			rotationMatrix = q.toRotationMatrix();
+		}
+		else if (relTransform["roll"].is<double>() && relTransform["yaw"].is<double>() && relTransform["pitch"].is<double>())
+		{
+			// Legacy Euler form. Kept for backward compat with profiles written by
+			// older overlay builds; we never write it again.
+			Eigen::Vector3d refToTargetRotation;
+			refToTargetRotation(0) = relTransform["roll"].get<double>();
+			refToTargetRotation(1) = relTransform["yaw"].get<double>();
+			refToTargetRotation(2) = relTransform["pitch"].get<double>();
+			rotationMatrix =
+				Eigen::AngleAxisd(refToTargetRotation[0], Eigen::Vector3d::UnitX()) *
+				Eigen::AngleAxisd(refToTargetRotation[1], Eigen::Vector3d::UnitY()) *
+				Eigen::AngleAxisd(refToTargetRotation[2], Eigen::Vector3d::UnitZ());
+		}
 
 		ctx.refToTargetPose = Eigen::AffineCompact3d::Identity();
 		ctx.refToTargetPose.linear() = rotationMatrix;
@@ -346,6 +387,8 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	double maxRelErrorThresTmp = (double)ctx.maxRelativeErrorThreshold;
 	profile["max_relative_error_threshold"].set<double>(maxRelErrorThresTmp);
 	profile["target_latency_offset_ms"].set<double>(ctx.targetLatencyOffsetMs);
+	profile["latency_auto_detect"].set<bool>(ctx.latencyAutoDetect);
+	profile["estimated_latency_offset_ms"].set<double>(ctx.estimatedLatencyOffsetMs);
 
 	// Native prediction-suppression settings.
 	picojson::array suppressedSerials;
@@ -378,15 +421,22 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 		profile["chaperone"].set<picojson::object>(chaperone);
 	}
 
-	Eigen::Vector3d refToTragetRoation = ctx.refToTargetPose.rotation().eulerAngles(0, 1, 2);
+	// Serialize the relative pose as a quaternion (exact round-trip) instead of
+	// Eigen's eulerAngles, which is convention-fragile near gimbal lock and can
+	// silently drift across save/load cycles. The legacy roll/yaw/pitch keys are
+	// still understood by the reader (see ParseProfile) for backward compat with
+	// older profiles.
+	Eigen::Quaterniond refToTargetQuat(ctx.refToTargetPose.rotation());
+	refToTargetQuat.normalize();
 	Eigen::Vector3d refToTargetTranslation = ctx.refToTargetPose.translation();
 	picojson::object refToTarget;
 	refToTarget["x"].set<double>(refToTargetTranslation(0));
 	refToTarget["y"].set<double>(refToTargetTranslation(1));
 	refToTarget["z"].set<double>(refToTargetTranslation(2));
-	refToTarget["roll"].set<double>(refToTragetRoation(0));
-	refToTarget["yaw"].set<double>(refToTragetRoation(1));
-	refToTarget["pitch"].set<double>(refToTragetRoation(2));
+	refToTarget["quat_w"].set<double>(refToTargetQuat.w());
+	refToTarget["quat_x"].set<double>(refToTargetQuat.x());
+	refToTarget["quat_y"].set<double>(refToTargetQuat.y());
+	refToTarget["quat_z"].set<double>(refToTargetQuat.z());
 	profile["relative_pos_calibrated"].set<bool>(ctx.relativePosCalibrated);
 	profile["lock_relative_position"].set<bool>(ctx.lockRelativePosition);
 	profile["relative_transform"].set<picojson::object>(refToTarget);
