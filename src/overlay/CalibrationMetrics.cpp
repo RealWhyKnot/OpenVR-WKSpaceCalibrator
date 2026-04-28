@@ -1,7 +1,10 @@
 #include "stdafx.h"
 #include "CalibrationMetrics.h"
+#include "BuildStamp.h"
 #include <shlobj_core.h>
 #include <fstream>
+#include <openvr.h>
+#include <string>
 #include <vector>
 
 namespace Metrics {
@@ -18,6 +21,9 @@ namespace Metrics {
 	TimeSeries<double> jitterRef, jitterTarget;
 	TimeSeries<double> rotationConditionRatio;
 	TimeSeries<double> consecutiveRejections;
+	TimeSeries<double> samplesInBuffer;
+	TimeSeries<double> watchdogResetCount;
+	std::string lastRejectReason;
 
 	TimeSeries<double> fallbackApplyRate;
 	TimeSeries<double> perIdApplyRate;
@@ -159,12 +165,19 @@ namespace Metrics {
 		TS_FIELD(axisIndependence),
 		TS_FIELD(rotationConditionRatio),
 		TS_FIELD(consecutiveRejections),
+		TS_FIELD(samplesInBuffer),
+		TS_FIELD(watchdogResetCount),
 		TS_FIELD(computationTime),
 		TS_FIELD(jitterRef),
 		TS_FIELD(jitterTarget),
 		TS_FIELD(fallbackApplyRate),
 		TS_FIELD(perIdApplyRate),
 		TS_FIELD(quashApplyRate),
+		// String-valued reject reason. Empty when the last ComputeIncremental
+		// accepted; otherwise one of: "below_floor_or_worse", "axis_variance_low",
+		// "rotation_planar", "rotation_no_deltas", "translation_planar",
+		// "translation_no_deltas", "validate_failed", "healthy_below_floor".
+		{ "reject_reason", [](auto& s) { s << lastRejectReason; } },
 
 		{
 			"calibrationApplied",
@@ -280,8 +293,83 @@ namespace Metrics {
 		// poses (ref_t{x,y,z}, ref_q{w,x,y,z}, tgt_*) and tick_phase. The replay
 		// harness in tools/replay/ rejects logs that don't begin with this banner so
 		// older v1 captures (which lacked raw poses) fail loud rather than silently
-		// being interpreted with the wrong column layout.
+		// being interpreted with the wrong column layout. New columns added later
+		// (samplesInBuffer, watchdogResetCount, reject_reason) are still v2 because
+		// the replay harness looks columns up by name, not position.
 		logFile << "# spacecal_log_v2\n";
+
+		// === Self-describing header ============================================
+		// Triage from a debug log starts with "what build was this, on what
+		// hardware, with what profile". Embed that up-front so a single log file
+		// is sufficient for a bug report — no need to ask the reporter to run a
+		// dozen follow-up commands.
+		logFile << "# build_stamp=" SPACECAL_BUILD_STAMP "\n";
+		logFile << "# build_channel=" SPACECAL_BUILD_CHANNEL "\n";
+
+		// HMD identification — model + tracking system. Driver-side issues often
+		// correlate to a specific HMD or runtime, so this is the first thing
+		// anyone reading the log wants to know.
+		if (auto vrSystem = vr::VRSystem()) {
+			char buf[vr::k_unMaxPropertyStringSize] = {};
+			vr::ETrackedPropertyError pe = vr::TrackedProp_Success;
+			vrSystem->GetStringTrackedDeviceProperty(
+				vr::k_unTrackedDeviceIndex_Hmd,
+				vr::Prop_TrackingSystemName_String,
+				buf, sizeof buf, &pe);
+			if (pe == vr::TrackedProp_Success && buf[0]) {
+				logFile << "# hmd_tracking_system=" << buf << "\n";
+			}
+			buf[0] = 0;
+			vrSystem->GetStringTrackedDeviceProperty(
+				vr::k_unTrackedDeviceIndex_Hmd,
+				vr::Prop_ModelNumber_String,
+				buf, sizeof buf, &pe);
+			if (pe == vr::TrackedProp_Success && buf[0]) {
+				logFile << "# hmd_model=" << buf << "\n";
+			}
+			buf[0] = 0;
+			vrSystem->GetStringTrackedDeviceProperty(
+				vr::k_unTrackedDeviceIndex_Hmd,
+				vr::Prop_SerialNumber_String,
+				buf, sizeof buf, &pe);
+			if (pe == vr::TrackedProp_Success && buf[0]) {
+				logFile << "# hmd_serial=" << buf << "\n";
+			}
+
+			// SteamVR runtime version, when reachable. Useful for filtering issues
+			// to a specific Steam beta/stable lineage.
+			char rtPath[MAX_PATH] = {};
+			unsigned int rtLen = 0;
+			vr::VR_GetRuntimePath(rtPath, MAX_PATH, &rtLen);
+			if (rtLen > 0) {
+				logFile << "# steamvr_runtime_path=" << rtPath << "\n";
+			}
+		} else {
+			logFile << "# vr_system=unavailable_at_log_open\n";
+		}
+
+		// CPU + memory floor for context. SHGetKnownFolderPath needed Win10+
+		// already so OS version reporting is just for triage; not gated.
+		{
+			OSVERSIONINFOEXW osv{ sizeof(OSVERSIONINFOEXW) };
+			using RtlGetVersionPtr = LONG(WINAPI*)(LPOSVERSIONINFOEXW);
+			HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+			if (ntdll) {
+				auto fn = (RtlGetVersionPtr)GetProcAddress(ntdll, "RtlGetVersion");
+				if (fn && fn(&osv) == 0) {
+					logFile << "# windows=" << osv.dwMajorVersion << "."
+					        << osv.dwMinorVersion << "." << osv.dwBuildNumber << "\n";
+				}
+			}
+
+			SYSTEM_INFO si{};
+			GetSystemInfo(&si);
+			logFile << "# logical_processors=" << si.dwNumberOfProcessors << "\n";
+		}
+
+		// Banner divider so a human grepping the file can see where header ends
+		// and the column row begins. Replay harness ignores any line starting with #.
+		logFile << "# === columns ===\n";
 
 		for (int i = 0; i < sizeof fields / sizeof fields[0]; i++) {
 			if (i > 0) logFile << ",";
