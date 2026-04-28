@@ -186,6 +186,8 @@ void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTr
 {
 	if (newTransform.openVRID >= vr::k_unMaxTrackedDeviceCount) return;
 
+	std::lock_guard<std::mutex> lock(stateMutex);
+
 	auto &tf = transforms[newTransform.openVRID];
 	const bool wasEnabled = tf.enabled;
 	tf.enabled = newTransform.enabled;
@@ -257,6 +259,8 @@ void ServerTrackedDeviceProvider::SetTrackingSystemFallback(const protocol::SetT
 	std::string name(newFallback.system_name, len);
 	if (name.empty()) return;
 
+	std::lock_guard<std::mutex> lock(stateMutex);
+
 	if (!newFallback.enabled) {
 		// Disabling the fallback. Drop any per-ID slots that were following it so
 		// they don't keep applying the stale offset on subsequent pose updates.
@@ -296,6 +300,16 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 		pose.vecPosition[1] = dbgPos(1);
 		pose.vecPosition[2] = dbgPos(2);
 	}
+
+	// Lock guards every read/write of transforms[], deviceSystem[], systemFallbacks
+	// against the IPC server thread's SetDeviceTransform / SetTrackingSystemFallback
+	// handlers. IPC writes are infrequent (once per ScanAndApplyProfile tick at
+	// most ~1 Hz) and brief, so contention is negligible at the hook's hundreds-of-
+	// pose-updates-per-second cadence. Held for the full hook body — simpler than
+	// copy-out-under-lock + math-without-lock + write-back. shmem.SetPose writes
+	// to a different-process ring buffer (overlay reader) so the mutex doesn't
+	// synchronize that path; the lock only matters for in-process state.
+	std::lock_guard<std::mutex> lock(stateMutex);
 
 	auto& tf = transforms[openVRID];
 

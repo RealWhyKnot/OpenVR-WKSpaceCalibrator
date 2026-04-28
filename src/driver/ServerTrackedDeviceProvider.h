@@ -11,6 +11,7 @@
 #include <openvr_driver.h>
 
 #include <array>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 
@@ -96,6 +97,15 @@ private:
 	DeviceTransform transforms[vr::k_unMaxTrackedDeviceCount];
 	Eigen::Vector3d debugTransform;
 	Eigen::Quaterniond debugRotation;
+
+	// Guards transforms[], deviceSystem[], systemFallbacks against concurrent
+	// access. The IPC server thread mutates these via SetDeviceTransform /
+	// SetTrackingSystemFallback while the pose-hook thread reads them in
+	// HandleDevicePoseUpdated. std::string + std::unordered_map writes are
+	// definite UB when raced. Held briefly: hook thread copies the slot's
+	// transform + fallback target into stack locals under the lock, then
+	// releases it for the math/blend.
+	mutable std::mutex stateMutex;
 
 	// Per-ID tracking-system name, populated from SetDeviceTransform messages.
 	// Empty if the overlay hasn't told us yet for this slot.
