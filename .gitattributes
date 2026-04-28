@@ -15,4 +15,4 @@
 
 # Wiki source mirrors to a Linux-side wiki repo via wiki-sync.yml; LF avoids
 # diff churn there.
-docs/wiki/*.md text eol=lf
+wiki/*.md text eol=lf

@@ -88,7 +88,7 @@ Then open `bin/SpaceCalibrator.sln` in Visual Studio and build the `Release|x64`
 
 ## CI
 
-`.github/workflows/ci.yml` runs the build on `windows-latest` for every push to `develop` and every PR. Build artifacts are uploaded so PR reviewers can grab the `.exe` + `.dll` without building locally.
+`.github/workflows/ci.yml` runs the build on `windows-latest` for every push to `main` and every PR. Build artifacts are uploaded so PR reviewers can grab the `.exe` + `.dll` without building locally.
 
 `.github/workflows/release.yml` triggers on `v*` tags. Pushing `v2026.4.27.0` (or any valid stamp) builds the zip via `build.ps1 -Version 2026.4.27.0`, uploads it as a GitHub release, and includes the SHA256 in the release notes.
 
