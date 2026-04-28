@@ -312,3 +312,30 @@ TEST(CalibrationCalcTest, IgnoresOutliers) {
         << ", expected: " << trans.transpose();
     EXPECT_LT(RotationErrorDegrees(recovered, expected), 2.0);
 }
+
+// Regression test: DetectOutliers used to dereference an empty deltas vector when
+// the sample buffer was too small (< 6 samples), corrupting the SVD and causing
+// downstream Eigen::Quaterniond construction from a near-zero matrix to assert
+// in debug builds. Guarded by an early-return in DetectOutliers + CalibrateRotation.
+//
+// We don't expect ComputeOneshot to *succeed* with so little data — the validation
+// gate (RMS error / axis variance) should reject — but it must not crash.
+TEST(CalibrationCalcTest, DoesNotCrashOnSmallSampleBuffer) {
+    Eigen::AffineCompact3d expected = MakeTransform(0.2, 0.0, 0.0, Eigen::Vector3d(0.1, 0.0, -0.2));
+
+    // Smallest buffer sizes that exercise the early-return paths in
+    // DetectOutliers (step=5 means anything <6 produces zero deltas) and
+    // CalibrateRotation (its own delta loop without `step` may still be empty
+    // if all pairs fail the rotation-magnitude validity check).
+    for (int n : {1, 2, 3, 4, 5}) {
+        CalibrationCalc calc;
+        auto samples = MakeSamplePairs(expected, n, /*seed=*/0xC0FFEE);
+        for (auto& s : samples) calc.PushSample(s);
+
+        // Both code paths must return without exceptions or asserts.
+        EXPECT_NO_THROW({ (void)calc.ComputeOneshot(/*ignoreOutliers=*/true); })
+            << "ComputeOneshot crashed at n=" << n;
+        EXPECT_NO_THROW({ (void)calc.ComputeOneshot(/*ignoreOutliers=*/false); })
+            << "ComputeOneshot crashed at n=" << n << " (no outlier rejection)";
+    }
+}
