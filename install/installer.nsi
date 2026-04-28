@@ -109,16 +109,28 @@ Section "Install" SecInstall
 	afterupgrade:
 
 	SetOutPath "$INSTDIR"
-	
-	File "${ARTIFACTS_BASEDIR}\LICENSE"
-	File "${ARTIFACTS_BASEDIR}\README"
-	File "${ARTIFACTS_BASEDIR}\SpaceCalibrator.exe"
-	File "${ARTIFACTS_BASEDIR}\openvr_api.dll"
-	File "${ARTIFACTS_BASEDIR}\manifest.vrmanifest"
-	File "${ARTIFACTS_BASEDIR}\icon.png"
-	File "${ARTIFACTS_BASEDIR}\taskbar_icon.png"
 
-	ExecWait '"$INSTDIR\vcredist_x64.exe" /install /quiet'
+	; LICENSE and README live at the repo root, not in the build artifacts
+	; directory the upstream layout assumed. Reach up two levels from install/.
+	File "..\LICENSE"
+	File /oname=README.md "..\README.md"
+	File "${ARTIFACTS_BASEDIR}\SpaceCalibrator.exe"
+	; openvr_api.dll ships with the SDK; manifest/icons live next to overlay sources.
+	File "..\lib\openvr\bin\win64\openvr_api.dll"
+	File "..\src\overlay\manifest.vrmanifest"
+	File "..\src\overlay\icon.png"
+	File "..\src\overlay\taskbar_icon.png"
+
+	; VC++ Redistributable. Only bundled when the release workflow has fetched
+	; vcredist_x64.exe into install/ and passed /DBUNDLE_VCREDIST to makensis.
+	; Skipping the bundle (e.g. for a local makensis test build) leaves users
+	; responsible for installing the runtime themselves — most modern Windows
+	; systems already have it via other apps.
+	!ifdef BUNDLE_VCREDIST
+		File "vcredist_x64.exe"
+		ExecWait '"$INSTDIR\vcredist_x64.exe" /install /quiet'
+		Delete "$INSTDIR\vcredist_x64.exe"
+	!endif
 	
 	Var /GLOBAL vrRuntimePath
 	nsExec::ExecToStack '"$INSTDIR\SpaceCalibrator.exe" -openvrpath'
@@ -193,7 +205,7 @@ Section "Uninstall"
 	RMdir "$vrRuntimePath2\drivers\01spacecalibrator\"
 	
 	Delete "$INSTDIR\LICENSE"
-	Delete "$INSTDIR\README"
+	Delete "$INSTDIR\README.md"
 	Delete "$INSTDIR\SpaceCalibrator.exe"
 	Delete "$INSTDIR\openvr_api.dll"
 	Delete "$INSTDIR\manifest.vrmanifest"

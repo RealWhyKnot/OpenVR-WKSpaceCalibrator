@@ -49,6 +49,20 @@ jobs:
           if (-not (Test-Path $makensis)) { throw "makensis.exe not found at $makensis after choco install nsis." }
           Write-Host "makensis: $makensis"
 
+      - name: Download VC++ Redistributable
+        shell: pwsh
+        run: |
+          # The .nsi bundles vcredist_x64.exe via an !ifdef BUNDLE_VCREDIST guard so
+          # local makensis runs (without this download step) still build a working
+          # installer that just doesn't include the redistributable. CI always bundles.
+          $url = 'https://aka.ms/vs/17/release/vc_redist.x64.exe'
+          $out = Join-Path $PWD 'install\vcredist_x64.exe'
+          Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
+          if (-not (Test-Path $out)) { throw "vcredist download failed (file not found at $out)." }
+          $size = (Get-Item $out).Length
+          Write-Host "Downloaded vcredist_x64.exe: $size bytes"
+          if ($size -lt 1000000) { throw "vcredist download appears truncated ($size bytes)." }
+
       - name: Build NSIS installer
         id: installer
         shell: pwsh
@@ -70,8 +84,10 @@ jobs:
           $script   = Join-Path $PWD "install\installer.nsi"
 
           # /V3 = informational verbosity. /DVERSION overrides the !ifndef'd default in the .nsi
-          # so the embedded version matches the release tag.
-          & $makensis /V3 "/DVERSION=$numeric" $script
+          # so the embedded version matches the release tag. /DBUNDLE_VCREDIST flips on the
+          # vcredist File + ExecWait inside the .nsi (only safe when the download step above
+          # has staged install/vcredist_x64.exe).
+          & $makensis /V3 "/DVERSION=$numeric" /DBUNDLE_VCREDIST $script
           if ($LASTEXITCODE -ne 0) {
               throw "makensis failed with exit code $LASTEXITCODE."
           }

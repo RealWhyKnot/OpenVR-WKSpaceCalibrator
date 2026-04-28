@@ -11,6 +11,13 @@ ipch
 # build.ps1 outputs
 /release/
 /build/
+
+# Downloaded by the release workflow (vcredist for the NSIS installer); never
+# committed. Local installer builds without it skip the VC++ redistributable bundle.
+/install/vcredist_x64.exe
+# NSIS-built installer output lands next to installer.nsi.
+/install/SpaceCalibrator.exe
+/install/OpenVR-SpaceCalibrator-*-Setup.exe
 # Per-session local-build counter (don't commit; is regenerated each build)
 /build/local_build_state.json
 
