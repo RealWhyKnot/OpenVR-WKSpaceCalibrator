@@ -2,3 +2,4 @@
 
 void BuildMainWindow(bool runningInOverlay);
 void RequestImmediateRedraw();
+void RequestExit();

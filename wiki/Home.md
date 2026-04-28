@@ -21,6 +21,7 @@ The two halves talk over a named pipe. The math lives in the overlay; the driver
 - **Built-in prediction suppression.** Native equivalent of OVR-SmoothTracking, with auto-detection of the external tool and an in-app warning. See [[Prediction Suppression]].
 - **Cross-correlation latency auto-detect.** Estimates the inter-system end-to-end latency from motion correlation; manual offset slider also still available. See [[Continuous Calibration]] § Inter-system latency offset.
 - **Math improvements.** SO(3) Kabsch + Rodrigues yaw projection, IRLS with Cauchy weighting on translation, condition-ratio guards, dynamic RMS gate, single-step EMA on the published transform.
+- **In-app updater.** Release builds notice new GitHub releases on launch and offer a one-click upgrade with SHA-256 verification before launching the installer. See [[In-App Updater]].
 
 ## Read these first
 
