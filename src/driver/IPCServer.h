@@ -47,7 +47,10 @@ private:
 	bool stop = false;
 
 	std::set<PipeInstance *> pipes;
-	HANDLE connectEvent;
+	// Created by RunThread on entry, signalled by Stop() to break the wait,
+	// and closed in Stop() once the worker has joined so the kernel handle
+	// doesn't leak across driver reload.
+	HANDLE connectEvent = nullptr;
 
 	ServerTrackedDeviceProvider *driver;
 };

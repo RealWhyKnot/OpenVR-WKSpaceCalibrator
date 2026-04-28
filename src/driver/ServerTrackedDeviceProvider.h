@@ -13,7 +13,6 @@
 #include <array>
 #include <mutex>
 #include <string>
-#include <unordered_map>
 
 
 class ServerTrackedDeviceProvider : public vr::IServerTrackedDeviceProvider
@@ -94,31 +93,83 @@ private:
 		bool freezePrediction = false;
 	};
 
+	// Tracking-system fallback slot. Stored as a fixed-size flat array indexed
+	// by linear scan + memcmp on the system_name buffer (typical case is 2-3
+	// systems and we never see more than a handful). Cache-line-friendly and
+	// avoids the std::string + std::unordered_map heap traffic that otherwise
+	// happens on every pose update for every disabled slot.
+	struct FallbackSlot
+	{
+		// NUL-padded; full buffer is compared so a partial match against a
+		// shorter name doesn't false-positive.
+		char system_name[protocol::MaxTrackingSystemNameLen];
+		FallbackTransform tf;
+		bool occupied = false;
+	};
+
+	// Lookup state for the lazy VRProperties() tracking-system query in
+	// HandleDevicePoseUpdated. The query has to fire from the pose-hook thread
+	// because the overlay may not have called SetDeviceTransform for this slot
+	// yet; without throttling it gets re-issued on every single pose update for
+	// every empty slot up to k_unMaxTrackedDeviceCount.
+	enum class LookupState : uint8_t {
+		NotTried,
+		Cached,
+		Failed,
+	};
+
 	DeviceTransform transforms[vr::k_unMaxTrackedDeviceCount];
 	Eigen::Vector3d debugTransform;
 	Eigen::Quaterniond debugRotation;
 
-	// Guards transforms[], deviceSystem[], systemFallbacks against concurrent
-	// access. The IPC server thread mutates these via SetDeviceTransform /
-	// SetTrackingSystemFallback while the pose-hook thread reads them in
-	// HandleDevicePoseUpdated. std::string + std::unordered_map writes are
-	// definite UB when raced. Held briefly: hook thread copies the slot's
-	// transform + fallback target into stack locals under the lock, then
-	// releases it for the math/blend.
+	// Guards transforms[], deviceSystem[], systemFallbacks[] and the lookup
+	// state against concurrent access. The IPC server thread mutates these via
+	// SetDeviceTransform / SetTrackingSystemFallback while the pose-hook thread
+	// reads them in HandleDevicePoseUpdated. std::string assignments + flat-
+	// array writes during a concurrent read are UB without synchronisation.
+	// Held briefly: hook thread copies the slot's transform + fallback target
+	// into stack locals under the lock, then releases it for the math/blend.
 	mutable std::mutex stateMutex;
 
 	// Per-ID tracking-system name, populated from SetDeviceTransform messages.
 	// Empty if the overlay hasn't told us yet for this slot.
 	std::array<std::string, vr::k_unMaxTrackedDeviceCount> deviceSystem;
 
-	// Map from tracking-system name -> fallback transform. Consulted in
-	// HandleDevicePoseUpdated when the per-ID transform is disabled, so a freshly
-	// connected device of a calibrated system inherits the offset immediately.
-	std::unordered_map<std::string, FallbackTransform> systemFallbacks;
+	// Per-ID state of the lazy VRProperties() tracking-system query. NotTried
+	// means we haven't asked yet; Cached means deviceSystem[id] is populated;
+	// Failed means the last query came up empty and we should back off.
+	LookupState lookupState[vr::k_unMaxTrackedDeviceCount] = {};
+
+	// Timestamp of the last failed VRProperties() query for each slot. Failed
+	// queries are retried at most once per second so an unoccupied slot doesn't
+	// hammer the property store on every pose update.
+	LARGE_INTEGER lastLookupAttempt[vr::k_unMaxTrackedDeviceCount] = {};
+
+	// Fixed-capacity flat list of tracking-system fallbacks. 8 is well above
+	// any plausible deployment (HMD vendor + 1-2 controller systems + scratch).
+	// Linear scanned in HandleDevicePoseUpdated; replaces the prior
+	// std::unordered_map<std::string, FallbackTransform> which heap-allocated
+	// on every key insert and required a hash + equality check on every pose
+	// update for every disabled slot.
+	static const size_t MaxFallbackSlots = 8;
+	FallbackSlot systemFallbacks[MaxFallbackSlots] = {};
+
+	// Cached QueryPerformanceFrequency value. QPF is constant for the lifetime
+	// of the boot, so we capture it once in Init() rather than re-querying on
+	// every BlendTransform call (~50-200 ns saved per pose update).
+	LARGE_INTEGER qpcFreq = {};
 
 	DeltaSize currentDeltaSpeed[vr::k_unMaxTrackedDeviceCount];
 
 	protocol::AlignmentSpeedParams alignmentSpeedParams;
+
+	// Look up an existing fallback slot by system name (linear scan + memcmp).
+	// Returns nullptr if no slot is currently occupied with that name.
+	FallbackSlot* FindFallbackSlot(const char* name, size_t len);
+	const FallbackSlot* FindFallbackSlot(const char* name, size_t len) const;
+	// Find or insert a fallback slot for the given name. Returns nullptr if the
+	// flat array is at capacity.
+	FallbackSlot* AcquireFallbackSlot(const char* name, size_t len);
 
 	DeltaSize GetTransformDeltaSize(
 		DeltaSize prior_delta,
