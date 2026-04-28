@@ -220,6 +220,23 @@ struct CalibrationContext
 		enabled = false;
 		validProfile = false;
 		refToTargetPose = Eigen::AffineCompact3d::Identity();
+
+		// Per-profile fields added by recent agent passes. Without these resets
+		// the user's stale latency/suppression settings would carry over after a
+		// profile clear and silently apply to the next calibration session.
+		suppressedSerials.clear();
+		targetLatencyOffsetMs = 0.0;
+		latencyAutoDetect = false;
+		estimatedLatencyOffsetMs = 0.0;
+		refSpeedHistory.clear();
+		targetSpeedHistory.clear();
+		speedSampleTimes.clear();
+		timeLastLatencyEstimate = 0.0;
+		// Runtime UI state — pausing on an empty profile makes no sense.
+		calibrationPaused = false;
+		// Note: autoSuppressOnExternalTool, showAdvancedSettings, and the
+		// externalSmoothing* runtime-detection fields are intentionally NOT reset
+		// — they're user preferences / detector state that span profiles.
 		// No calibration was performed — relative pose is NOT calibrated. The
 		// previous value here was `true`, which left a stale-identity-matrix
 		// believed-good and caused StartContinuousCalibration to pass `true` to
