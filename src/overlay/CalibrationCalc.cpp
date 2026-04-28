@@ -143,6 +143,17 @@ std::vector<bool> CalibrationCalc::DetectOutliers() const {
 		}
 	}
 
+	// With fewer than ~6 samples the step=5 pair extraction can't produce any
+	// delta-rotations, so the Kabsch SVD below would run on empty input and the
+	// extrinsic-quaternion construction further down would feed `Eigen::Quaterniond`
+	// a non-orthogonal/NaN-laden rotation matrix — which asserts in debug builds and
+	// produces undefined behaviour in release. Short-circuit: with too little data
+	// to make an outlier judgement we accept everything; the caller's own validity
+	// checks (RMS error, axis variance, condition ratio) will catch garbage solves.
+	if (deltas.empty()) {
+		return std::vector<bool>(m_samples.size(), true);
+	}
+
 	// Kabsch algorithm
 	Eigen::MatrixXd refPoints(deltas.size(), 3), targetPoints(deltas.size(), 3);
 	Eigen::Vector3d refCentroid(0, 0, 0), targetCentroid(0, 0, 0);
@@ -255,6 +266,16 @@ Eigen::Vector3d CalibrationCalc::CalibrateRotation(const bool ignoreOutliers) co
 	//snprintf(buf, sizeof buf, "Got %zd samples with %zd delta samples\n", m_samples.size(), deltas.size());
 	//CalCtx.Log(buf);
 
+	// Guard against the degenerate empty-deltas case (too few samples, or all
+	// pairs failed the rotation-magnitude validity check). Without this we'd
+	// divide by deltas.size() == 0 below and feed NaN-laden centroids into the
+	// SVD. Returning zero euler with condition ratio = 0 lets ComputeIncremental's
+	// degenerate-motion guard reject the result naturally.
+	if (deltas.empty()) {
+		m_rotationConditionRatio = 0.0;
+		return Eigen::Vector3d::Zero();
+	}
+
 	// Kabsch algorithm
 
 	// Initialize 2D points and centroids
@@ -358,6 +379,13 @@ Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rot
 		}
 	}
 
+	// With < 2 samples no pair-based deltas exist; the LS system below would be
+	// 0×3 and BDCSVD is undefined on empty input. Fall through with zero
+	// translation; the caller's validation gate will reject the result.
+	if (deltas.empty()) {
+		return Eigen::Vector3d::Zero();
+	}
+
 	Eigen::VectorXd constants(deltas.size() * 3);
 	Eigen::MatrixXd coefficients(deltas.size() * 3, 3);
 
@@ -431,6 +459,7 @@ double CalibrationCalc::RetargetingErrorRMS(
 		sampleCount++;
 	}
 
+	if (sampleCount == 0) return std::numeric_limits<double>::infinity();
 	return sqrt(errorAccum / sampleCount);
 }
 
@@ -513,6 +542,7 @@ Eigen::Vector3d CalibrationCalc::ComputeRefToTargetOffset(const Eigen::AffineCom
 		sampleCount++;
 	}
 
+	if (sampleCount == 0) return Eigen::Vector3d::Zero();
 	accum /= sampleCount;
 
 	return accum;
@@ -547,6 +577,7 @@ Eigen::Vector4d CalibrationCalc::ComputeAxisVariance(
 
 		points.push_back(point);
 	}
+	if (points.empty()) return Eigen::Vector4d::Zero();
 	mean /= (double) points.size();
 
 	// Compute covariance matrix
@@ -699,6 +730,17 @@ bool CalibrationCalc::CalibrateByRelPose(Eigen::AffineCompact3d &out) const {
 
 
 bool CalibrationCalc::ComputeOneshot(const bool ignoreOutliers) {
+	// Below ~6 samples, the step=5 outlier-detection produces no deltas, several
+	// downstream solves end up with empty matrices, and validation degenerates.
+	// Refuse to attempt a calibration on too-small inputs rather than letting
+	// the math fall through to NaN / divide-by-zero territory. The Calibration.cpp
+	// caller already gates on SampleCount() (100+) so production never hits this
+	// branch — it's a safety net for direct callers (the replay harness, tests).
+	if (m_samples.size() < 6) {
+		CalCtx.Log("Not updating: too few samples to compute a calibration\n");
+		return false;
+	}
+
 	auto calibration = ComputeCalibration(ignoreOutliers);
 
 	bool valid = ValidateCalibration(calibration);
@@ -729,6 +771,11 @@ void CalibrationCalc::ComputeInstantOffset() {
 
 bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double relPoseMaxError, const bool ignoreOutliers) {
 	Metrics::RecordTimestamp();
+
+	// Same minimum-sample guard as ComputeOneshot; see comment there.
+	if (m_samples.size() < 6) {
+		return false;
+	}
 
 	if (lockRelativePosition) {
 		Eigen::AffineCompact3d byRelPose;
