@@ -206,6 +206,12 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		ctx.maxRelativeErrorThreshold = 0.005f;
 	}
 
+	if (obj["target_latency_offset_ms"].is<double>()) {
+		ctx.targetLatencyOffsetMs = obj["target_latency_offset_ms"].get<double>();
+	} else {
+		ctx.targetLatencyOffsetMs = 0.0;
+	}
+
 	if (obj["scale"].is<double>()) {
 		ctx.calibratedScale = obj["scale"].get<double>();
 	} else {
@@ -324,6 +330,7 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	profile["jitter_threshold"].set<double>(jitterThreshold);
 	double maxRelErrorThresTmp = (double)ctx.maxRelativeErrorThreshold;
 	profile["max_relative_error_threshold"].set<double>(maxRelErrorThresTmp);
+	profile["target_latency_offset_ms"].set<double>(ctx.targetLatencyOffsetMs);
 
 	double speed = (int) ctx.calibrationSpeed;
 	profile["calibration_speed"].set<double>(speed);
