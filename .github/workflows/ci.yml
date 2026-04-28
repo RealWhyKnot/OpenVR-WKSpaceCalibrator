@@ -47,7 +47,10 @@ jobs:
         # The minhook submodule's CMakeLists declares cmake_minimum_required(2.8.12)
         # which CMake 4.x rejects. The policy-version override lets us configure
         # without forking the submodule. Mirror this in build.ps1.
-        run: cmake -G "Visual Studio 17 2022" -A x64 -B bin -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+        # -Wno-dev silences developer-mode warnings from the minhook submodule
+        # and from GoogleTest's FetchContent module — both are upstream code we
+        # don't control.
+        run: cmake -G "Visual Studio 17 2022" -A x64 -B bin -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -Wno-dev
 
       - name: Build
         run: cmake --build bin --config Release --parallel
