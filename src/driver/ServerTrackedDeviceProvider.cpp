@@ -206,6 +206,10 @@ void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTr
 	// calls will re-evaluate fallback eligibility.
 	tf.fallbackActive = false;
 
+	// Velocity-freeze flag. Cheap to update unconditionally; HandleDevicePoseUpdated
+	// gates on it once per pose update.
+	tf.freezePrediction = newTransform.freezePrediction;
+
 	if (newTransform.updateTranslation) {
 		tf.targetTransform.translation = convert(newTransform.translation);
 		if (!newTransform.lerp) {
@@ -278,6 +282,7 @@ void ServerTrackedDeviceProvider::SetTrackingSystemFallback(const protocol::SetT
 	fb.transform.rotation = Eigen::Quaterniond(
 		newFallback.rotation.w, newFallback.rotation.x, newFallback.rotation.y, newFallback.rotation.z);
 	fb.scale = newFallback.scale;
+	fb.freezePrediction = newFallback.freezePrediction;
 }
 
 bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t &pose)
@@ -292,9 +297,31 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 		pose.vecPosition[2] = dbgPos(2);
 	}
 
-	shmem.SetPose(openVRID, pose);
-
 	auto& tf = transforms[openVRID];
+
+	// Prediction-suppression: zero out velocity / acceleration / poseTimeOffset so
+	// downstream consumers (SteamVR's predictor, third-party smoothing tools that
+	// scale these fields) see a "stationary" tracker between samples. This is the
+	// native equivalent of OVR-SmoothTracking's behaviour, applied per-device.
+	// Triggered by either the per-ID freezePrediction flag OR a matching enabled
+	// fallback that has freezePrediction set. Zeroing happens BEFORE the shmem
+	// write so the overlay's sample-collection sees the same frozen pose data.
+	bool freeze = tf.freezePrediction;
+	if (!freeze && !tf.enabled && !deviceSystem[openVRID].empty()) {
+		auto fbIt = systemFallbacks.find(deviceSystem[openVRID]);
+		if (fbIt != systemFallbacks.end() && fbIt->second.enabled && fbIt->second.freezePrediction) {
+			freeze = true;
+		}
+	}
+	if (freeze) {
+		pose.vecVelocity[0] = pose.vecVelocity[1] = pose.vecVelocity[2] = 0;
+		pose.vecAcceleration[0] = pose.vecAcceleration[1] = pose.vecAcceleration[2] = 0;
+		pose.vecAngularVelocity[0] = pose.vecAngularVelocity[1] = pose.vecAngularVelocity[2] = 0;
+		pose.vecAngularAcceleration[0] = pose.vecAngularAcceleration[1] = pose.vecAngularAcceleration[2] = 0;
+		pose.poseTimeOffset = 0;
+	}
+
+	shmem.SetPose(openVRID, pose);
 
 	if (tf.quash) {
 		pose.vecPosition[0] = -pose.vecWorldFromDriverTranslation[0];

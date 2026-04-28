@@ -76,6 +76,13 @@ private:
 		// system fallback rather than an overlay-supplied per-ID value. Used to
 		// snap on the first activation of fallback.
 		bool fallbackActive = false;
+		// When true, every pose update for this device gets its velocity /
+		// acceleration / angular-velocity / angular-acceleration / poseTimeOffset
+		// fields zeroed before any other processing. Defeats SteamVR's prediction
+		// AND third-party "smooth tracking" tools that scale those fields. Used to
+		// keep calibration trackers' pose data clean while leaving smoothing tools
+		// active on every other device.
+		bool freezePrediction = false;
 	};
 
 	struct FallbackTransform
@@ -83,6 +90,7 @@ private:
 		bool enabled = false;
 		IsoTransform transform;
 		double scale = 1.0;
+		bool freezePrediction = false;
 	};
 
 	DeviceTransform transforms[vr::k_unMaxTrackedDeviceCount];

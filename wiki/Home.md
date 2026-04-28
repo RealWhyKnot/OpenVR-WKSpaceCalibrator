@@ -21,6 +21,7 @@ The two halves talk over a named pipe. The math lives in the overlay; the driver
 
 ## Reference
 
+- **[[Prediction Suppression]]** — built-in OVR-SmoothTracking equivalent; per-device velocity-zeroing for clean math
 - **[[Building]]** — submodules, `build.ps1`, version stamping
 - **[[Troubleshooting]]** — common failure modes and what to check
 
