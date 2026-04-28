@@ -9,6 +9,39 @@
 #include <iomanip>
 #include <limits>
 
+// Profile schema versioning.
+//
+// Persisted profiles now include a "schema_version" integer at the top level of each
+// profile object. This lets us evolve the on-disk JSON shape without silently breaking
+// or corrupting profiles written by older overlay builds.
+//
+// Version history:
+//   0 - Implicit version of legacy profiles (no "schema_version" key present). All
+//       fields prior to this commit. Loaded in compatibility mode.
+//   1 - First explicitly-versioned schema. Same field set as version 0, but writes
+//       the version key so future migrations have a starting point.
+//
+// When you change the schema:
+//   1. Bump kProfileSchemaVersion below.
+//   2. Add a step inside MigrateProfile() that transforms a parsed picojson::object
+//      from the previous version to the new one (rename keys, fill defaults, etc.).
+//   3. Keep the load path tolerant of missing keys for fields you add.
+static const int kProfileSchemaVersion = 1;
+
+// Forward-migrate an already-parsed profile object in place from `from_version`
+// up to kProfileSchemaVersion. Called between JSON parse and field population.
+//
+// Each future schema bump should add a `if (from_version < N) { ... }` block here
+// that rewrites the object to the version-N shape. Steps must be cumulative: a
+// profile at version 0 should pass through every step on its way to current.
+static void MigrateProfile(int from_version, picojson::object &profile)
+{
+	// from_version 0 -> 1: no field changes; the only difference is the presence
+	// of the "schema_version" key itself, so nothing to rewrite here.
+	(void)from_version;
+	(void)profile;
+}
+
 static picojson::array FloatArray(const float *buf, size_t numFloats)
 {
 	picojson::array arr;
@@ -116,6 +149,28 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	}
 
 	auto obj = arr[0].get<picojson::object>();
+
+	// Determine the profile schema version. Legacy profiles (written before schema
+	// versioning was introduced) have no "schema_version" key and are treated as
+	// version 0. A profile from a NEWER overlay than this build is refused — we'd
+	// rather leave validProfile=false than silently load partial data and overwrite
+	// the user's newer profile on the next save.
+	int profileVersion = 0;
+	if (obj["schema_version"].is<double>()) {
+		profileVersion = (int)obj["schema_version"].get<double>();
+	}
+
+	if (profileVersion > kProfileSchemaVersion) {
+		std::cerr << "Refusing to load profile: schema_version " << profileVersion
+			<< " is newer than this build supports (" << kProfileSchemaVersion << ")."
+			<< " Update OpenVR-SpaceCalibrator to use this profile." << std::endl;
+		ctx.validProfile = false;
+		return;
+	}
+
+	if (profileVersion < kProfileSchemaVersion) {
+		MigrateProfile(profileVersion, obj);
+	}
 
 	LoadAlignmentParams(ctx, obj["alignment_params"]);
 	ctx.referenceTrackingSystem = obj["reference_tracking_system"].get<std::string>();
@@ -237,8 +292,14 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	}
 
 	picojson::object profile;
+	// Stamp the schema version first so it's prominent at the top of the serialized
+	// output and so any future loader can branch on it before touching other fields.
+	// picojson's set<double>() takes an lvalue reference, so the constant must be
+	// stored in a local before being passed.
+	double schemaVersionDouble = (double)kProfileSchemaVersion;
+	profile["schema_version"].set<double>(schemaVersionDouble);
 	profile["alignment_params"].set<picojson::object>(SaveAlignmentParams(ctx));
-	
+
 	profile["reference_tracking_system"].set<std::string>(ctx.referenceTrackingSystem);
 	profile["target_tracking_system"].set<std::string>(ctx.targetTrackingSystem);
 	profile["roll"].set<double>(ctx.calibratedRotation(0));
@@ -366,6 +427,10 @@ void LoadProfile(CalibrationContext &ctx)
 	//        I don't know why whoever wrote this thought writing to the registry in the 2020s was a good idea...
 	//        NOTE: HKEY_CURRENT_USER_LOCAL_SETTINGS evaluates to	HKCU\Software\Classes\Local Settings
 	//              Settings are currently stored at				HKCU\Software\Classes\Local Settings\Software\OpenVR-SpaceCalibrator
+	//
+	//        Profiles stored at this registry path are now versioned via the top-level
+	//        "schema_version" integer (see kProfileSchemaVersion). Legacy registry blobs
+	//        written before versioning are treated as version 0 and migrated on read.
 
 	ctx.validProfile = false;
 
