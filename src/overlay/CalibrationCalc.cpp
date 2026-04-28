@@ -1125,12 +1125,25 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 			// sample is rejected, the stuck-loop watchdog spurious-fires every ~25s,
 			// and the post-clear recompute often produces garbage. Floor at
 			// kRejectionFloor — anything tighter than that is noise, not signal.
+			//
+			// Only run this check when newError is finite. If newError is INFINITY,
+			// no candidate was actually computed this tick (the rotation- or
+			// translation-condition guard above bailed out and never set newError),
+			// so the comparison `effectivePrior < INFINITY * threshold` is trivially
+			// true. Doing the rejection here in that case is harmless math-wise --
+			// the candidate is already invalid -- but it OVERWRITES the more
+			// specific reject_reason tag the upstream guard set, mislabeling
+			// rotation_no_deltas / rotation_planar / translation_planar rows as
+			// below_floor_or_worse in the debug log. Triage clarity is much better
+			// when the tag reflects what actually fired.
 			constexpr double kRejectionFloor = 0.005; // 5 mm
-			const double effectivePrior = std::max(priorCalibrationError, kRejectionFloor);
-			if (effectivePrior < newError * threshold) {
-				newCalibrationValid = false;
-				shouldRapidCorrect = false;
-				m_rejectReasonTag = "below_floor_or_worse";
+			if (std::isfinite(newError)) {
+				const double effectivePrior = std::max(priorCalibrationError, kRejectionFloor);
+				if (effectivePrior < newError * threshold) {
+					newCalibrationValid = false;
+					shouldRapidCorrect = false;
+					m_rejectReasonTag = "below_floor_or_worse";
+				}
 			}
 		}
 
