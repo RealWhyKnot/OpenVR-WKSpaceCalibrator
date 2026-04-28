@@ -3,6 +3,7 @@
 #include <vector>
 
 #include <implot/implot.h>
+#include "Calibration.h"
 #include "CalibrationCalc.h"
 #include "CalibrationMetrics.h"
 #include "UserInterface.h"
@@ -313,6 +314,49 @@ namespace {
 		}
 	}
 
+	// Mirror of CalibrationCalc.cpp's local RotationConditionMin/MaxConsecutiveRejections.
+	// Kept in sync manually — used only as reference lines on the watchdog plots.
+	constexpr double kRotationConditionMin = 0.05;
+	constexpr double kMaxConsecutiveRejections = 50.0;
+
+	void G_RotationConditionRatio() {
+		if (ImPlot::BeginPlot("##RotationConditionRatio", ImVec2(-1, 0))) {
+			ImPlot::SetupAxes(nullptr, "min/max SV");
+			SetupXAxis();
+			ImPlot::SetupAxisLimits(ImAxis_Y1, 0, 1, ImGuiCond_Appearing);
+
+			AddApplyTicks();
+
+			// Reference line at the rejection threshold.
+			ImPlot::SetNextLineStyle(ImVec4(1, 0.4f, 0.4f, 1));
+			double thresholdY[2] = { kRotationConditionMin, kRotationConditionMin };
+			ImPlot::PlotInfLines("##RotConditionThreshold", &thresholdY[0], 1, ImPlotInfLinesFlags_Horizontal);
+
+			PlotLineG("Rotation Condition", Metrics::rotationConditionRatio);
+
+			ImPlot::EndPlot();
+		}
+	}
+
+	void G_ConsecutiveRejections() {
+		if (ImPlot::BeginPlot("##ConsecutiveRejections", ImVec2(-1, 0))) {
+			ImPlot::SetupAxes(nullptr, "count");
+			SetupXAxis();
+			ImPlot::SetupAxisLimits(ImAxis_Y1, 0, 50, ImGuiCond_Appearing);
+
+			AddApplyTicks();
+
+			// Reference line at the watchdog trigger count.
+			ImPlot::SetNextLineStyle(ImVec4(1, 0.4f, 0.4f, 1));
+			double watchdogY = kMaxConsecutiveRejections;
+			ImPlot::PlotInfLines("##WatchdogThreshold", &watchdogY, 1, ImPlotInfLinesFlags_Horizontal);
+
+			PlotLineG("Rejections", Metrics::consecutiveRejections);
+
+			ImPlot::EndPlot();
+		}
+	}
+
 	const struct GraphInfo graphs[] = {
 		{ "Position Error", G_PosOffset_PosError },
 		{ "Axis Variance", G_AxisVariance },
@@ -322,7 +366,9 @@ namespace {
 		{ "Offset: By Rel Pose", G_PosOffset_ByRelPose },
 		{ "Processing time", G_ComputationTime },
 		{ "Reference Jitter", G_JitterReference },
-		{ "Target Jitter", G_JitterTarget }
+		{ "Target Jitter", G_JitterTarget },
+		{ "Rotation Condition Ratio", G_RotationConditionRatio },
+		{ "Consecutive Rejections", G_ConsecutiveRejections }
 	};
 
 	const int N_GRAPHS = sizeof(graphs) / sizeof(graphs[0]);
@@ -396,6 +442,10 @@ void ShowCalibrationDebug(int rows, int cols) {
 	}
 	
 	ImGui::EndTable();
+
+	// Session-level diagnostics that don't make sense as a TimeSeries.
+	ImGui::TextDisabled("Watchdog resets this session: %d", GetWatchdogResetCount());
+
 	ImGui::EndChild();
 
 	ImPlot::PopStyleColor(1);

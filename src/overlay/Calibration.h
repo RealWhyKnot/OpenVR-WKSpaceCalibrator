@@ -223,3 +223,8 @@ void ApplyChaperoneBounds();
 void PushCalibrationApplyTime();
 void ShowCalibrationDebug(int r, int c);
 void DebugApplyRandomOffset();
+
+// Accessor for the session-counter of stuck-loop watchdog firings. The
+// underlying CalibrationCalc instance lives in an anonymous namespace inside
+// Calibration.cpp, so we expose this via a free function.
+int GetWatchdogResetCount();
