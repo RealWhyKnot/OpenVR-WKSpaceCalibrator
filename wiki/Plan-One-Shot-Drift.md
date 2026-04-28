@@ -189,29 +189,142 @@ The previous five options treat the user as someone who'll click a button when p
 
 **Risk:** medium. The user's hand position when summoning the dashboard varies a lot; not as repeatable as T-pose.
 
+### Option K: Hand-on-HMD anchor
+
+**What:** detect when a controller is held very close to the HMD (< ~25 cm) and stationary for ~1 s. This typically happens when the user adjusts their headset fit — they grip the HMD with one or both hands. Each instance is a known close-range constellation.
+
+**Why:** users adjust their HMD fit several times a session (especially Quest users with their forehead pad / strap). Free anchor moment.
+
+**Mechanics:** track controller-to-HMD distance. When it drops below threshold AND velocity drops below threshold for ~1 s, snapshot the relative pose. Compare to previous snapshots; persistent shift = drift.
+
+**Effort:** ~1 day.
+
+**Risk:** low. The "controller is on / near the HMD" predicate is unambiguous when both criteria hold for a sustained window.
+
+### Option L: Sit/stand transition detection
+
+**What:** detect HMD vertical drops/rises of ~30-50 cm over ~1-2 s as sit/stand transitions. During the transition, body trackers should follow predictable kinematic patterns (hip drops with HMD; knees fold; etc.). Inconsistencies between expected and observed transition motion = drift signal.
+
+**Why:** users sit and stand naturally. Each transition is a complex multi-tracker event with known geometric constraints.
+
+**Mechanics:** HMD Y velocity classifier (one-pass detector). When transition fires, check that body trackers' Y deltas match the HMD's within tolerance. Disagreement above threshold → drift on one of those trackers.
+
+**Effort:** ~2 days.
+
+**Risk:** medium. Distinguishing sit/stand from squatting / leaning is non-trivial. Conservative thresholds + requiring sustained Y change reduce false positives.
+
+### Option M: Manual gesture trigger ("recalibrate now" chord)
+
+**What:** holding both grip buttons (or any defined chord) for ~3 s while still triggers an immediate recalibration. Explicit user control as an escape hatch.
+
+**Why:** every drift-detection scheme has false negatives. Sometimes the user just *knows* their tracking is off and wants to fix it. A button chord is a fast, predictable manual override.
+
+**Mechanics:** poll controller state in the calibration tick. When the chord has been held continuously for the threshold duration AND the user is still, kick off a brief recalibration.
+
+**Effort:** ~half a day.
+
+**Risk:** low. Worst case is a false trigger from holding both grips during normal play; mitigate by requiring sustained ~3 s hold AND low body velocity.
+
+### Option N: HMD wake / power-state events
+
+**What:** subscribe to OpenVR's sleep/wake / proximity-sensor events. When the HMD wakes from sleep (typical during a quick break / mask off), assume drift is likely and either pre-emptively run a brief recalibration or surface a "verify calibration?" prompt.
+
+**Why:** Quest / Pico HMDs sleep aggressively. Each wake has a non-trivial chance of recentering or drifting. We can catch these as discrete events.
+
+**Mechanics:** listen to `VREvent_TrackedDeviceUserInteractionEnded` and `VREvent_TrackedDeviceUserInteractionStarted` for the HMD slot. The latter fires when the user puts the headset back on.
+
+**Effort:** ~half a day.
+
+**Risk:** low. Native OpenVR event; well-defined.
+
+### Option O: Multi-system drift differential
+
+**What:** for users with 3+ tracking systems, run drift-residual checks pairwise between every non-HMD pair. If system B and system C agree but both disagree with the HMD, the HMD is the drifting one. If B disagrees with both A (HMD) and C, then B has shifted (e.g., a tracker fell off and was repositioned).
+
+**Why:** triangulating across systems localises the source of drift, which lets us be smarter about how to fix it. If only the HMD drifted, we want to recalibrate everything else against it. If only one tracker drifted (got bumped, fell off), recalibrating just that one is enough.
+
+**Mechanics:** maintain per-pair residual EMAs. Cluster pairs by who-agrees-with-whom. The minority cluster is the source of drift.
+
+**Effort:** ~3 days. Conceptually clean but requires multi-ecosystem to be heavily exercised first to find edge cases.
+
+**Risk:** medium. Triangulation logic has edge cases when only 2 systems are present (no triangulation possible) or when 4+ are present (multiple "outliers" might disagree for unrelated reasons).
+
+### Option P: Tracking-quality-aware drift gating
+
+**What:** don't trigger drift alerts when the underlying samples are themselves low-confidence. SteamVR reports a `eTrackingResult` enum per device; trackers in `Running_OutOfRange` or `Running_OK_Calibrating` aren't reliable. Suppress drift checks for any device in a non-OK state until confidence returns.
+
+**Why:** lighthouse occlusion / wireless interference / battery-low trackers all produce noisy samples. Drift checks against those samples produce false alerts. Filtering by tracking-quality is a free correctness boost.
+
+**Mechanics:** read `pose.eTrackingResult` for each device; mark as "exclude from drift check" when result != Running_OK. Only count drift residuals when all involved devices are healthy.
+
+**Effort:** ~half a day.
+
+**Risk:** low. Belt-and-braces filter; the worst case is a missed drift detection (user sees badge later than ideal).
+
+### Option Q: Cross-session drift baseline
+
+**What:** at program start, if any tracker is in the same physical position as it was at last shutdown (within tolerance), the saved offset should still produce a similar residual against current poses. Big residual at boot = something moved between sessions, prompt the user to recalibrate.
+
+**Why:** users often leave trackers powered on between sessions, or in the same physical location (taped to wall, on a tripod). Cross-session continuity is detectable and useful.
+
+**Mechanics:** at shutdown, persist last-known pose for each calibrated tracker. At boot, after the first ~5 s of fresh poses arriving, compute residual against stored offset. Threshold above ~3 cm → prompt.
+
+**Effort:** ~1 day.
+
+**Risk:** low. Worst case is a false positive if the user did move the tracker intentionally — they hit "looks fine" on the prompt and move on.
+
+### Option R: Battery-low tracker as a different "drift" signal
+
+**What:** not really drift, but trackers with low batteries report noisy / occasionally-glitchy data. Detect via `Prop_DeviceBatteryPercentage_Float` and surface a separate "tracker X battery low — pose data may be unreliable" notification distinct from the drift badge.
+
+**Why:** users blame "drift" for things that are actually battery-induced jitter. Pre-empting that with a clear "your battery is low" message saves frustration.
+
+**Mechanics:** poll battery property periodically. Below ~15% → notification.
+
+**Effort:** ~half a day.
+
+**Risk:** none. Pure information surfacing.
+
 ---
 
 ## Updated recommendation
 
-**Phase 1 (next): A + B + F.**
+**Phase 1 — foundational (next): A + B + F + P.**
 
 - **B** improves the *initial* one-shot calibration quality.
 - **A** catches gradual drift via passive residual monitoring.
 - **F** catches drift at high-confidence anchor moments (T-pose) — the killer feature for VRChat users.
+- **P** suppresses A and F when underlying samples are low-confidence (lighthouse occlusion, wireless dropout). Belt-and-braces correctness for everything else.
 
-A and F complement each other: A is always-on but noisy; F is event-driven and clean. Together, drift is detected reliably without being annoying. Total effort: ~4 days.
+A and F complement each other: A is always-on but noisy; F is event-driven and clean. P keeps both honest. Total effort: ~4.5 days.
 
-**Phase 2 (later): D + G + H.**
+**Phase 2 — opportunistic anchors: D + G + H + K + N.**
 
-- **D** handles explicit recenters (small, cheap, complements F nicely).
-- **G** floor-touch anchors are easy and add another natural calibration moment.
-- **H** idle-pose averaging gives cleaner samples for any of the above.
+These are cheap, mostly-independent additions that each add another natural drift-check moment:
+
+- **D** explicit HMD recenter event handling.
+- **G** floor-touch detection (tracker Y near 0 + still).
+- **H** idle-pose averaging for cleaner sample quality.
+- **K** hand-on-HMD anchor (controller close to HMD = known constellation).
+- **N** HMD wake / sleep events (catch post-mask-off recenters).
+
+Each is ~half a day to ~1 day. Together they multiply the number of natural anchor moments per session, making drift detection more responsive without adding overhead.
+
+**Phase 3 — advanced detection: L + M + O + Q + R.**
+
+Higher complexity / lower frequency wins:
+
+- **L** sit/stand transition kinematic check.
+- **M** manual recalibrate-now gesture chord.
+- **O** multi-system drift triangulation (only useful with 3+ ecosystems).
+- **Q** cross-session drift continuity check at boot.
+- **R** battery-low tracker notification (a separate-but-related quality signal).
 
 **Defer: C, E, I, J.**
 
-- **C** stationary-anchor mode is genuinely useful but invasive (HMD-as-ref assumed in many places). Re-evaluate after seeing how A/B/F+D land.
+- **C** stationary-anchor mode is genuinely useful but invasive (HMD-as-ref assumed in many places). Re-evaluate after seeing how Phases 1 and 2 land.
 - **E** silent auto-recalibration is risky enough that explicit user confirmation (A's badge) is probably the better default.
-- **I** walking detection is high effort, complex tuning.
+- **I** walking detection is high effort, complex tuning. Step-pattern detectors are well-studied but tuning for the variety of VR setups is non-trivial.
 - **J** dashboard pose has too much variance to be a reliable anchor.
 
 ## Open questions
