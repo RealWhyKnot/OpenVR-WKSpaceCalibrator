@@ -11,6 +11,7 @@
 #include "UpdateChecker.h"
 #include "Updater.h"
 #include "MotionRecording.h"
+#include "Wizard.h"
 
 #include <thread>
 #include <string>
@@ -79,6 +80,20 @@ void BuildMainWindow(bool runningInOverlay_)
 	// no-op until the first GitHub check completes (a few seconds after
 	// startup) and an update is actually available.
 	DrawUpdateBanner();
+
+	// First-run auto-open of the setup wizard. Once the user finishes or
+	// dismisses it, wizardCompleted is persisted to the profile and we
+	// never auto-show again. The user can re-open it from the Advanced tab.
+	{
+		static bool s_firstRunChecked = false;
+		if (!s_firstRunChecked) {
+			s_firstRunChecked = true;
+			if (!CalCtx.wizardCompleted && !spacecal::wizard::IsActive()) {
+				spacecal::wizard::Open();
+			}
+		}
+	}
+	spacecal::wizard::Draw();
 
 	if (continuousCalibration) {
 		BuildContinuousCalDisplay();
@@ -426,45 +441,36 @@ void BuildContinuousCalDisplay() {
 		return;
 	}
 
-	// Persistent mode pill above the tab bar — surfaces the high-level state
+	// Persistent mode pill above the tab bar -- surfaces the high-level state
 	// (LIVE updating, searching, standby, fixed-offset) at a glance regardless
 	// of which tab the user is looking at.
 	DrawModePill();
-
-	// View-mode picker. Sits inline with the pill so it's always reachable but
-	// doesn't push other UI down. Saves on change so the choice survives restart.
-	ImGui::SameLine();
-	{
-		const char* modeNames[] = { "Basic", "Graphs", "Advanced" };
-		int mode = (int)CalCtx.viewMode;
-		ImGui::SetNextItemWidth(120.0f);
-		if (ImGui::Combo("View##viewMode", &mode, modeNames, IM_ARRAYSIZE(modeNames))) {
-			CalCtx.viewMode = (CalibrationContext::ViewMode)mode;
-			SaveProfile(CalCtx);
-		}
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("Basic: only the essentials.\n"
-			                  "Graphs: live plots so you can see calibration progress over time.\n"
-			                  "Advanced: every knob exposed, including overrides for the AUTO defaults.");
-		}
-	}
 	ImGui::Spacing();
 
-	const auto vm = CalCtx.viewMode;
-	const bool showGraphs = (vm != CalibrationContext::ViewMode::BASIC);
-
+	// Tab bar layout.  The user-facing categories are:
+	//   - Basic:    everything a casual user touches.  No graphs, no jargon.
+	//               Plain buttons + the handful of settings most people change.
+	//   - Graphs:   the live plots.  For users who want to watch what the math
+	//               is doing in real time.
+	//   - Advanced: every technical knob -- speed radios, alignment thresholds,
+	//               latency tuning, the obscure checkboxes.  This is also the
+	//               only place where a user can override the AUTO defaults.
+	//   - Prediction: stays separate since it's its own feature surface
+	//               (external-tool detection + per-device suppression).
+	//   - Recordings: only when debug logs are on -- replay captured motion
+	//               against the live math.
 	if (ImGui::BeginTabBar("CCalTabs", 0)) {
-		if (ImGui::BeginTabItem("Status")) {
+		if (ImGui::BeginTabItem("Basic")) {
 			CCal_BasicInfo();
 			ImGui::EndTabItem();
 		}
 
-		if (showGraphs && ImGui::BeginTabItem("More Graphs")) {
+		if (ImGui::BeginTabItem("Graphs")) {
 			ShowCalibrationDebug(2, 3);
 			ImGui::EndTabItem();
 		}
 
-		if (ImGui::BeginTabItem("Settings")) {
+		if (ImGui::BeginTabItem("Advanced")) {
 			CCal_DrawSettings();
 			ImGui::EndTabItem();
 		}
@@ -475,9 +481,10 @@ void BuildContinuousCalDisplay() {
 		}
 
 		// Recordings tab: only shown when debug logging is enabled, since the
-		// whole point is to load and replay debug-log files. Gated to ADVANCED
-		// view so the casual user doesn't see it.
-		if (Metrics::enableLogs && vm == CalibrationContext::ViewMode::ADVANCED) {
+		// whole point is to load and replay debug-log files.  Always visible
+		// once logs are on -- the choice "I want to debug" is the user signalling
+		// they're ready for the more advanced surface.
+		if (Metrics::enableLogs) {
 			if (ImGui::BeginTabItem("Recordings")) {
 				CCal_DrawRecordingsPanel();
 				ImGui::EndTabItem();
@@ -541,82 +548,41 @@ void CCal_DrawSettings() {
 	ImGui::Text("Hover over settings to learn more about them! Right-click any slider to reset it to default.");
 	ImGui::EndGroupPanel();
 
-	// === COMMON SETTINGS ====================================================
-	// Settings the typical user actually wants to touch. Kept always visible.
-	{
-		ImGui::BeginGroupPanel("Common settings", panel_size);
-
-		// Jitter threshold
-		ImGui::Text("Jitter threshold");
-		ImGui::SameLine();
-		ImGui::PushID("jitter_threshold");
-		ImGui::SliderFloat("##jitter_threshold_slider", &CalCtx.jitterThreshold, 0.1f, 10.0f, "%1.1f", 0);
-		if (ImGui::IsItemHovered(0)) {
-			ImGui::SetTooltip("Controls how much jitter will be allowed for calibration.\n"
-				"Higher values allow worse tracking to calibrate, but may result in poorer tracking.");
-		}
-		AddResetContextMenu("jitter_threshold_ctx", [] { CalCtx.jitterThreshold = 3.0f; });
-		ImGui::PopID();
-
-		// Recalibration threshold (continuous calibration)
-		ImGui::Text("Recalibration threshold");
-		ImGui::SameLine();
-		ImGui::PushID("recalibration_threshold");
-		ImGui::SliderFloat("##recalibration_threshold_slider", &CalCtx.continuousCalibrationThreshold, 1.01f, 10.0f, "%1.1f", 0);
-		if (ImGui::IsItemHovered(0)) {
-			ImGui::SetTooltip("Controls how good the calibration must be before realigning the trackers.\n"
-				"Higher values cause calibration to happen less often, and may be useful for systems with lots of tracking drift.");
-		}
-		AddResetContextMenu("recalibration_threshold_ctx", [] { CalCtx.continuousCalibrationThreshold = 1.5f; });
-		ImGui::PopID();
-
-		// Lock relative position toggle.
-		if (ImGui::Checkbox("Lock relative position", &CalCtx.lockRelativePosition)) {
-			SaveProfile(CalCtx);
-		}
-		if (ImGui::IsItemHovered(0)) {
-			ImGui::SetTooltip("Lock the calibrated relative pose between reference and target so it doesn't get re-solved during continuous calibration.");
-		}
-		ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-		ImGui::TextWrapped("When locked, static-recalibration settings have no effect.");
-		ImGui::PopStyleColor();
-
-		// Require trigger press toggle.
-		if (ImGui::Checkbox("Require trigger press to apply", &CalCtx.requireTriggerPressToApply)) {
-			SaveProfile(CalCtx);
-		}
-		if (ImGui::IsItemHovered(0)) {
-			ImGui::SetTooltip("If on, only apply the calibrated offset while a controller trigger is held.\n"
-				"Useful for verifying the result before committing.");
-		}
-
-		// Recalibrate on movement toggle. Default ON.
-		if (ImGui::Checkbox("Recalibrate on movement", &CalCtx.recalibrateOnMovement)) {
-			SaveProfile(CalCtx);
-		}
-		if (ImGui::IsItemHovered(0)) {
-			ImGui::SetTooltip("When the calibration math updates, only blend the new offset in while you're actually moving.\n"
-				"Stationary users (e.g. lying down) won't see phantom body shifts; the catch-up happens during natural motion.\n"
-				"Default ON. Turn off to get instantaneous time-based blending regardless of motion state.");
-		}
-
-		ImGui::EndGroupPanel();
+	// === Advanced toggles =================================================
+	// Power-user checkboxes that aren't worth Basic real estate.  Kept at the
+	// top of the Advanced tab because they're settings, and Advanced users
+	// expect to find them quickly without scrolling past the speed matrix.
+	if (ImGui::Checkbox("Hide tracker", &CalCtx.quashTargetInContinuous)) {
+		SaveProfile(CalCtx);
 	}
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Suppress the target tracker's pose in OpenVR while continuous calibration runs.\n"
+		                  "Use when the target tracker would otherwise show up as a duplicate of the reference\n"
+		                  "(e.g. taping a Vive tracker to a Quest controller for calibration).");
+	}
+	ImGui::SameLine();
+	if (ImGui::Checkbox("Static recalibration", &CalCtx.enableStaticRecalibration)) {
+		SaveProfile(CalCtx);
+	}
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Use the locked reference->target relative pose for fast \"snap-back\" corrections.\n"
+		                  "When the live solver's estimate diverges noticeably from the locked relative pose,\n"
+		                  "we snap to the locked solution instead of waiting for incremental convergence.");
+	}
+	ImGui::SameLine();
+	ImGui::Checkbox("Ignore outliers", &CalCtx.ignoreOutliers);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Drop sample pairs whose rotation axis disagrees with the consensus before the LS solve.\n"
+		                  "Default on.  Turn off only if you suspect the outlier rejector is throwing out good samples\n"
+		                  "(e.g. genuinely jittery motion the cosine-similarity test mistakes for outliers).");
+	}
+	ImGui::Spacing();
 
 	// === ADVANCED SETTINGS ==================================================
-	// Behind a CollapsingHeader so they're out of the way for casual use but
-	// still reachable for power users / bug reports. View mode also gates this:
-	// BASIC hides the section entirely, GRAPH shows it collapsed, ADVANCED
-	// shows it expanded by default.
-	const bool inBasicView = CalCtx.viewMode == CalibrationContext::ViewMode::BASIC;
-	const bool inAdvancedView = CalCtx.viewMode == CalibrationContext::ViewMode::ADVANCED;
-	if (!inBasicView && ImGui::CollapsingHeader("Advanced settings",
-		(CalCtx.showAdvancedSettings || inAdvancedView) ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
-		// Persist the open/closed state for the rest of this session. Note: the
-		// tree-node header doesn't itself expose its open state, so we infer it
-		// from "we're inside the if-true branch" — flipping the flag here means
-		// next time CCal_DrawSettings runs we'll DefaultOpen on the way in.
-		CalCtx.showAdvancedSettings = true;
+	// All technical knobs.  No longer behind a CollapsingHeader: the tab
+	// itself is now the gate.  A user clicking "Advanced" is signalling
+	// they want to see everything at once, so flatten the hierarchy.
+	{
 
 		// Calibration speed radio + speed-threshold matrix
 		{
@@ -809,18 +775,24 @@ void CCal_DrawSettings() {
 		{
 			ImVec2 panel_size_inner{ panel_size.x - 11 * 2, 0 };
 			ImGui::BeginGroupPanel("Playspace scale", panel_size_inner);
-			DrawVectorElement("cc_playspace_scale", "PLayspace Scale", &CalCtx.calibratedScale, 1, " 1 ");
+			DrawVectorElement("cc_playspace_scale", "Playspace Scale", &CalCtx.calibratedScale, 1, " 1 ");
 			ImGui::EndGroupPanel();
 		}
-	} else {
-		// Header is collapsed — record that so the next pass starts collapsed.
-		CalCtx.showAdvancedSettings = false;
 	}
 
 	ImGui::NewLine();
 	ImGui::Indent();
 	if (ImGui::Button("Reset settings")) {
 		CalCtx.ResetConfig();
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Run setup wizard")) {
+		spacecal::wizard::Open();
+	}
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip(
+			"Re-run the first-run setup wizard. Useful after changing your hardware\n"
+			"(adding/removing a tracking system) or if you want to start fresh.");
 	}
 	ImGui::Unindent();
 	ImGui::NewLine();
@@ -829,12 +801,14 @@ void CCal_DrawSettings() {
 	{
 		ImGui::BeginGroupPanel("Credits", panel_size);
 
-		ImGui::TextDisabled("tach");
 		ImGui::TextDisabled("pushrax");
+		ImGui::TextDisabled("hyblocker");
+		ImGui::TextDisabled("tach");
 		ImGui::TextDisabled("bd_");
 		ImGui::TextDisabled("ArcticFox");
 		ImGui::TextDisabled("hekky");
 		ImGui::TextDisabled("pimaker");
+		ImGui::TextDisabled("WhyKnot");
 
 		ImGui::EndGroupPanel();
 	}
@@ -916,88 +890,69 @@ void CCal_DrawPredictionSuppression() {
 		ImGui::Dummy(ImVec2(0, textSize.y + padding.y * 2.0f));
 	}
 
+	// External-tool warning. We don't try to interop -- when an external
+	// smoothing tool is detected, our driver's velocity/acceleration scaling
+	// fights it in unpredictable ways. Tell the user clearly.
+	if (ctx.externalSmoothingDetected) {
+		ImGui::Spacing();
+		ImGui::PushStyleColor(ImGuiCol_ChildBg,  ImVec4(0.55f, 0.20f, 0.20f, 1.0f));
+		ImGui::PushStyleColor(ImGuiCol_Border,   ImVec4(0.95f, 0.45f, 0.45f, 1.0f));
+		ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 8.0f));
+		const float h = ImGui::GetFrameHeightWithSpacing() * 3.0f;
+		if (ImGui::BeginChild("##ext_warn", ImVec2(ImGui::GetContentRegionAvail().x, h),
+		                      ImGuiChildFlags_Border)) {
+			const char* tool = ctx.externalSmoothingToolName.empty()
+				? "An external smoothing tool"
+				: ctx.externalSmoothingToolName.c_str();
+			ImGui::TextColored(ImVec4(1.0f, 0.95f, 0.95f, 1.0f),
+				"%s is running.  We don't support working alongside it -- our smoothing\n"
+				"and its smoothing will fight, and the result is unpredictable.\n"
+				"Please close it and use the per-tracker smoothness sliders below instead.",
+				tool);
+		}
+		ImGui::EndChild();
+		ImGui::PopStyleVar(2);
+		ImGui::PopStyleColor(2);
+	}
+
 	ImGui::Spacing();
 	ImGui::TextWrapped(
-		"\"Prediction suppression\" zeros the velocity and acceleration fields on a tracker's pose "
-		"update so SteamVR's built-in extrapolation can't push the pose forward in time. Tools like "
-		"OVR-SmoothTracking do the same thing externally. Calibration math wants the raw, unfiltered "
-		"pose — we suppress prediction on the calibration trackers so the math stays clean.");
+		"Prediction smoothness scales each tracker's reported velocity / acceleration "
+		"down toward zero. 0 leaves the pose untouched (raw motion, sharp response). 100 "
+		"fully zeros velocity, which defeats SteamVR's pose extrapolation entirely (smoothest "
+		"motion at the cost of a tiny lag). Pick a value between to trade response for jitter.\n\n"
+		"Three devices can never be smoothed: the HMD, the calibration reference tracker, "
+		"and the calibration target tracker. Suppressing them would either cause judder in "
+		"your view or corrupt the calibration math, so they're locked at 0 regardless of "
+		"what you pick here.");
 	ImGui::Spacing();
 	ImGui::Separator();
-	ImGui::Spacing();
-
-	// === Mode selection ===================================================
-	// Make the user's choice explicit. The previous single checkbox buried
-	// the question of "are you using the built-in fix or a 3rd-party tool?".
-	ImGui::TextDisabled("How do you want prediction handled?");
-	ImGui::Spacing();
-
-	// We keep `autoSuppressOnExternalTool` as the underlying flag because
-	// driver code already reads it; the radio just makes the choice obvious.
-	int mode = ctx.autoSuppressOnExternalTool ? 1 : 0;
-	if (ImGui::RadioButton("Built-in only — apply suppression natively to the trackers I pick below", mode == 0)) {
-		mode = 0;
-		ctx.autoSuppressOnExternalTool = false;
-		SaveProfile(ctx);
-	}
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip("Recommended if you're not running OVR-SmoothTracking or any other smoothing tool.\n"
-		                  "Pick which trackers to suppress in the list at the bottom; the driver applies the\n"
-		                  "fix natively to those devices. Faster than an external tool and one fewer process to\n"
-		                  "manage.");
-	}
-
-	if (ImGui::RadioButton("Auto-suppress when an external smoothing tool is detected", mode == 1)) {
-		mode = 1;
-		ctx.autoSuppressOnExternalTool = true;
-		SaveProfile(ctx);
-	}
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip("Pick this if you ARE running OVR-SmoothTracking (or similar) and want to keep using it.\n"
-		                  "When an external tool is detected, we automatically apply the built-in fix to your\n"
-		                  "calibration reference and target trackers — that way the math sees clean poses even\n"
-		                  "while the external tool's smoothing applies to other trackers. The two don't conflict;\n"
-		                  "the built-in fix just zeros velocity, which the external tool was going to do anyway.");
-	}
-
-	if (ctx.externalSmoothingDetected && ctx.autoSuppressOnExternalTool) {
-		ImGui::Indent();
-		ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.55f, 1.0f),
-			"%s detected. Built-in fix is auto-applied to calibration trackers.",
-			ctx.externalSmoothingToolName.empty() ? "External tool" : ctx.externalSmoothingToolName.c_str());
-		ImGui::Unindent();
-	} else if (ctx.externalSmoothingDetected && !ctx.autoSuppressOnExternalTool) {
-		ImGui::Indent();
-		ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.55f, 1.0f),
-			"%s is running but auto-suppress is off. Calibration math may be noisy.",
-			ctx.externalSmoothingToolName.empty() ? "An external tool" : ctx.externalSmoothingToolName.c_str());
-		ImGui::Unindent();
-	}
-
-	ImGui::Spacing();
-	ImGui::Separator();
-	ImGui::TextDisabled("Per-device suppression");
+	ImGui::TextDisabled("Per-tracker smoothness");
 	ImGui::TextWrapped(
-		"Manually toggle which trackers get the built-in suppression applied. Settings stick to a tracker by "
-		"its serial number, so a device that disconnects and reconnects keeps its setting.");
+		"Settings stick to a tracker by serial number, so a device that disconnects and reconnects "
+		"keeps its slider value.");
 	ImGui::Spacing();
 
-	// Enumerate currently-known devices. Show a checkbox per device. The
-	// suppression set is keyed by serial — that survives ID reassignment, so a
-	// tracker that disconnects and reconnects keeps its suppression setting.
 	auto vrSystem = vr::VRSystem();
 	if (!vrSystem) {
 		ImGui::TextDisabled("(VR system not available)");
 		return;
 	}
 
+	// Resolve hard-block serials once. We compare by serial (stable across ID
+	// reassignment) rather than by index. The calibration profile stores the
+	// "calibrated" serials in referenceStandby.serial / targetStandby.serial;
+	// match against those so the lock holds even when a device just reconnected
+	// and its OpenVR ID is fresh.
+	const std::string refSerial = ctx.referenceStandby.serial;
+	const std::string tgtSerial = ctx.targetStandby.serial;
+
 	bool anyShown = false;
 	char buffer[vr::k_unMaxPropertyStringSize];
 	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id) {
 		auto deviceClass = vrSystem->GetTrackedDeviceClass(id);
 		if (deviceClass == vr::TrackedDeviceClass_Invalid) continue;
-		// HMD shouldn't be suppressed (would degrade reprojection); skip.
-		if (deviceClass == vr::TrackedDeviceClass_HMD) continue;
 
 		vr::ETrackedPropertyError err = vr::TrackedProp_Success;
 		vrSystem->GetStringTrackedDeviceProperty(id, vr::Prop_SerialNumber_String, buffer, sizeof buffer, &err);
@@ -1010,15 +965,60 @@ void CCal_DrawPredictionSuppression() {
 		vrSystem->GetStringTrackedDeviceProperty(id, vr::Prop_TrackingSystemName_String, buffer, sizeof buffer, &err);
 		std::string sys = (err == vr::TrackedProp_Success) ? GetPrettyTrackingSystemName(buffer) : "";
 
-		bool enabled = ctx.suppressedSerials.find(serial) != ctx.suppressedSerials.end();
-		std::string label = "##suppress_" + serial;
-		if (ImGui::Checkbox(label.c_str(), &enabled)) {
-			if (enabled) ctx.suppressedSerials.insert(serial);
-			else ctx.suppressedSerials.erase(serial);
+		const bool isHmd = (deviceClass == vr::TrackedDeviceClass_HMD);
+		const bool isRef = !refSerial.empty() && refSerial == serial;
+		const bool isTgt = !tgtSerial.empty() && tgtSerial == serial;
+		const bool blocked = isHmd || isRef || isTgt;
+
+		// Read current value (0 if absent from the map).
+		int smoothness = 0;
+		auto it = ctx.trackerSmoothness.find(serial);
+		if (it != ctx.trackerSmoothness.end()) smoothness = it->second;
+		// If blocked, force-display 0 even if a stale value is stored.
+		if (blocked) smoothness = 0;
+
+		const char* roleTag = isHmd ? "HMD"
+			: isRef ? "calibration reference"
+			: isTgt ? "calibration target"
+			: nullptr;
+
+		// Label row: device info text.
+		ImGui::PushID(("trk_" + serial).c_str());
+		ImGui::Text("%s  [%s]  %s",
+			model.empty() ? "(unknown model)" : model.c_str(),
+			sys.empty() ? "?" : sys.c_str(),
+			serial.c_str());
+		if (roleTag) {
+			ImGui::SameLine();
+			ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.55f, 1.0f), "[%s, locked]", roleTag);
+		}
+
+		// Slider row.
+		ImGui::BeginDisabled(blocked);
+		if (ImGui::SliderInt("smoothness##slider", &smoothness, 0, 100, "%d%%")) {
+			if (smoothness <= 0) ctx.trackerSmoothness.erase(serial);
+			else ctx.trackerSmoothness[serial] = smoothness;
 			SaveProfile(ctx);
 		}
-		ImGui::SameLine();
-		ImGui::Text("%s  [%s]  serial: %s", model.c_str(), sys.c_str(), serial.c_str());
+		ImGui::EndDisabled();
+		if (ImGui::IsItemHovered()) {
+			if (blocked) {
+				ImGui::SetTooltip(
+					"Locked to 0 because this device is the %s.\n"
+					"Suppressing it would %s.",
+					roleTag,
+					isHmd
+						? "cause judder in your view"
+						: "corrupt the calibration math (it reads this device's velocity)");
+			} else {
+				ImGui::SetTooltip(
+					"0 = raw motion (no suppression).\n"
+					"100 = fully suppressed (matches the old binary 'freeze' behaviour).\n"
+					"Try around 50-75 for IMU-based trackers that feel jittery.");
+			}
+		}
+		ImGui::Spacing();
+		ImGui::PopID();
 		anyShown = true;
 	}
 	if (!anyShown) {
@@ -1479,61 +1479,134 @@ void CCal_BasicInfo() {
 		ImGui::EndTable();
 	}
 
-	ImGui::Checkbox("Hide tracker", &CalCtx.quashTargetInContinuous);
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip("Suppress the target tracker's pose in OpenVR while continuous calibration runs.\n"
-		                  "Use when the target tracker would otherwise show up as a duplicate of the reference\n"
-		                  "(e.g. taping a Vive tracker to a Quest controller for calibration).");
-	}
+	// === Common settings ===================================================
+	// The handful of settings most users actually touch.  Moved here from the
+	// old "Settings" tab so a basic user has everything they need on one page
+	// without having to know what a "calibration speed" is.
+	ImVec2 panelSize{ ImGui::GetWindowContentRegionMax().x - ImGui::GetWindowContentRegionMin().x, 0 };
+
+	ImGui::BeginGroupPanel("Common settings", panelSize);
+
+	// Jitter threshold
+	ImGui::Text("Jitter threshold");
 	ImGui::SameLine();
-	ImGui::Checkbox("Static recalibration", &CalCtx.enableStaticRecalibration);
+	ImGui::PushID("basic_jitter_threshold");
+	ImGui::SliderFloat("##basic_jitter_threshold_slider", &CalCtx.jitterThreshold, 0.1f, 10.0f, "%1.1f", 0);
 	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip("Use the locked reference->target relative pose for fast \"snap-back\" corrections.\n"
-		                  "When the live solver's estimate diverges noticeably from the locked relative pose,\n"
-		                  "we snap to the locked solution instead of waiting for incremental convergence.");
+		ImGui::SetTooltip("Controls how much jitter will be allowed for calibration.\n"
+			"Higher values allow worse tracking to calibrate, but may result in poorer tracking.");
 	}
+	AddResetContextMenu("basic_jitter_threshold_ctx", [] { CalCtx.jitterThreshold = 3.0f; });
+	ImGui::PopID();
+
+	// Recalibration threshold
+	ImGui::Text("Recalibration threshold");
 	ImGui::SameLine();
+	ImGui::PushID("basic_recalibration_threshold");
+	ImGui::SliderFloat("##basic_recalibration_threshold_slider", &CalCtx.continuousCalibrationThreshold, 1.01f, 10.0f, "%1.1f", 0);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Controls how good the calibration must be before realigning the trackers.\n"
+			"Higher values cause calibration to happen less often, and may be useful for systems with lots of tracking drift.");
+	}
+	AddResetContextMenu("basic_recalibration_threshold_ctx", [] { CalCtx.continuousCalibrationThreshold = 1.5f; });
+	ImGui::PopID();
+
+	// Lock relative position -- tristate (Auto / On / Off).
+	// Auto detects rigid attachment from observed motion; we default to it
+	// because most users don't know whether their target is glued to the
+	// HMD or not, and the failure mode of an undetected rigid setup is
+	// "calibration slowly drifts as the math chases sensor noise".
+	{
+		ImGui::Text("Lock relative position");
+		ImGui::SameLine();
+		const char* labels[] = { "Off##lock", "On##lock", "Auto##lock" };
+		const auto modes = {
+			CalibrationContext::LockMode::OFF,
+			CalibrationContext::LockMode::ON,
+			CalibrationContext::LockMode::AUTO
+		};
+		int i = 0;
+		for (auto m : modes) {
+			ImGui::SameLine();
+			if (ImGui::RadioButton(labels[i], CalCtx.lockRelativePositionMode == m)) {
+				CalCtx.lockRelativePositionMode = m;
+				SaveProfile(CalCtx);
+			}
+			++i;
+		}
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip(
+				"Off:  the math is free to re-solve the relative pose every cycle. Right for\n"
+				"      independent devices (HMD on head + body tracker on hip).\n"
+				"On:   freeze the relative pose once calibrated. Right for rigid setups\n"
+				"      (tracker glued to HMD, taped to a controller).\n"
+				"Auto: detect rigid attachment from observed motion. Recommended -- starts\n"
+				"      unlocked, then locks once the relative pose has been stable for ~15s.");
+		}
+
+		// Show resolved state when in Auto so the user can see what the detector decided.
+		if (CalCtx.lockRelativePositionMode == CalibrationContext::LockMode::AUTO) {
+			ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+			if (CalCtx.autoLockEffectivelyLocked) {
+				ImGui::TextWrapped("    Auto: locked (detected as rigidly attached, %d samples)",
+					(int)CalCtx.autoLockHistory.size());
+			} else if (CalCtx.autoLockHistory.size() < 30) {
+				ImGui::TextWrapped("    Auto: collecting motion data (%d/30 samples)",
+					(int)CalCtx.autoLockHistory.size());
+			} else {
+				ImGui::TextWrapped("    Auto: unlocked (devices move independently)");
+			}
+			ImGui::PopStyleColor();
+		}
+	}
+
+	// Require triggers
+	if (ImGui::Checkbox("Require trigger press to apply", &CalCtx.requireTriggerPressToApply)) {
+		SaveProfile(CalCtx);
+	}
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("If on, only apply the calibrated offset while a controller trigger is held.\n"
+			"Useful for verifying the result before committing.");
+	}
+
+	// Recalibrate on movement (default on)
+	if (ImGui::Checkbox("Recalibrate on movement", &CalCtx.recalibrateOnMovement)) {
+		SaveProfile(CalCtx);
+	}
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("When the calibration math updates, only blend the new offset in while you're actually moving.\n"
+			"Stationary users (e.g. lying down) won't see phantom body shifts; the catch-up happens during natural motion.\n"
+			"Default ON. Turn off to get instantaneous time-based blending regardless of motion state.");
+	}
+
+	ImGui::EndGroupPanel();
+
+	// Debug logs toggle.  Outside the Common settings panel so it's clearly
+	// a separate concern (writes a file vs. tweaks a runtime knob).  Stays
+	// in Basic because a typical bug report starts with "enable logs and
+	// reproduce" — hiding it under Advanced would force every reporter to
+	// read a manual first.
+	ImGui::Spacing();
 	ImGui::Checkbox("Enable debug logs", &Metrics::enableLogs);
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip("Write a per-tick CSV log of calibration state to\n"
 		                  "%%LocalAppDataLow%%\\SpaceCalibrator\\Logs\\spacecal_log.<date>.txt\n"
-		                  "Useful for bug reports. Costs a tiny amount of disk I/O per tick; safe to leave on.");
-	}
-	ImGui::SameLine();
-	ImGui::Checkbox("Lock relative transform", &CalCtx.lockRelativePosition);
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip("Freeze the calibrated relative pose between reference and target devices.\n"
-		                  "When on, continuous calibration only updates the world-anchor frame, not the\n"
-		                  "relationship between the two trackers — useful when the target is rigidly\n"
-		                  "attached to the reference (e.g. Vive tracker on a Quest controller).");
-	}
-	ImGui::SameLine();
-	ImGui::Checkbox("Require triggers", &CalCtx.requireTriggerPressToApply);
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip("Only apply the calibrated offset to tracked devices while a controller trigger is held.\n"
-		                  "Useful for sanity-checking a fresh calibration before committing — release the trigger to\n"
-		                  "see raw poses, hold to see calibrated poses.");
-	}
-	ImGui::Checkbox("Ignore outliers", &CalCtx.ignoreOutliers);
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip("Drop sample pairs whose rotation axis disagrees with the consensus before the LS solve.\n"
-		                  "Default on. Turn off only if you suspect the outlier rejector is throwing out good samples\n"
-		                  "(e.g. the user is doing genuinely jittery motion that the cosine-similarity test mistakes for outliers).");
+		                  "Useful for bug reports.  Also unlocks the Recordings tab where you can replay\n"
+		                  "a captured session against the live calibration math.");
 	}
 
-	// Status field...
-
+	// === Status messages ===================================================
+	// Whatever the calibration state machine has logged this session, plus
+	// a tiny scrollback so a user can see the most recent "Applying updated
+	// transformation..." line without enabling the debug log.
+	ImGui::Spacing();
 	ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 1));
-
 	for (const auto& msg : CalCtx.messages) {
 		if (msg.type == CalibrationContext::Message::String) {
 			ImGui::TextWrapped("> %s", msg.str.c_str());
 		}
 	}
-
 	ImGui::PopStyleColor();
-
-	ShowCalibrationDebug(1, 3);
 }
 
 void BuildMenu(bool runningInOverlay)

@@ -15,23 +15,31 @@ The two halves talk over a named pipe. The math lives in the overlay; the driver
 
 ## What this fork adds vs. upstream
 
+- **First-run setup wizard.** New installs auto-launch a wizard that detects your tracking systems and walks you through aligning each non-HMD system to your headset. See [[Setup Wizard]].
+- **Multi-ecosystem calibration.** Three or more tracking systems are aligned in parallel, each with its own continuous-calibration loop running against the HMD as the shared reference. See [[Multi-Ecosystem]].
+- **Auto-detect rigid attachment.** "Lock relative position" is a tristate (Off / On / Auto). Auto observes the relative pose between reference and target devices and locks automatically when they're rigidly attached (tracker glued to HMD, taped to a controller, etc.). See [[Settings Reference]] § Lock relative position.
 - **Auto-adopt for newly connected trackers.** A tracker powered on after calibration completes inherits the offset on its very first pose update. See [[Continuous Calibration]] § Auto-adopt.
 - **Stuck-state watchdogs.** Three independent watchdogs catch the cases where continuous calibration would otherwise lock into a bad fixpoint. See [[Continuous Calibration]] § Stuck-state escapes.
-- **Recalibrate on movement.** The driver-side blend toward a new offset only advances while the device is actually moving. Stationary users (e.g. lying down) don't see "phantom body shifts" when the math updates. See [[Continuous Calibration]] § Recalibrate on movement.
-- **Built-in prediction suppression.** Native equivalent of OVR-SmoothTracking, with auto-detection of the external tool and an in-app warning. See [[Prediction Suppression]].
+- **Recalibrate on movement.** The driver-side blend toward a new offset only advances while the device is actually moving. Stationary users (e.g. lying down) don't see "phantom body shifts" when the math updates. See [[Settings Reference]] § Recalibrate on movement.
+- **Per-tracker prediction smoothness slider.** 0-100 strength per tracker, replacing the old binary on/off. The HMD and active calibration reference / target are hard-blocked at 0 (suppressing them would corrupt your view or the math). External smoothing tools like OVR-SmoothTracking are detected and the user is warned to stop them — we don't try to interop. See [[Prediction Suppression]].
 - **Cross-correlation latency auto-detect.** Estimates the inter-system end-to-end latency from motion correlation; manual offset slider also still available. See [[Continuous Calibration]] § Inter-system latency offset.
-- **Math improvements.** SO(3) Kabsch + Rodrigues yaw projection, IRLS with Cauchy weighting on translation, condition-ratio guards, dynamic RMS gate, single-step EMA on the published transform.
+- **Math improvements.** SO(3) Kabsch + Rodrigues yaw projection, IRLS with Cauchy weighting on translation, condition-ratio guards, rejection-floor at 5 mm so sub-mm convergence doesn't trip the watchdog, single-step EMA on the published transform.
+- **AUTO calibration speed.** Picks Fast / Slow / Very Slow from observed jitter; the user no longer has to know what speed to pick. See [[Settings Reference]] § Calibration speed.
 - **In-app updater.** Release builds notice new GitHub releases on launch and offer a one-click upgrade with SHA-256 verification before launching the installer. See [[In-App Updater]].
 
 ## Read these first
 
+- **[[Setup Wizard]]** — the first-run guided setup; what each step does and when to re-run
+- **[[Settings Reference]]** — plain-language explanation of every user-facing toggle
 - **[[Architecture]]** — how the overlay and driver fit together
 - **[[Continuous Calibration]]** — the math, the watchdogs, the auto-adopt path for new trackers, recalibrate-on-movement, latency
-- **[[Driver Protocol]]** — the IPC protocol versions and message types
 
 ## Reference
 
-- **[[Prediction Suppression]]** — built-in OVR-SmoothTracking equivalent; per-device velocity-zeroing for clean math
+- **[[Multi-Ecosystem]]** — calibrating 3+ tracking systems in parallel
+- **[[Prediction Suppression]]** — per-tracker smoothness slider, hard-blocked devices, external-tool detection
+- **[[Driver Protocol]]** — the IPC protocol versions and message types
+- **[[In-App Updater]]** — the auto-update flow, threat model, file layout
 - **[[Building]]** — submodules, `build.ps1`, version stamping
 - **[[Troubleshooting]]** — common failure modes and what to check
 

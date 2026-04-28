@@ -92,7 +92,12 @@ namespace vr {
 
 namespace protocol
 {
-	const uint32_t Version = 7;
+	// v8 (2026-04-28): freezePrediction (bool) -> predictionSmoothness (uint8 0..100).
+	// Old field gave a binary on/off; new field is a strength knob. Driver scales
+	// velocity / acceleration / poseTimeOffset by (1 - smoothness/100) instead of
+	// zeroing them when the bool was true. smoothness=100 reproduces the old freeze
+	// behaviour; smoothness=0 leaves the pose untouched (off).
+	const uint32_t Version = 8;
 
 	// Maximum length of a tracking-system-name string (e.g., "lighthouse", "oculus",
 	// "Pimax Crystal HMD"). 32 bytes is more than enough for known systems and keeps
@@ -162,15 +167,19 @@ namespace protocol
 		// querying VR properties on every pose update. Empty string means "unknown".
 		char target_system[MaxTrackingSystemNameLen];
 
-		// When true, the driver zeroes vecVelocity / vecAcceleration / vecAngularVelocity
-		// / vecAngularAcceleration / poseTimeOffset on every pose update for this device
-		// before doing anything else. This defeats both SteamVR's own pose extrapolation
-		// AND third-party smoothing tools (e.g. OVR-SmoothTracking) that work by clamping
-		// those same fields — there's nothing left for them to scale. Used to keep the
-		// calibration trackers' pose data clean for the math, while leaving smoothing
-		// active on every other tracker. Off by default; the overlay toggles it on for
-		// devices receiving calibration offsets when freezeTrackerPrediction is enabled.
-		bool freezePrediction;
+		// Strength of native pose-prediction suppression for this device, on a
+		// 0..100 scale. 0 = pose untouched (no suppression). 100 = velocity,
+		// acceleration, angular velocity, angular acceleration and poseTimeOffset
+		// are all zeroed before the pose ships -- defeating SteamVR's
+		// extrapolation entirely (the old binary "freeze" behaviour). Values in
+		// between scale velocity / acceleration by (1 - smoothness/100), giving
+		// the user a smooth knob from "raw motion" to "fully suppressed".
+		//
+		// The overlay enforces a hard block on suppressing the calibration
+		// reference / target trackers and the HMD: those values are forced to 0
+		// regardless of what the user picks in the UI, because suppressing them
+		// would corrupt either the calibration math or the user's view.
+		uint8_t predictionSmoothness;
 
 		// When true, BlendTransform's lerp toward targetTransform only advances
 		// when the device is actually moving — instantaneous per-frame motion
@@ -184,22 +193,22 @@ namespace protocol
 		bool recalibrateOnMovement;
 
 		SetDeviceTransform(uint32_t id, bool enabled) :
-			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(false), updateScale(false), translation({}), rotation({1,0,0,0}), scale(1), lerp(false), quash(false), target_system{}, freezePrediction(false), recalibrateOnMovement(false) { }
+			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(false), updateScale(false), translation({}), rotation({1,0,0,0}), scale(1), lerp(false), quash(false), target_system{}, predictionSmoothness(0), recalibrateOnMovement(false) { }
 
 		SetDeviceTransform(uint32_t id, bool enabled, vr::HmdVector3d_t translation) :
-			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(false), updateScale(false), translation(translation), rotation({ 1,0,0,0 }), scale(1), lerp(false), quash(false), target_system{}, freezePrediction(false), recalibrateOnMovement(false) { }
+			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(false), updateScale(false), translation(translation), rotation({ 1,0,0,0 }), scale(1), lerp(false), quash(false), target_system{}, predictionSmoothness(0), recalibrateOnMovement(false) { }
 
 		SetDeviceTransform(uint32_t id, bool enabled, vr::HmdQuaternion_t rotation) :
-			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(true), updateScale(false), translation({}), rotation(rotation), scale(1), lerp(false), quash(false), target_system{}, freezePrediction(false), recalibrateOnMovement(false) { }
+			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(true), updateScale(false), translation({}), rotation(rotation), scale(1), lerp(false), quash(false), target_system{}, predictionSmoothness(0), recalibrateOnMovement(false) { }
 
 		SetDeviceTransform(uint32_t id, bool enabled, double scale) :
-			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(false), updateScale(true), translation({}), rotation({ 1,0,0,0 }), scale(scale), lerp(false), quash(false), target_system{}, freezePrediction(false), recalibrateOnMovement(false) { }
+			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(false), updateScale(true), translation({}), rotation({ 1,0,0,0 }), scale(scale), lerp(false), quash(false), target_system{}, predictionSmoothness(0), recalibrateOnMovement(false) { }
 
 		SetDeviceTransform(uint32_t id, bool enabled, vr::HmdVector3d_t translation, vr::HmdQuaternion_t rotation) :
-			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(true), updateScale(false), translation(translation), rotation(rotation), scale(1), lerp(false), quash(false), target_system{}, freezePrediction(false), recalibrateOnMovement(false) { }
+			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(true), updateScale(false), translation(translation), rotation(rotation), scale(1), lerp(false), quash(false), target_system{}, predictionSmoothness(0), recalibrateOnMovement(false) { }
 
 		SetDeviceTransform(uint32_t id, bool enabled, vr::HmdVector3d_t translation, vr::HmdQuaternion_t rotation, double scale) :
-			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(true), updateScale(true), translation(translation), rotation(rotation), scale(scale), lerp(false), quash(false), target_system{}, freezePrediction(false), recalibrateOnMovement(false) { }
+			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(true), updateScale(true), translation(translation), rotation(rotation), scale(scale), lerp(false), quash(false), target_system{}, predictionSmoothness(0), recalibrateOnMovement(false) { }
 	};
 
 	// Per-tracking-system fallback transform. Applied to any device whose tracking
@@ -213,10 +222,11 @@ namespace protocol
 		vr::HmdVector3d_t translation;
 		vr::HmdQuaternion_t rotation;
 		double scale;
-		// Same semantics as SetDeviceTransform::freezePrediction. Applied to every
-		// device that picks up this fallback (i.e. every device of the matching
-		// tracking system that doesn't have an active per-ID transform).
-		bool freezePrediction;
+		// Same semantics as SetDeviceTransform::predictionSmoothness (0..100).
+		// Applied to every device that picks up this fallback (i.e. every device
+		// of the matching tracking system that doesn't have an active per-ID
+		// transform). The HMD/ref/target hard-block also applies here.
+		uint8_t predictionSmoothness;
 		// Same semantics as SetDeviceTransform::recalibrateOnMovement. Applies to
 		// every device that picks up this fallback so newly-connected matching-
 		// system trackers also get motion-gated blend instead of an instant snap

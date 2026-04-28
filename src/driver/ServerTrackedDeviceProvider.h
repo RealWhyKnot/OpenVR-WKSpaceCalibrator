@@ -77,12 +77,14 @@ private:
 		// snap on the first activation of fallback.
 		bool fallbackActive = false;
 		// When true, every pose update for this device gets its velocity /
-		// acceleration / angular-velocity / angular-acceleration / poseTimeOffset
-		// fields zeroed before any other processing. Defeats SteamVR's prediction
-		// AND third-party "smooth tracking" tools that scale those fields. Used to
-		// keep calibration trackers' pose data clean while leaving smoothing tools
-		// active on every other device.
-		bool freezePrediction = false;
+		// Prediction-suppression strength on a 0..100 scale. The pose's
+		// velocity / acceleration / poseTimeOffset fields are scaled by
+		// (1 - smoothness/100) before any other processing. 0 = pose
+		// untouched. 100 = fields zeroed (matches the old binary "freeze"
+		// behaviour). The overlay enforces the hard block on HMD / ref /
+		// target, so by the time we see a non-zero value here the sender
+		// has already vetted that suppressing this device is safe.
+		uint8_t predictionSmoothness = 0;
 
 		// When true, BlendTransform's lerp toward targetTransform only advances
 		// proportional to detected per-frame motion magnitude. A stationary user
@@ -108,7 +110,7 @@ private:
 		bool enabled = false;
 		IsoTransform transform;
 		double scale = 1.0;
-		bool freezePrediction = false;
+		uint8_t predictionSmoothness = 0;
 		bool recalibrateOnMovement = false;
 	};
 
