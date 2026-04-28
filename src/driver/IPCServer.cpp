@@ -57,6 +57,15 @@ void IPCServer::Stop()
 	SetEvent(connectEvent);
 	mainThread.join();
 	running = false;
+
+	// connectEvent is owned by RunThread but was never closed before; the
+	// kernel event handle leaked across each driver reload. Close it now that
+	// the worker has joined.
+	if (connectEvent) {
+		CloseHandle(connectEvent);
+		connectEvent = nullptr;
+	}
+
 	TRACE("IPCServer::Stop() finished");
 }
 

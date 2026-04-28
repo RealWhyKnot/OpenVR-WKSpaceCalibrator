@@ -263,20 +263,56 @@ namespace protocol
 			TELEMETRY_PER_ID_APPLY,
 			TELEMETRY_QUASH_APPLY,
 		};
+
+		// Sentinel written by the driver into ShmemData::magic. The overlay
+		// rejects any segment whose magic doesn't match — guards against
+		// reading a stale or wrong-format mapping left behind by a different
+		// build.
+		static const uint32_t SHMEM_MAGIC = 0xCA11B8A7;
+
+		// Version of the shmem layout. Bump on any field addition / reordering
+		// / removal so a driver/overlay version skew is rejected at Open()
+		// instead of corrupting poses with mismatched offsets.
+		static const uint32_t SHMEM_VERSION = 1;
+
 	private:
 		static const uint32_t SYNC_ACTIVE_POSE_B = 0x80000000;
 		static const uint32_t BUFFERED_SAMPLES = 64 * 1024;
 
 		struct ShmemData {
-			// Telemetry sits first so any future growth of the pose ring buffer doesn't
-			// shift its address. The shmem layout is regenerated on driver startup and
-			// the overlay/driver IPC handshake already gates compatible builds, so a
-			// layout change is acceptable — but keeping telemetry pinned to offset 0
-			// keeps debugging dumps readable.
+			// Magic + version sit first so the overlay can validate a mapping
+			// before it touches anything else. Driver Create() writes them; the
+			// overlay Open() reads and verifies. A mismatch means the overlay
+			// is paired with a different driver build — far better to throw
+			// than to silently feed it garbage poses.
+			uint32_t magic;
+			uint32_t shmem_version;
+			// Telemetry sits right after the header so any future growth of the
+			// pose ring buffer doesn't shift its address. The shmem layout is
+			// regenerated on driver startup and the overlay/driver IPC handshake
+			// already gates compatible builds, so a layout change is acceptable
+			// — but keeping telemetry pinned to a stable offset keeps debugging
+			// dumps readable.
 			Telemetry telemetry;
 			std::atomic<uint64_t> index;
 			AugmentedPose poses[BUFFERED_SAMPLES];
 		};
+
+		// Compile-time guard against silent layout drift between driver and
+		// overlay builds. If a field is added / reordered / repacked this
+		// assertion fires at compile time instead of producing corrupted poses
+		// at runtime. Sum of every field's sizeof — the trailing struct ends
+		// 8-aligned and every field starts on its natural boundary so the sum
+		// matches the struct size exactly. If you intentionally change the
+		// layout, bump SHMEM_VERSION and update this assertion.
+		static_assert(
+			sizeof(ShmemData) ==
+				sizeof(uint32_t) + sizeof(uint32_t) +
+				sizeof(Telemetry) +
+				sizeof(std::atomic<uint64_t>) +
+				sizeof(AugmentedPose) * BUFFERED_SAMPLES,
+			"DriverPoseShmem::ShmemData layout has drifted; bump SHMEM_VERSION and update the static_assert"
+		);
 		
 	private:
 		HANDLE hMapFile;
@@ -344,7 +380,15 @@ namespace protocol
 				sizeof(ShmemData)
 			));
 
-			return !!pData;
+			if (!pData) return false;
+
+			// Stamp the header so the overlay can verify it's looking at a
+			// driver-compatible mapping. New file mappings are zero-initialised
+			// by the OS, so simply writing the magic/version is enough.
+			pData->magic = SHMEM_MAGIC;
+			pData->shmem_version = SHMEM_VERSION;
+
+			return true;
 		}
 
 
@@ -371,6 +415,28 @@ namespace protocol
 
 			if (!pData) {
 				throw std::runtime_error("Failed to map pose data shared memory segment: " + LastErrorString(GetLastError()));
+			}
+
+			// Validate the header. A mismatch means the overlay is paired with a
+			// driver build that doesn't share this layout — much safer to throw
+			// here than to silently corrupt poses by reading at the wrong offsets.
+			if (pData->magic != SHMEM_MAGIC) {
+				char buf[128];
+				snprintf(buf, sizeof buf,
+					"Pose shmem segment magic mismatch: got 0x%08X, expected 0x%08X (driver/overlay version skew?)",
+					pData->magic, SHMEM_MAGIC);
+				UnmapViewOfFile(pData); pData = nullptr;
+				CloseHandle(hMapFile); hMapFile = nullptr;
+				throw std::runtime_error(buf);
+			}
+			if (pData->shmem_version != SHMEM_VERSION) {
+				char buf[128];
+				snprintf(buf, sizeof buf,
+					"Pose shmem segment version mismatch: got %u, expected %u (driver/overlay version skew?)",
+					pData->shmem_version, SHMEM_VERSION);
+				UnmapViewOfFile(pData); pData = nullptr;
+				CloseHandle(hMapFile); hMapFile = nullptr;
+				throw std::runtime_error(buf);
 			}
 
 			char tmp[256];
@@ -444,6 +510,11 @@ namespace protocol
 				break;
 			case TELEMETRY_QUASH_APPLY:
 				pData->telemetry.quash_apply_count.fetch_add(1, std::memory_order_relaxed);
+				break;
+			default:
+				// Unknown enum value: silently ignore. Explicit default silences
+				// implicit-fall-through warnings and documents that no other
+				// counters exist today; new fields must be added above.
 				break;
 			}
 		}
