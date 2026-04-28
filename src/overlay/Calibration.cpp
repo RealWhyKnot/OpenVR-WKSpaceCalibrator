@@ -158,6 +158,61 @@ namespace {
 		return Pose(xform);
 	}
 
+	// Velocity-based extrapolation of a reference pose by `dtSeconds` (positive = forward
+	// in time, negative = backward). Mutates `pose` in place.
+	//
+	// vecVelocity / vecAngularVelocity are in the driver's local frame (the same frame
+	// as vecPosition / qRotation), so we apply them directly there and let
+	// qWorldFromDriverRotation do the world-space projection downstream in ConvertPose.
+	// This sidesteps the trap of rotating velocity into world space and then adding it
+	// to a driver-space position.
+	//
+	// Returns true on success, false if the velocity data looks invalid (NaN, infinite,
+	// or implausibly large). On false the caller should fall back to the un-extrapolated
+	// pose; we never throw.
+	inline bool ExtrapolateReferencePose(vr::DriverPose_t& pose, double dtSeconds) {
+		if (dtSeconds == 0.0) return true;
+
+		// Sanity-check the velocity components. A momentary tracking glitch can produce
+		// NaN/inf or wildly large velocity values; applying those to the pose would
+		// teleport the reference and pollute the sample.
+		const double maxLinearMps = 50.0;        // ~180 km/h, far beyond any real head/tracker motion
+		const double maxAngularRadps = 50.0;     // ~8 rev/s
+		for (int i = 0; i < 3; i++) {
+			double v = pose.vecVelocity[i];
+			double w = pose.vecAngularVelocity[i];
+			if (!std::isfinite(v) || !std::isfinite(w)) return false;
+			if (std::fabs(v) > maxLinearMps) return false;
+			if (std::fabs(w) > maxAngularRadps) return false;
+		}
+
+		// Linear extrapolation in driver-local space.
+		pose.vecPosition[0] += pose.vecVelocity[0] * dtSeconds;
+		pose.vecPosition[1] += pose.vecVelocity[1] * dtSeconds;
+		pose.vecPosition[2] += pose.vecVelocity[2] * dtSeconds;
+
+		// Angular extrapolation: vecAngularVelocity is axis-angle in radians/sec in the
+		// driver-local frame. Build the corresponding small rotation deltaQ_local and
+		// pre-multiply qRotation by it. qWorldFromDriverRotation downstream rotates the
+		// updated qRotation into world space.
+		double angSpeed = std::sqrt(
+			pose.vecAngularVelocity[0] * pose.vecAngularVelocity[0] +
+			pose.vecAngularVelocity[1] * pose.vecAngularVelocity[1] +
+			pose.vecAngularVelocity[2] * pose.vecAngularVelocity[2]);
+		if (angSpeed > 1e-9) {
+			double angle = angSpeed * dtSeconds;
+			double half = angle * 0.5;
+			double s = std::sin(half);
+			double axisX = pose.vecAngularVelocity[0] / angSpeed;
+			double axisY = pose.vecAngularVelocity[1] / angSpeed;
+			double axisZ = pose.vecAngularVelocity[2] / angSpeed;
+			vr::HmdQuaternion_t deltaQ = { std::cos(half), axisX * s, axisY * s, axisZ * s };
+			pose.qRotation = deltaQ * pose.qRotation;
+		}
+
+		return true;
+	}
+
 	bool CollectSample(const CalibrationContext& ctx)
 	{
 		vr::DriverPose_t reference, target;
@@ -192,6 +247,40 @@ namespace {
 			reference.vecPosition[0] += ctx.continuousCalibrationOffset.x();
 			reference.vecPosition[1] += ctx.continuousCalibrationOffset.y();
 			reference.vecPosition[2] += ctx.continuousCalibrationOffset.z();
+		}
+
+		// Manual inter-system latency compensation. With a non-zero offset we shift the
+		// reference pose forward/backward in time to align with the *effective* moment
+		// the target sample represents. We use velocity extrapolation rather than a
+		// history buffer (cheaper, bounded, and good enough for the small ±100 ms range
+		// the UI exposes). If velocity data is invalid the reference pose is left
+		// un-shifted for this tick — better one bad-but-bounded sample than a thrown
+		// exception or a teleporting reference.
+		//
+		// Bit-for-bit identical behaviour to before this feature is preserved when
+		// targetLatencyOffsetMs == 0: the shift in seconds is exactly 0.0 and
+		// ExtrapolateReferencePose returns immediately without touching the pose. The
+		// `if` below only enters when both that AND we have valid sample-time data,
+		// i.e. when there's actually work to do.
+		if (ctx.targetLatencyOffsetMs != 0.0
+			&& ctx.devicePoseSampleTimes[ctx.referenceID].QuadPart != 0
+			&& ctx.devicePoseSampleTimes[ctx.targetID].QuadPart != 0)
+		{
+			LARGE_INTEGER freq;
+			QueryPerformanceFrequency(&freq);
+			// Δshmem = how stale the reference pose is relative to the target pose
+			// (target ahead → positive). Then we additionally subtract the user's
+			// configured offset. We extrapolate the reference forward by this Δ to put
+			// it on the same effective timeline as the target.
+			double shmemDeltaSec =
+				double(ctx.devicePoseSampleTimes[ctx.targetID].QuadPart -
+					   ctx.devicePoseSampleTimes[ctx.referenceID].QuadPart)
+				/ double(freq.QuadPart);
+			double offsetSec = ctx.targetLatencyOffsetMs / 1000.0;
+			// effectiveTargetTime = targetSampleTime - offset, so the reference needs to
+			// move to (effectiveTargetTime) - referenceSampleTime = shmemDelta - offset.
+			double dt = shmemDeltaSec - offsetSec;
+			ExtrapolateReferencePose(reference, dt);
 		}
 
 		calibration.PushSample(Sample(
@@ -626,6 +715,9 @@ void CalibrationTick(double time)
 	shmem.ReadNewPoses([&](const protocol::DriverPoseShmem::AugmentedPose& augmented_pose) {
 		if (augmented_pose.deviceId >= 0 && augmented_pose.deviceId <= vr::k_unMaxTrackedDeviceCount) {
 			ctx.devicePoses[augmented_pose.deviceId] = augmented_pose.pose;
+			// Track per-device shmem QPC timestamps so CollectSample can compute the
+			// inter-system time delta when applying targetLatencyOffsetMs.
+			ctx.devicePoseSampleTimes[augmented_pose.deviceId] = augmented_pose.sample_time;
 		}
 	});
 
