@@ -228,11 +228,38 @@ namespace protocol
 			int deviceId;
 			vr::DriverPose_t pose;
 		};
+
+		// Driver-side telemetry counters. Each is a monotonically increasing count of
+		// the number of times the driver took the corresponding code path while
+		// processing a tracked-device pose update. Relaxed-ordered atomic increments
+		// are sufficient because the overlay only consumes deltas — there is no
+		// cross-counter consistency requirement.
+		struct Telemetry {
+			std::atomic<uint64_t> fallback_apply_count;
+			std::atomic<uint64_t> per_id_apply_count;
+			std::atomic<uint64_t> quash_apply_count;
+			std::atomic<uint64_t> reserved[5];
+		};
+
+		// Names of the individual telemetry counters, used by IncrementTelemetry to
+		// pick which atomic to bump. Kept inside the class so we don't pollute the
+		// `protocol` namespace with another enum.
+		enum TelemetryField {
+			TELEMETRY_FALLBACK_APPLY,
+			TELEMETRY_PER_ID_APPLY,
+			TELEMETRY_QUASH_APPLY,
+		};
 	private:
 		static const uint32_t SYNC_ACTIVE_POSE_B = 0x80000000;
 		static const uint32_t BUFFERED_SAMPLES = 64 * 1024;
 
 		struct ShmemData {
+			// Telemetry sits first so any future growth of the pose ring buffer doesn't
+			// shift its address. The shmem layout is regenerated on driver startup and
+			// the overlay/driver IPC handshake already gates compatible builds, so a
+			// layout change is acceptable — but keeping telemetry pinned to offset 0
+			// keeps debugging dumps readable.
+			Telemetry telemetry;
 			std::atomic<uint64_t> index;
 			AugmentedPose poses[BUFFERED_SAMPLES];
 		};
@@ -387,6 +414,36 @@ namespace protocol
 			uint64_t cur_index = pData->index.load(std::memory_order_relaxed) + 1;
 			pData->poses[cur_index % BUFFERED_SAMPLES] = augPose;
 			pData->index.store(cur_index, std::memory_order_release);
+		}
+
+		// Bump the named telemetry counter by one. Safe to call from the driver's
+		// pose-update path — a relaxed atomic increment is sub-ns on x86 and there
+		// are no cross-counter ordering requirements.
+		void IncrementTelemetry(TelemetryField field) {
+			if (pData == nullptr) return;
+			switch (field) {
+			case TELEMETRY_FALLBACK_APPLY:
+				pData->telemetry.fallback_apply_count.fetch_add(1, std::memory_order_relaxed);
+				break;
+			case TELEMETRY_PER_ID_APPLY:
+				pData->telemetry.per_id_apply_count.fetch_add(1, std::memory_order_relaxed);
+				break;
+			case TELEMETRY_QUASH_APPLY:
+				pData->telemetry.quash_apply_count.fetch_add(1, std::memory_order_relaxed);
+				break;
+			}
+		}
+
+		// Snapshot the telemetry counters. Returns true if the shmem segment is open.
+		// The values are loaded with relaxed ordering — the overlay only ever
+		// computes deltas across snapshots, so torn reads relative to other counters
+		// don't matter.
+		bool GetTelemetry(uint64_t& fallback_apply, uint64_t& per_id_apply, uint64_t& quash_apply) {
+			if (pData == nullptr) return false;
+			fallback_apply = pData->telemetry.fallback_apply_count.load(std::memory_order_relaxed);
+			per_id_apply = pData->telemetry.per_id_apply_count.load(std::memory_order_relaxed);
+			quash_apply = pData->telemetry.quash_apply_count.load(std::memory_order_relaxed);
+			return true;
 		}
 	};
 }
