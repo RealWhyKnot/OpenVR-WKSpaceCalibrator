@@ -891,3 +891,7 @@ void DebugApplyRandomOffset() {
 	protocol::Request req(protocol::RequestDebugOffset);
 	Driver.SendBlocking(req);
 }
+
+int GetWatchdogResetCount() {
+	return calibration.m_watchdogResets;
+}
