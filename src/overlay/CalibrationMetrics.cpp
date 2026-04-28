@@ -19,6 +19,10 @@ namespace Metrics {
 	TimeSeries<double> rotationConditionRatio;
 	TimeSeries<double> consecutiveRejections;
 
+	TimeSeries<double> fallbackApplyRate;
+	TimeSeries<double> perIdApplyRate;
+	TimeSeries<double> quashApplyRate;
+
 	// true - full calibration, false - static calibration
 	TimeSeries<bool> calibrationApplied;
 
@@ -119,6 +123,9 @@ namespace Metrics {
 		TS_FIELD(computationTime),
 		TS_FIELD(jitterRef),
 		TS_FIELD(jitterTarget),
+		TS_FIELD(fallbackApplyRate),
+		TS_FIELD(perIdApplyRate),
+		TS_FIELD(quashApplyRate),
 
 		{
 			"calibrationApplied", 
