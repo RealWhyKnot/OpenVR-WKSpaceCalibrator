@@ -7,8 +7,8 @@
 ## Checklist
 
 - [ ] `powershell -ExecutionPolicy Bypass -File build.ps1` succeeds end-to-end on this branch.
-- [ ] If behaviour changed, the relevant wiki page in `docs/wiki/` was updated.
-- [ ] If the IPC protocol changed, `protocol::Version` was bumped and `docs/wiki/Driver-Protocol.md` reflects it.
+- [ ] If behaviour changed, the relevant wiki page in `wiki/` was updated.
+- [ ] If the IPC protocol changed, `protocol::Version` was bumped and `wiki/Driver-Protocol.md` reflects it.
 - [ ] Commit subjects pass `.githooks/commit-msg` — no duplicate `(YYYY.M.D.N-XXXX)` build-version stamps.
 
 ## Notes for calibration / driver / IPC changes

@@ -2,7 +2,7 @@
 
 OpenVR-SpaceCalibrator aligns the coordinate frames of two VR tracking systems — for example a Lighthouse setup with a Quest headset, or a SteamVR HMD with Slime IMU trackers — so devices from one system show up in the right place in the other system's playspace.
 
-This wiki is the long-form documentation. The [README](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/blob/develop/README.md) is the quick-start; the pages below go deeper.
+This wiki is the long-form documentation. The [README](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/blob/main/README.md) is the quick-start; the pages below go deeper.
 
 ## How it works (60 seconds)
 

@@ -37,17 +37,17 @@ If you ever genuinely need to bypass either, `git commit --no-verify` does it. U
 
 ## Editing the wiki
 
-The wiki is **source-controlled at `docs/wiki/`** in this repo. That means:
+The wiki is **source-controlled at `wiki/`** in this repo. That means:
 
 - Edits go through normal PR review, same as code.
 - **Do not edit on the github.com Wiki UI.** Web edits get overwritten the next time the sync workflow runs.
-- On every push to `develop` that touches `docs/wiki/**`, the [wiki-sync workflow](.github/workflows/wiki-sync.yml) mirrors the changes to the GitHub Wiki repo.
+- On every push to `main` that touches `wiki/**`, the [wiki-sync workflow](.github/workflows/wiki-sync.yml) mirrors the changes to the GitHub Wiki repo.
 
 ## Submitting a PR
 
-- Branch from `develop`. Open the PR against `develop` (the fork's default branch).
+- Branch from `main`. Open the PR against `main` (the fork's default branch).
 - The [PR template](.github/PULL_REQUEST_TEMPLATE.md) auto-populates the description. Fill the checkboxes honestly — particularly the build-verification one (`build.ps1` succeeds end-to-end on the branch).
-- **Protocol-changing PRs:** if you touch the driver/overlay IPC, bump `protocol::Version` in `src/common/Protocol.h` *and* update `docs/wiki/Driver-Protocol.md` to describe what changed in the new version. The two are part of the same change.
+- **Protocol-changing PRs:** if you touch the driver/overlay IPC, bump `protocol::Version` in `src/common/Protocol.h` *and* update `wiki/Driver-Protocol.md` to describe what changed in the new version. The two are part of the same change.
 - Keep PRs focused. Mixing unrelated changes makes review harder and slower for everyone.
 
 ## Code review expectations
