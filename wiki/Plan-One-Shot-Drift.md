@@ -44,9 +44,9 @@ The calibration is still mathematically valid w.r.t. the HMD's *current* coordin
 
 For continuous mode, this is mostly invisible: the math keeps re-solving as the HMD drifts, and `recalibrateOnMovement` hides each correction in the user's natural movement. For one-shot mode, drift accumulates until the user notices and recalibrates.
 
-## Five options, ranked by effort
+## Options, ranked by effort
 
-### Option A: Drift watchdog (RECOMMENDED)
+### Option A: Drift watchdog (RECOMMENDED, foundational)
 
 **What:** Passive background sampler that continues running after one-shot calibration finishes. It doesn't *update* the calibration — it just measures how well the existing offset still fits the current pose stream. When residuals climb past a threshold, surface a user-visible badge: "Calibration drift detected — click here to recalibrate".
 
@@ -106,18 +106,113 @@ For continuous mode, this is mostly invisible: the math keeps re-solving as the 
 
 **Risk:** medium. The classic continuous-calibration failure modes (degenerate motion → bad solution) all apply, just hidden from the user. If the auto-recalibration produces a worse offset than the original, the user sees jumpy trackers with no clear explanation. Need conservative acceptance criteria.
 
-## My recommendation
+---
 
-Build **A** + **B** as one feature set:
+## Exploit-user-habits ideas
 
-- **B** improves the *initial* one-shot result, so drift starts from a better anchor.
-- **A** catches drift as it accumulates and gives the user a clean recovery path.
+The previous five options treat the user as someone who'll click a button when prompted. The next group exploits things users *already do* (often for entirely unrelated reasons) as natural calibration anchors. The big one is T-pose detection, which dovetails with the social-VR T-pose-for-IK ritual.
 
-Together they cover the lifecycle — start strong, recover when you drift. Total effort: ~2 days.
+### Option F: T-pose detection as a drift anchor (HIGHEST-VALUE auto-trigger)
 
-**D** is a small bonus that pairs well with A (recenter events become "drift detected, here's a one-click reset").
+**The insight:** VRChat (and most social VR with IK) asks users to T-pose to calibrate their avatar. Users do this every session, often multiple times per session. T-pose is:
 
-**C** and **E** are bigger investments. Defer until A+B+D have been used in the wild and we see whether the gap is still painful enough to justify them.
+- A well-defined geometric configuration: HMD upright, arms extended laterally at roughly shoulder height, body still
+- Held for 1-3 seconds (long enough to detect with confidence)
+- Repeated naturally (no behavior change required)
+- Independent of body shape *for relative geometry* (the constellation of trackers in T-pose is consistent for the same user across sessions, even if absolute dimensions vary)
+
+**What we'd do:**
+
+1. **Detect T-pose** — heuristic geometry classifier running every tick. Criteria, all required for ~1-2 sustained seconds:
+   - HMD pitch within ±15° of upright (looking roughly forward)
+   - Hand controllers (if present) at HMD height ±30 cm, lateral distance from HMD > ~50 cm both sides, palms roughly parallel to floor
+   - Body velocity < 5 cm/s on every tracked device (user is still)
+   - Hip tracker (if present) below HMD by ~50-60 cm (typical waist drop), not rotated significantly relative to HMD yaw
+
+   These are loose enough to handle different user heights / arm spans, tight enough that incidental hand positions don't trigger.
+
+2. **Snapshot the constellation** — on the first detected T-pose post-calibration, record the relative pose between every tracker pair and the HMD. This is the "drift baseline".
+
+3. **Compare on subsequent T-poses** — when T-pose is detected again, compute the relative-pose delta vs the baseline. Translation deltas above some threshold (e.g. 3 cm) indicate drift; rotation deltas above some threshold (~3°) indicate yaw drift.
+
+4. **Surface the drift** — same badge mechanism as Option A. "Drift detected during T-pose check — recalibrate?". User can ignore (badge stays until next clean T-pose) or accept (kick off a brief recalibration).
+
+**Why this works better than passive drift watching (Option A) for the one-shot crowd:**
+
+- **Higher signal-to-noise.** Comparing T-pose to T-pose is comparing two stable, well-defined moments. Comparing arbitrary motion samples (Option A) has more noise — sometimes the residual is high just because the user is moving fast.
+- **Cleaner UX trigger.** Users naturally land in T-pose for unrelated reasons; using that as the check point feels invisible. Option A's residual-EMA would fire at unpredictable times.
+- **Free continuous re-validation.** Every avatar setup is a calibration sanity check. A user who T-poses 5 times in a session gets 5 free drift checks.
+
+**Effort:** ~2 days. T-pose detector + snapshot/compare logic + badge integration.
+
+**Risk:** medium. The detector is heuristic — false positives (user happened to be in a T-pose-like configuration) and false negatives (user is too short / has unusual arm length / not in VRChat) both possible. Mitigate with conservative thresholds.
+
+**Cool extension:** T-pose-triggered automatic mini-calibration. Once we know the user is in a known stable pose, we can run `ComputeOneshot` against the recent ~30 s of motion samples (which they generated arriving at the T-pose) without the user explicitly invoking calibration. Happens silently between avatar setups in VRChat.
+
+### Option G: Floor-touch / known-height anchors
+
+**What:** tracked device whose Y coordinate drops below ~5 cm and stays there for ~1 s is "on the floor". That gives us a known absolute anchor (height = 0). If the calibrated offset says the tracker is at Y=15 cm but the device-reported Y is at 0 cm, that's drift.
+
+**Why:** users put trackers on the floor naturally — set them down between play sessions, knock them off their belt onto the floor, etc. Each floor-touch is an anchor moment.
+
+**Effort:** ~1 day. Detector + Y-residual check.
+
+**Risk:** low. Floor detection is unambiguous when the device is genuinely stationary on a flat surface. Filter out fast-moving "floor pass-throughs" (foot stepping on floor briefly during a step) by requiring stillness.
+
+### Option H: Idle-pose averaging
+
+**What:** when all trackers have been still for ~5 s, sample multiple frames and average them into a single high-confidence "stationary moment" sample. Use those samples (instead of motion samples) to anchor a brief recalibration.
+
+**Why:** stationary samples have the lowest jitter. Averaged, they give a cleaner ground truth than any single motion-sample pair.
+
+**Effort:** ~1 day.
+
+**Risk:** low. Worst case is no idle moment is detected during a session and the feature does nothing.
+
+### Option I: Walking / step detection
+
+**What:** detect step cadence from hip-tracker Y-axis oscillation. Each step gives us a known geometric pattern (left-right mirror, forward gait). Use the symmetry as a drift anchor.
+
+**Why:** users walk constantly in VR. Free recalibration anchor.
+
+**Effort:** ~3 days. Step detection is well-studied but tuning it for the variety of VR setups is non-trivial.
+
+**Risk:** medium. False detections from non-walking motion (squatting, leaning).
+
+### Option J: Steam dashboard / boundary snap
+
+**What:** when the SteamVR dashboard opens, the user's HMD and controllers are typically in a canonical "looking at menu" pose. Use this as an anchor.
+
+**Why:** dashboard-open is a frequent event, easy to detect.
+
+**Effort:** ~half a day.
+
+**Risk:** medium. The user's hand position when summoning the dashboard varies a lot; not as repeatable as T-pose.
+
+---
+
+## Updated recommendation
+
+**Phase 1 (next): A + B + F.**
+
+- **B** improves the *initial* one-shot calibration quality.
+- **A** catches gradual drift via passive residual monitoring.
+- **F** catches drift at high-confidence anchor moments (T-pose) — the killer feature for VRChat users.
+
+A and F complement each other: A is always-on but noisy; F is event-driven and clean. Together, drift is detected reliably without being annoying. Total effort: ~4 days.
+
+**Phase 2 (later): D + G + H.**
+
+- **D** handles explicit recenters (small, cheap, complements F nicely).
+- **G** floor-touch anchors are easy and add another natural calibration moment.
+- **H** idle-pose averaging gives cleaner samples for any of the above.
+
+**Defer: C, E, I, J.**
+
+- **C** stationary-anchor mode is genuinely useful but invasive (HMD-as-ref assumed in many places). Re-evaluate after seeing how A/B/F+D land.
+- **E** silent auto-recalibration is risky enough that explicit user confirmation (A's badge) is probably the better default.
+- **I** walking detection is high effort, complex tuning.
+- **J** dashboard pose has too much variance to be a reliable anchor.
 
 ## Open questions
 
@@ -125,10 +220,13 @@ Together they cover the lifecycle — start strong, recover when you drift. Tota
 - **Does the badge appear in VR or in the desktop UI?** Both — but the in-VR badge would need to be subtle (small overlay corner) so it doesn't break immersion.
 - **Should we track drift per-system (multi-ecosystem)?** Yes — each non-HMD system has its own calibration, each can drift independently against its HMD reference. The watchdog should run per-system.
 - **What's the failure mode if the user is *intentionally* moving a body tracker (e.g. carrying it from one foot to another)?** The watchdog would falsely flag drift. Velocity-suppression handles short bursts; we may need a longer "ignore drift while heavy motion is happening" rule.
+- **Does T-pose detection need to know the user is in VRChat specifically?** No — it's a geometric check, not an app-aware one. Will fire any time the user is in a T-pose, regardless of which game is running. That's a feature: works in VRChat, ChilloutVR, Resonite, NeosVR, anywhere with IK calibration.
+- **Should T-pose snapshot persist across sessions?** Tempting, but no — body proportions appear to vary across sessions for the same user (different shoes, different tracker positions). Snapshot per session is safer.
 
 ## Next step if approved
 
 1. Land **B** first — it's UI-only and risk-free.
 2. Land **A** second — backend math + a single banner UI element.
-3. Add **D** as a small follow-up.
-4. Re-evaluate whether C / E are still worth doing once A + B are in real users' hands.
+3. Land **F** third — the highest-value auto-trigger. Builds on A's badge mechanism.
+4. Add **D** as a small follow-up (explicit recenter handling).
+5. Re-evaluate G / H / and the deferred items based on real-world feedback.
