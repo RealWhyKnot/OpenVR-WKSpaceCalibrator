@@ -10,6 +10,7 @@
 #include <vector>
 #include <iostream>
 #include <algorithm>
+#include <map>
 #include <psapi.h>
 
 #include <Eigen/Dense>
@@ -261,12 +262,13 @@ namespace {
 		// un-shifted for this tick — better one bad-but-bounded sample than a thrown
 		// exception or a teleporting reference.
 		//
-		// Bit-for-bit identical behaviour to before this feature is preserved when
-		// targetLatencyOffsetMs == 0: the shift in seconds is exactly 0.0 and
+		// Bit-for-bit identical behaviour to before this feature is preserved when the
+		// active offset is 0: the shift in seconds is exactly 0.0 and
 		// ExtrapolateReferencePose returns immediately without touching the pose. The
 		// `if` below only enters when both that AND we have valid sample-time data,
 		// i.e. when there's actually work to do.
-		if (ctx.targetLatencyOffsetMs != 0.0
+		double activeOffsetMs = GetActiveLatencyOffsetMs(ctx);
+		if (activeOffsetMs != 0.0
 			&& ctx.devicePoseSampleTimes[ctx.referenceID].QuadPart != 0
 			&& ctx.devicePoseSampleTimes[ctx.targetID].QuadPart != 0)
 		{
@@ -280,11 +282,42 @@ namespace {
 				double(ctx.devicePoseSampleTimes[ctx.targetID].QuadPart -
 					   ctx.devicePoseSampleTimes[ctx.referenceID].QuadPart)
 				/ double(freq.QuadPart);
-			double offsetSec = ctx.targetLatencyOffsetMs / 1000.0;
+			double offsetSec = activeOffsetMs / 1000.0;
 			// effectiveTargetTime = targetSampleTime - offset, so the reference needs to
 			// move to (effectiveTargetTime) - referenceSampleTime = shmemDelta - offset.
 			double dt = shmemDeltaSec - offsetSec;
 			ExtrapolateReferencePose(reference, dt);
+		}
+
+		// Auto-detection feed: push linear-speed magnitudes for both devices into the
+		// rolling history buffers. The cross-correlation in CalibrationTick consumes
+		// these to estimate the lag between reference and target signal arrival.
+		// Linear velocity is preferred over angular for these speed signals — angular
+		// velocity from optical trackers is often filter-shaped (low-pass), which
+		// blurs the transient that the cross-correlator looks for.
+		{
+			auto speedFromVel = [](const double v[3]) -> double {
+				double s = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+				if (!std::isfinite(s)) return 0.0;
+				return s;
+			};
+			double refSpeed = speedFromVel(ctx.devicePoses[ctx.referenceID].vecVelocity);
+			double tgtSpeed = speedFromVel(ctx.devicePoses[ctx.targetID].vecVelocity);
+			double now = glfwGetTime();
+
+			CalibrationContext& mctx = const_cast<CalibrationContext&>(ctx);
+			mctx.refSpeedHistory.push_back(refSpeed);
+			mctx.targetSpeedHistory.push_back(tgtSpeed);
+			mctx.speedSampleTimes.push_back(now);
+			while (mctx.refSpeedHistory.size() > CalibrationContext::kLatencyHistoryCapacity) {
+				mctx.refSpeedHistory.pop_front();
+			}
+			while (mctx.targetSpeedHistory.size() > CalibrationContext::kLatencyHistoryCapacity) {
+				mctx.targetSpeedHistory.pop_front();
+			}
+			while (mctx.speedSampleTimes.size() > CalibrationContext::kLatencyHistoryCapacity) {
+				mctx.speedSampleTimes.pop_front();
+			}
 		}
 
 		calibration.PushSample(Sample(
@@ -340,6 +373,80 @@ namespace {
 		{ L"ovr_smooth_tracking.exe", "OVR-SmoothTracking" },
 	};
 
+	// Discrete cross-correlation between two equal-length speed series. Returns false
+	// if there isn't enough signal energy to produce a trustworthy estimate. On
+	// success, *lagSamplesOut is the lag (in samples) at which the correlation is
+	// maximised, with sub-sample resolution from a quadratic fit around the peak.
+	// Positive lag means the target signal lags the reference signal (target arrives later).
+	//
+	// Energy threshold: we require RMS speed > 0.1 m/s on both signals so we don't
+	// chase noise when the user is standing still.
+	bool EstimateLatencyLagSamples(
+		const std::deque<double>& ref,
+		const std::deque<double>& tgt,
+		int maxTau,
+		double* lagSamplesOut)
+	{
+		const size_t N = ref.size();
+		if (N < (size_t)(2 * maxTau + 4) || tgt.size() != N) return false;
+
+		// Energy gate: avoid biting on noise.
+		double refE = 0, tgtE = 0;
+		for (size_t i = 0; i < N; i++) { refE += ref[i] * ref[i]; tgtE += tgt[i] * tgt[i]; }
+		double refRms = std::sqrt(refE / (double)N);
+		double tgtRms = std::sqrt(tgtE / (double)N);
+		const double kMinRmsSpeed = 0.1; // m/s
+		if (refRms < kMinRmsSpeed || tgtRms < kMinRmsSpeed) return false;
+
+		// Mean-subtract so a constant-offset signal doesn't dominate the correlation.
+		double refMean = 0, tgtMean = 0;
+		for (size_t i = 0; i < N; i++) { refMean += ref[i]; tgtMean += tgt[i]; }
+		refMean /= (double)N; tgtMean /= (double)N;
+
+		std::vector<double> r(N), t(N);
+		for (size_t i = 0; i < N; i++) { r[i] = ref[i] - refMean; t[i] = tgt[i] - tgtMean; }
+
+		// C(tau) = sum_k r[k] * t[k + tau], for tau in [-maxTau, +maxTau]. We index
+		// t[k + tau] only when in range; the truncated sum is the standard biased
+		// estimator and is fine since N >> maxTau.
+		std::vector<double> C(2 * maxTau + 1, 0.0);
+		int bestIdx = -1;
+		double bestVal = -std::numeric_limits<double>::infinity();
+		for (int tau = -maxTau; tau <= maxTau; tau++) {
+			int idx = tau + maxTau;
+			double sum = 0.0;
+			int kStart = std::max(0, -tau);
+			int kEnd = std::min((int)N, (int)N - tau);
+			for (int k = kStart; k < kEnd; k++) {
+				sum += r[k] * t[k + tau];
+			}
+			C[idx] = sum;
+			if (sum > bestVal) { bestVal = sum; bestIdx = idx; }
+		}
+
+		if (bestIdx <= 0 || bestIdx >= (int)C.size() - 1) {
+			// Peak at the edge — under-determined; fall back to integer lag.
+			*lagSamplesOut = (double)(bestIdx - maxTau);
+			return true;
+		}
+
+		// Quadratic interpolation around the integer peak for sub-sample resolution.
+		// y0 = C[bestIdx-1], y1 = C[bestIdx], y2 = C[bestIdx+1].
+		// Fractional offset of the parabolic peak = (y0 - y2) / (2*(y0 - 2y1 + y2)).
+		double y0 = C[bestIdx - 1];
+		double y1 = C[bestIdx];
+		double y2 = C[bestIdx + 1];
+		double denom = (y0 - 2.0 * y1 + y2);
+		double frac = 0.0;
+		if (std::fabs(denom) > 1e-12) {
+			frac = 0.5 * (y0 - y2) / denom;
+			// Bound the fractional shift; a parabolic peak should be within ±1 sample.
+			if (!std::isfinite(frac) || std::fabs(frac) > 1.0) frac = 0.0;
+		}
+		*lagSamplesOut = (double)(bestIdx - maxTau) + frac;
+		return true;
+	}
+
 	bool DetectExternalSmoothingTool(std::string& outName) {
 		// EnumProcesses returns at most cb/sizeof(DWORD) PIDs; bump if it ever fills.
 		DWORD pids[2048];
@@ -371,6 +478,29 @@ void InitCalibrator()
 {
 	Driver.Connect();
 	shmem.Open(OPENVR_SPACECALIBRATOR_SHMEM_NAME);
+}
+
+// Called by IPCClient::SendBlocking after a successful reconnect. vrserver crashing
+// and respawning destroys the named file mapping that backs the shmem segment; the
+// overlay's mapped view silently detaches and ReadNewPoses begins reading zeros.
+// Tearing down and reopening the segment restores the link to the new driver process.
+// On Open() failure we leave shmem in a closed state — the next reconnect will retry,
+// and ReadNewPoses already guards against pData == nullptr by throwing.
+void ReopenShmem()
+{
+	try {
+		shmem.Close();
+		shmem.Open(OPENVR_SPACECALIBRATOR_SHMEM_NAME);
+	}
+	catch (const std::exception& e) {
+		// Close already happened; leave the segment closed and let the next reconnect retry.
+		fprintf(stderr, "[ReopenShmem] failed to reopen pose shmem after reconnect: %s\n", e.what());
+	}
+}
+
+double GetActiveLatencyOffsetMs(const CalibrationContext& ctx)
+{
+	return ctx.latencyAutoDetect ? ctx.estimatedLatencyOffsetMs : ctx.targetLatencyOffsetMs;
 }
 
 namespace {
@@ -512,11 +642,27 @@ void ResetAndDisableOffsets(uint32_t id, const std::string& trackingSystem = "")
 
 static_assert(vr::k_unTrackedDeviceIndex_Hmd == 0, "HMD index expected to be 0");
 
+// Per-scan record of which device IDs (and their human-friendly identity) we
+// applied a per-target-system transform to last time. Used to log
+// adopted/disconnected events when the set changes scan-over-scan.
+namespace {
+	struct AdoptedTracker {
+		std::string serial;
+		std::string model;
+	};
+	// Indexed by OpenVR ID. Empty entries mean the slot was not adopted last scan.
+	std::map<uint32_t, AdoptedTracker> g_lastAdoptedTrackers;
+}
+
 void ScanAndApplyProfile(CalibrationContext &ctx)
 {
 	std::unique_ptr<char[]> buffer_array(new char [vr::k_unMaxPropertyStringSize]);
 	char* buffer = buffer_array.get();
 	ctx.enabled = ctx.validProfile;
+
+	// Snapshot of which IDs got adopted this scan and what serial/model they had.
+	// Compared against g_lastAdoptedTrackers below to log new-adoption / disconnect events.
+	std::map<uint32_t, AdoptedTracker> currentAdopted;
 
 	// If the calibrated target tracking system changed (or profile was loaded/cleared),
 	// invalidate all per-ID caches so we re-establish correct state on every device.
@@ -716,7 +862,42 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		payload.freezePrediction = suppressBySerial || suppressByAuto;
 
 		SendDeviceTransformIfChanged(id, payload);
+
+		// Record this ID as adopted (it's receiving a per-target-system transform with
+		// enabled=true). g_lastSeenSerial[id] is freshly populated above; pair it with
+		// the model name for log readability. RenderModel falls back to empty string
+		// on failure — we don't gate the log on that.
+		AdoptedTracker tracker;
+		tracker.serial = g_lastSeenSerial[id];
+		char modelBuf[256] = {0};
+		vr::ETrackedPropertyError modelErr = vr::TrackedProp_Success;
+		vr::VRSystem()->GetStringTrackedDeviceProperty(id, vr::Prop_ModelNumber_String, modelBuf, sizeof modelBuf, &modelErr);
+		if (modelErr == vr::TrackedProp_Success) tracker.model = modelBuf;
+		currentAdopted[id] = tracker;
 	}
+
+	// Diff against the previous scan: log new adoptions and disconnects. Skipped
+	// when the profile is disabled so we don't spam the log on profile-clear.
+	if (ctx.enabled) {
+		for (const auto& kv : currentAdopted) {
+			if (g_lastAdoptedTrackers.find(kv.first) == g_lastAdoptedTrackers.end()) {
+				char buf[512];
+				snprintf(buf, sizeof buf, "Adopted new tracker: %s/%s\n",
+					kv.second.model.empty() ? "(unknown model)" : kv.second.model.c_str(),
+					kv.second.serial.empty() ? "(no serial)" : kv.second.serial.c_str());
+				CalCtx.Log(buf);
+			}
+		}
+		for (const auto& kv : g_lastAdoptedTrackers) {
+			if (currentAdopted.find(kv.first) == currentAdopted.end()) {
+				char buf[512];
+				snprintf(buf, sizeof buf, "Tracker disconnected: %s\n",
+					kv.second.serial.empty() ? "(no serial)" : kv.second.serial.c_str());
+				CalCtx.Log(buf);
+			}
+		}
+	}
+	g_lastAdoptedTrackers = std::move(currentAdopted);
 
 	if (ctx.enabled && ctx.chaperone.valid && ctx.chaperone.autoApply)
 	{
@@ -774,6 +955,25 @@ void CalibrationTick(double time)
 	if ((time - ctx.timeLastTick) < 0.05)
 		return;
 
+	// Bounds-check the device IDs once at the top of the tick. Many code paths
+	// downstream index devicePoses[ctx.referenceID] / devicePoses[ctx.targetID]
+	// directly (CollectSample, the sample-history pose recording near the end of
+	// this function, etc.), and a stale negative or out-of-range value reaches
+	// for memory outside the array. We tolerate -1 (the not-yet-assigned sentinel)
+	// because state machines below explicitly handle that, but anything else that
+	// isn't in [0, k_unMaxTrackedDeviceCount) means we cannot run any per-device
+	// logic this tick — bail out and try again next tick.
+	const int32_t maxId = (int32_t)vr::k_unMaxTrackedDeviceCount;
+	auto idInRangeOrUnset = [maxId](int32_t id) {
+		return id == -1 || (id >= 0 && id < maxId);
+	};
+	if (!idInRangeOrUnset(ctx.referenceID) || !idInRangeOrUnset(ctx.targetID)) {
+		// Defensive reset: a corrupted ID is unrecoverable for this tick. Don't
+		// touch state — we just skip the tick so the next AssignTargets() call can
+		// reseat the IDs cleanly.
+		return;
+	}
+
 	if (ctx.state == CalibrationState::Continuous || ctx.state == CalibrationState::ContinuousStandby) {
 		ctx.ClearLogOnMessage();
 
@@ -781,6 +981,84 @@ void CalibrationTick(double time)
 			// rescan devices every 10 seconds or so if we are using controller data
 			ctx.timeLastAssign = time;
 			AssignTargets();
+		}
+	}
+
+	// Sudden-tracking-shift watchdog. The 50-rejection watchdog inside CalibrationCalc
+	// only fires after ~25s of consistent rejection; that's appropriate for genuinely
+	// degraded calibration but too slow for catastrophic geometry shifts (a lighthouse
+	// gets bumped, a tracker goes through a portal, etc.). Here we look at the recent
+	// error_currentCal time series: when the last error sample is more than 5x the
+	// 30-tick rolling median for 3 consecutive ticks, the calibration is almost
+	// certainly invalid even if CalibrationCalc still considers it valid. We force a
+	// Clear() and demote to ContinuousStandby so the next AssignTargets cycle starts a
+	// fresh calibration. Done from the overlay side (not CalibrationCalc) so we don't
+	// touch shared math code.
+	{
+		static int s_consecutiveBadTicks = 0;
+		static double s_lastErrorTs = 0.0;
+		const auto& errSeries = Metrics::error_currentCal;
+		const int N = errSeries.size();
+		if (N >= 5 && calibration.isValid()) {
+			// Only count an excursion once per new error sample (the time series is
+			// shared and may not advance every tick).
+			double thisTs = errSeries[N - 1].first;
+			if (thisTs > s_lastErrorTs) {
+				s_lastErrorTs = thisTs;
+				const int window = std::min(30, N);
+				std::vector<double> tail;
+				tail.reserve(window);
+				for (int i = N - window; i < N; i++) tail.push_back(errSeries[i].second);
+				std::sort(tail.begin(), tail.end());
+				double median = tail[tail.size() / 2];
+				double current = errSeries[N - 1].second;
+				if (median > 1e-9 && current > 5.0 * median) {
+					s_consecutiveBadTicks++;
+				} else {
+					s_consecutiveBadTicks = 0;
+				}
+				if (s_consecutiveBadTicks >= 3) {
+					CalCtx.Log("Tracking geometry shifted — restarting calibration\n");
+					calibration.Clear();
+					ctx.state = CalibrationState::ContinuousStandby;
+					ctx.relativePosCalibrated = false;
+					s_consecutiveBadTicks = 0;
+				}
+			}
+		} else {
+			s_consecutiveBadTicks = 0;
+		}
+	}
+
+	// Latency cross-correlation. Once per second, if the rolling speed buffers
+	// are full and the user has actually been moving (RMS speed > 0.1 m/s on both
+	// signals), compute a discrete cross-correlation and update the EMA estimate.
+	// The active value is then used by CollectSample on subsequent ticks when
+	// latencyAutoDetect is on.
+	if ((time - ctx.timeLastLatencyEstimate) > 1.0
+		&& ctx.refSpeedHistory.size() >= CalibrationContext::kLatencyHistoryCapacity
+		&& ctx.targetSpeedHistory.size() >= CalibrationContext::kLatencyHistoryCapacity
+		&& ctx.speedSampleTimes.size() >= CalibrationContext::kLatencyHistoryCapacity)
+	{
+		ctx.timeLastLatencyEstimate = time;
+		double lagSamples = 0.0;
+		const int kMaxTau = 10;
+		if (EstimateLatencyLagSamples(ctx.refSpeedHistory, ctx.targetSpeedHistory, kMaxTau, &lagSamples)) {
+			// Convert sample lag to ms using the *empirical* sample rate from the
+			// timestamp ring. This is more honest than assuming a fixed 20 Hz: the
+			// rate is whatever CollectSample is being called at right now.
+			double dur =
+				ctx.speedSampleTimes.back() - ctx.speedSampleTimes.front();
+			size_t intervals = ctx.speedSampleTimes.size() - 1;
+			if (dur > 1e-3 && intervals > 0) {
+				double sampleRateHz = (double)intervals / dur;
+				double lagMs = lagSamples * 1000.0 / sampleRateHz;
+				// Bound the per-update step to keep one bad correlation from
+				// teleporting the offset estimate.
+				if (std::isfinite(lagMs) && std::fabs(lagMs) <= 200.0) {
+					ctx.estimatedLatencyOffsetMs = 0.7 * ctx.estimatedLatencyOffsetMs + 0.3 * lagMs;
+				}
+			}
 		}
 	}
 
