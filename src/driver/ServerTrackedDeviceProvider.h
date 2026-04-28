@@ -69,8 +69,8 @@ private:
 		bool enabled = false;
 		bool quash = false;
 		IsoTransform transform, targetTransform;
-		double scale;
-		LARGE_INTEGER lastPoll;
+		double scale = 1.0;
+		LARGE_INTEGER lastPoll{};
 		DeltaSize currentRate = DeltaSize::TINY;
 		// True when the slot's transform/targetTransform are tracking a tracking-
 		// system fallback rather than an overlay-supplied per-ID value. Used to

@@ -10,7 +10,11 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext *pDriver
 	TRACE("ServerTrackedDeviceProvider::Init()");
 	VR_INIT_SERVER_DRIVER_CONTEXT(pDriverContext);
 
-	memset(transforms, 0, vr::k_unMaxTrackedDeviceCount * sizeof DeviceTransform);
+	// transforms[] elements are zero/identity-initialized via DeviceTransform's
+	// default member initializers and IsoTransform's default constructor; a
+	// memset would be undefined behavior because Eigen members aren't trivially
+	// copyable. AlignmentSpeedParams is a plain aggregate of doubles so memset
+	// here is safe.
 	memset(&alignmentSpeedParams, 0, sizeof alignmentSpeedParams);
 
 	alignmentSpeedParams.thr_rot_tiny = 0.1f * (EIGEN_PI / 180.0f);
