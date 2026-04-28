@@ -185,7 +185,11 @@ struct CalibrationContext
 		enabled = false;
 		validProfile = false;
 		refToTargetPose = Eigen::AffineCompact3d::Identity();
-		relativePosCalibrated = true;
+		// No calibration was performed — relative pose is NOT calibrated. The
+		// previous value here was `true`, which left a stale-identity-matrix
+		// believed-good and caused StartContinuousCalibration to pass `true` to
+		// setRelativeTransformation downstream.
+		relativePosCalibrated = false;
 	}
 
 	size_t SampleCount()
@@ -246,12 +250,12 @@ struct CalibrationContext
 	}
 
 	bool TargetPoseIsValidSimple() const {
-		return targetID >= 0 && targetID <= vr::k_unMaxTrackedDeviceCount
+		return targetID >= 0 && targetID < (int32_t)vr::k_unMaxTrackedDeviceCount
 			&& devicePoses[targetID].poseIsValid && devicePoses[targetID].result == vr::ETrackingResult::TrackingResult_Running_OK;
 	}
 
 	bool ReferencePoseIsValidSimple() const {
-		return referenceID >= 0 && referenceID <= vr::k_unMaxTrackedDeviceCount
+		return referenceID >= 0 && referenceID < (int32_t)vr::k_unMaxTrackedDeviceCount
 			&& devicePoses[referenceID].poseIsValid && devicePoses[referenceID].result == vr::ETrackingResult::TrackingResult_Running_OK;
 	}
 };

@@ -806,7 +806,7 @@ void CalibrationTick(double time)
 
 	ctx.timeLastTick = time;
 	shmem.ReadNewPoses([&](const protocol::DriverPoseShmem::AugmentedPose& augmented_pose) {
-		if (augmented_pose.deviceId >= 0 && augmented_pose.deviceId <= vr::k_unMaxTrackedDeviceCount) {
+		if (augmented_pose.deviceId >= 0 && augmented_pose.deviceId < (int)vr::k_unMaxTrackedDeviceCount) {
 			ctx.devicePoses[augmented_pose.deviceId] = augmented_pose.pose;
 			// Track per-device shmem QPC timestamps so CollectSample can compute the
 			// inter-system time delta when applying targetLatencyOffsetMs.

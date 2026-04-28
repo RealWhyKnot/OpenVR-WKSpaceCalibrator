@@ -62,7 +62,11 @@ void IPCServer::Stop()
 
 IPCServer::PipeInstance *IPCServer::CreatePipeInstance(HANDLE pipe)
 {
-	auto pipeInst = new PipeInstance;
+	// Value-init: PipeInstance contains an OVERLAPPED whose hEvent must be NULL
+	// for the completion-routine variants of WriteFileEx/ReadFileEx. Default-init
+	// (`new PipeInstance`) leaves OVERLAPPED with heap-residual garbage; some
+	// resident bytes in hEvent cause the API to fail.
+	auto pipeInst = new PipeInstance{};
 	pipeInst->pipe = pipe;
 	pipeInst->server = this;
 	pipes.insert(pipeInst);
@@ -176,7 +180,11 @@ BOOL IPCServer::CreateAndConnectInstance(LPOVERLAPPED overlap, HANDLE &pipe)
 			return FALSE;
 	}
 
+	// Pipe handle was created above but neither path took ownership of it. Close
+	// before returning failure so we don't leak a kernel pipe handle every retry.
 	LOG("ConnectNamedPipe failed. Error: %d", GetLastError());
+	CloseHandle(pipe);
+	pipe = INVALID_HANDLE_VALUE;
 	return FALSE;
 }
 
