@@ -1,0 +1,16 @@
+version: 2
+updates:
+  # GitHub Actions runners — keep workflow action versions current.
+  # No npm/nuget ecosystems here (this is a CMake/C++ project), and submodules aren't
+  # covered by Dependabot — they get bumped manually when the submodule project releases
+  # something we want to pull in.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
