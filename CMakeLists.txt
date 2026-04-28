@@ -19,11 +19,21 @@ endfunction()
 
 project("SpaceCalibrator")
 
+# Unit tests are opt-out: ON by default for local + CI builds, but a release/CI
+# environment that doesn't want to compile/link GoogleTest can pass
+# -DSPACECAL_BUILD_TESTS=OFF at configure time.
+option(SPACECAL_BUILD_TESTS "Build unit tests" ON)
+
 # Include project
 add_subdirectory ("src")
 
 # Libs
 add_subdirectory ("lib")
+
+if (SPACECAL_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory("tests")
+endif()
 
 if ("${CMAKE_CXX_COMPILER}" MATCHES "Clang" OR "${CMAKE_C_COMPILER_ID}" STREQUAL "Clang")
 	# add_compile_options(-Werror=return-type -Wall -Wextra -Wpedantic /MP)
