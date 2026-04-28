@@ -41,6 +41,9 @@ enum class Step {
 
 struct State {
 	Step step = Step::Inactive;
+	// True iff we have already called ImGui::OpenPopup for the current
+	// activation. Cleared on close so the next Open() re-arms.
+	bool popupOpened = false;
 
 	// HMD tracking system (the implicit reference for every calibration).
 	std::string hmdSystem;
@@ -79,13 +82,20 @@ const char* Pretty(const std::string& sys) {
 	return GetPrettyTrackingSystemName(sys);
 }
 
-// Modal sizing helper: centred fixed-width box.
-void OpenCentredPopup(const char* id, ImVec2 size) {
+// Apply centred fixed-width sizing to the popup that's about to be drawn.
+// SetNextWindow* take effect on the next submitted window; idempotent across
+// frames. We deliberately do NOT call OpenPopup here -- OpenPopup is a one-
+// shot trigger and lives in Draw(), gated on a "this is a fresh activation"
+// check. Calling OpenPopup every frame was the previous bug: once the user
+// clicked the Close/AllDone path and we transitioned to Inactive, the next
+// frame's OpenPopup would partially re-arm the popup stack and ImGui would
+// keep the dimming overlay visible while reporting BeginPopupModal=false,
+// leaving the user staring at a grey unresponsive window.
+void ApplyPopupSizing(ImVec2 size) {
 	ImVec2 vp = ImGui::GetMainViewport()->Size;
 	ImGui::SetNextWindowPos(ImVec2((vp.x - size.x) * 0.5f, (vp.y - size.y) * 0.5f),
 	                       ImGuiCond_Appearing);
 	ImGui::SetNextWindowSize(size, ImGuiCond_Always);
-	ImGui::OpenPopup(id);
 }
 
 // Step transitions.
@@ -394,16 +404,33 @@ bool IsActive() {
 
 void Open() {
 	auto& s = S();
-	s = State{}; // reset
+	s = State{}; // reset (popupOpened false, step Inactive)
 	s.step = Step::Welcome;
+	// Don't call ImGui::OpenPopup here -- Open() can be invoked from a UI
+	// callback that's already inside an ImGui frame, but we want OpenPopup
+	// to fire from inside Draw() so the popup stack is touched in the same
+	// place every time. Draw() will pick this up on its next call.
 }
 
 void Draw() {
 	auto& s = S();
-	if (s.step == Step::Inactive) return;
-
 	const char* popupId = "##spacecal_wizard";
-	OpenCentredPopup(popupId, ImVec2(640, 380));
+
+	// Fresh activation: the wizard wants to be visible but we haven't told
+	// ImGui yet. OpenPopup is a one-shot trigger; calling it again on later
+	// frames is a noop while the popup is up, but firing it after a close
+	// (in the same session) re-opens the popup in a way that confuses the
+	// rendering of the dimming overlay -- which is the bug that left a grey
+	// unresponsive window after AllDone -> Close.
+	if (s.step != Step::Inactive && !s.popupOpened) {
+		ImGui::OpenPopup(popupId);
+		s.popupOpened = true;
+	}
+	// Fully inactive AND popup not in flight: nothing to draw, no overlay
+	// to render. Bail.
+	if (s.step == Step::Inactive && !s.popupOpened) return;
+
+	ApplyPopupSizing(ImVec2(640, 380));
 
 	if (ImGui::BeginPopupModal(popupId, nullptr,
 		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
@@ -425,13 +452,28 @@ void Draw() {
 		default: break;
 		}
 
-		// If the step transitioned to Inactive mid-frame (Skip/Close clicked),
-		// close the popup so the next frame doesn't re-open it on us.
+		// If a button click set step to Inactive mid-frame, close the popup
+		// for real (CloseCurrentPopup processes after EndPopup) and clear our
+		// open-tracking flag so a future Open() can re-arm.
 		if (s.step == Step::Inactive) {
 			ImGui::CloseCurrentPopup();
+			s.popupOpened = false;
 		}
 
 		ImGui::EndPopup();
+	} else {
+		// BeginPopupModal returned false. Either the user pressed Esc and
+		// ImGui auto-closed the popup, or some external state change closed
+		// it. Either way, our tracking flag is now stale -- sync it. Force
+		// step back to Inactive too so the next Open() starts fresh from
+		// Welcome.
+		if (s.popupOpened) {
+			s.popupOpened = false;
+			s.step = Step::Inactive;
+			// Persist the dismissal so we don't auto-show again next launch.
+			CalCtx.wizardCompleted = true;
+			SaveProfile(CalCtx);
+		}
 	}
 }
 
