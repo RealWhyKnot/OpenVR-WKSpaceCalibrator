@@ -12,8 +12,14 @@ struct IsoTransform {
 	Eigen::Vector3d translation;
 
 	IsoTransform() : rotation(Eigen::Quaterniond::Identity()), translation(Eigen::Vector3d::Zero()) {}
-	IsoTransform(const Eigen::Quaterniond &rot) : rotation(rot), translation(Eigen::Vector3d::Zero()) {}
-	IsoTransform(const Eigen::Vector3d &trans) : rotation(Eigen::Quaterniond::Identity()), translation(trans) {}
+	// `explicit` is required: now that operator*(IsoTransform, Vector3d) uses
+	// `rotation * p` directly (instead of materialising an Isometry3d), an
+	// implicit Quaterniond -> IsoTransform conversion would make our overload
+	// ambiguous with Eigen's RotationBase::operator*(EigenBase) at any call site
+	// like `quat * vec3`. These single-arg constructors are not used implicitly
+	// anywhere in the project.
+	explicit IsoTransform(const Eigen::Quaterniond &rot) : rotation(rot), translation(Eigen::Vector3d::Zero()) {}
+	explicit IsoTransform(const Eigen::Vector3d &trans) : rotation(Eigen::Quaterniond::Identity()), translation(trans) {}
 	IsoTransform(const Eigen::Quaterniond& rot, const Eigen::Vector3d& trans) : rotation(rot), translation(trans) {}
 	
 	void pretranslate(const Eigen::Vector3d& t) {
@@ -28,15 +34,18 @@ struct IsoTransform {
 };
 
 inline IsoTransform operator*(const IsoTransform& a, const IsoTransform& b) {
-	// tA * rA * tB * rB = tA * (trans(rA * tB)) * rA * rB
+	// tA * rA * tB * rB = tA * (trans(rA * tB)) * rA * rB.
+	// `Eigen::Quaterniond * Vector3d` rotates the vector directly without
+	// materialising a 4x4 isometry; equivalent result, fewer allocations and
+	// arithmetic ops on the pose-update hot path.
 	auto rot = a.rotation * b.rotation;
-	Eigen::Vector3d trans = a.translation + Eigen::Isometry3d(a.rotation) * b.translation;
+	Eigen::Vector3d trans = a.translation + a.rotation * b.translation;
 
 	return IsoTransform(rot, trans);
 }
 
 inline Eigen::Vector3d operator*(const IsoTransform& a, const Eigen::Vector3d& p) {
-	return a.translation + Eigen::Isometry3d(a.rotation) * p;
+	return a.translation + a.rotation * p;
 }
 
 inline IsoTransform IsoTransform::interpolateAround(double lerp, const IsoTransform& target, const Eigen::Vector3d& localPoint) const {
@@ -44,7 +53,7 @@ inline IsoTransform IsoTransform::interpolateAround(double lerp, const IsoTransf
 	Eigen::Vector3d finalPos = initialPos * (1 - lerp) + (target * localPoint) * lerp;
 
 	auto newRotation = rotation.slerp(lerp, target.rotation);
-	Eigen::Vector3d newTranslation = finalPos - Eigen::Isometry3d(newRotation) * localPoint;
+	Eigen::Vector3d newTranslation = finalPos - newRotation * localPoint;
 
 	return IsoTransform(newRotation, newTranslation);
 }
