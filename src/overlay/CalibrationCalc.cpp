@@ -380,10 +380,6 @@ Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rot
 	return trans;
 }
 
-void CalibrationCalc::CalibrateScaleOffset(const Eigen::Matrix3d& rotation, Eigen::Vector3d* out_scaleOffset, float* out_scaleFactor) const {
-	// @TODO: figure out where the target and ref
-}
-
 
 namespace {
 	Pose ApplyTransform(const Pose& originalPose, const Eigen::AffineCompact3d& transform) {
