@@ -84,7 +84,11 @@ The **Target latency offset (ms)** slider in the Continuous Calibration panel ex
 
 Default 0 produces bit-for-bit identical behaviour to before the feature existed — the conditional that gates the extrapolation never triggers.
 
-**Auto-detection** of the correct offset (cross-correlation of motion histories between the two devices) is a separate feature on the roadmap. The current value is dialled in by hand: increase it until motion-correlated calibration error stops growing with movement speed.
+## Inter-system latency offset (auto)
+
+The fork also includes an auto-detector. Toggle **Latency auto-detect** in the Continuous Calibration → Settings panel. When on, the overlay maintains rolling 5-second buffers of `||vecVelocity||` for the reference and target devices, computes a discrete cross-correlation once per second when the user has been moving (RMS speed > 0.1 m/s on both signals), takes the lag at the cross-correlation peak, fits a quadratic around the peak for sub-sample resolution, and feeds the result into an EMA. The active offset (`GetActiveLatencyOffsetMs(ctx)`) returns the auto-detected value when the toggle is on, the manual `targetLatencyOffsetMs` slider value when off.
+
+Both the toggle and the EMA value persist in the registry profile (`latency_auto_detect`, `estimated_latency_offset_ms`) so the auto-detected offset is restored on overlay restart.
 
 ## Diagnostics
 

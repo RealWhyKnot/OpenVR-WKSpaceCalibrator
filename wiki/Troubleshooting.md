@@ -21,6 +21,20 @@ This is exactly what the watchdogs are designed to recover from automatically. A
 
 If you're seeing genuinely stuck behavior (waited > 30 seconds, the watchdog never fired), enable CSV logging via the Debug tab and capture a few minutes of `consecutiveRejections`, `error_currentCal`, `error_rawComputed`. Open an issue with the log file attached.
 
+## My body visibly drifts while I'm lying still
+
+**Symptom:** while stationary (lying down, sitting still in a meditation app, etc.) the calibrated trackers slowly walk to a new position, looking like phantom body movement. Most often noticed shortly after the calibration math has updated or after a watchdog fired.
+
+This is the failure mode the **Recalibrate on movement** option (default on) was added to fix. With it on, the driver only advances the lerp toward a new offset proportional to detected per-frame motion — a stationary device barely moves at all. The catch-up happens during your next natural motion, hidden by the movement.
+
+If you're still seeing drift while still:
+
+1. Open the Continuous Calibration → Settings panel and confirm **Recalibrate on movement** is checked. (Toggling it off then on re-establishes a clean baseline pose for the gate.)
+2. Confirm both your driver and overlay are protocol v7 or newer — the option is a no-op against an older driver. Reinstall the latest release if not.
+3. Check the overlay log for repeated stuck-loop watchdog firings (`"Continuous calibration appears stuck"`) — if the math is constantly resetting, the gate works but every reset re-introduces a target the gate has to catch up to. Underlying instability is causing the resets; investigate that first via `error_currentCal` and `consecutiveRejections` in the Debug tab.
+
+To intentionally restore the pre-feature instant-blend behavior (e.g. you specifically want stationary corrections), uncheck the option.
+
 ## Newly connected tracker doesn't pick up the offset
 
 **Symptom:** a tracker powered on after calibration shows up in the wrong position.

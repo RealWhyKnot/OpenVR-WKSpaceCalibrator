@@ -12,8 +12,10 @@ The pose feed is a separate channel: a shared-memory ring buffer at `OpenVRSpace
 |---|---|
 | 4 | Pre-fork. Per-ID transforms only. |
 | 5 | Added `SetTrackingSystemFallback` request. Added `target_system[32]` field to `SetDeviceTransform`. Driver-side per-system fallback map enables auto-adopt for trackers connected after calibration completes. |
+| 6 | Added `freezePrediction` field to `SetDeviceTransform` and `SetTrackingSystemFallback`. Driver zeroes velocity/acceleration on flagged devices, replacing OVR-SmoothTracking. See [[Prediction Suppression]]. |
+| 7 | Added `recalibrateOnMovement` field to `SetDeviceTransform` and `SetTrackingSystemFallback`. When set, the driver's `BlendTransform` gates lerp progress on detected per-frame motion magnitude — stationary devices don't see calibration drift. See [Recalibrate on movement](Continuous-Calibration#recalibrate-on-movement). |
 
-The overlay and driver MUST be built from the same source tree — there's no negotiation, just a hard equality check. Mixing a v4 driver with a v5 overlay (or vice versa) results in handshake failure on overlay startup.
+The overlay and driver MUST be built from the same source tree — there's no negotiation, just a hard equality check. Mixing builds with different `protocol::Version` results in handshake failure on overlay startup.
 
 ## Request types
 
@@ -36,6 +38,8 @@ Per-ID transform application. Payload `protocol::SetDeviceTransform`:
 | `lerp` | `bool` | When false, the driver snaps `transform = targetTransform`. When true, the driver smoothly interpolates. |
 | `quash` | `bool` | When true, the device is hidden by being moved 9001 m above the origin. Used for the active calibration target during continuous mode if `quashTargetInContinuous` is enabled. |
 | `target_system` | `char[32]` | The device's tracking-system name. Lets the driver associate this slot with the per-system fallback map without querying VR properties. Empty if unknown. |
+| `freezePrediction` (v6+) | `bool` | When true, the driver zeroes `vecVelocity` / `vecAcceleration` / `vecAngularVelocity` / `vecAngularAcceleration` / `poseTimeOffset` for this device on every pose update. Defeats SteamVR's pose extrapolation and any third-party smoothing tool that scales those fields. See [[Prediction Suppression]]. |
+| `recalibrateOnMovement` (v7+) | `bool` | When true, the driver gates `BlendTransform`'s lerp progress on detected per-frame motion magnitude (5 mm position OR ~1° rotation = full convergence rate; below those, scaled proportional). A stationary user doesn't see calibration drift; the catch-up happens during natural motion. See [Recalibrate on movement](Continuous-Calibration#recalibrate-on-movement). |
 
 Side effects on receipt (every call):
 - `lastPoll` is reset to the current time. Without this, a device that went offline for 10 seconds would saturate the lerp on the next pose update.
@@ -44,6 +48,7 @@ Side effects on receipt (every call):
 - On disable transition (`wasEnabled && !enabled`): `targetTransform = transform` (drop pending lerp target).
 - `deviceSystem[id]` is updated from `target_system`.
 - `fallbackActive` is cleared.
+- If `recalibrateOnMovement` transitions from on to off, `blendMotionInitialized` is reset so a future re-enable doesn't see a stale prior pose.
 
 ### `RequestSetTrackingSystemFallback` (v5+)
 
@@ -56,6 +61,8 @@ Payload `protocol::SetTrackingSystemFallback`:
 | `system_name` | `char[32]` | Tracking-system name (e.g. `"lighthouse"`, `"oculus"`). |
 | `enabled` | `bool` | When false, the fallback is removed and any slots currently following it are reset. |
 | `translation`, `rotation`, `scale` | as `SetDeviceTransform` | The transform to apply. |
+| `freezePrediction` (v6+) | `bool` | Same semantics as `SetDeviceTransform::freezePrediction`. Applied to every device that picks up this fallback. |
+| `recalibrateOnMovement` (v7+) | `bool` | Same semantics as `SetDeviceTransform::recalibrateOnMovement`. Newly-connected matching-system trackers handled by the fallback path get the motion-gated blend automatically. |
 
 When the fallback first activates for a slot, the driver snaps `transform = fb.transform` and sets `fallbackActive = true`. Subsequent pose updates lerp normally (though there's nothing to lerp toward unless the fallback itself is updated).
 
