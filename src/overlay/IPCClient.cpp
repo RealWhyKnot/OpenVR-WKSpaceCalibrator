@@ -1,7 +1,27 @@
 #include "stdafx.h"
 #include "IPCClient.h"
 
+#include <cstdio>
 #include <string>
+
+namespace
+{
+	class BrokenPipeException : public std::runtime_error
+	{
+	public:
+		BrokenPipeException(const std::string& msg, DWORD code)
+			: std::runtime_error(msg), errorCode(code) {}
+
+		DWORD errorCode;
+	};
+
+	bool IsBrokenPipeError(DWORD code)
+	{
+		return code == ERROR_BROKEN_PIPE          // 0x6D
+			|| code == ERROR_PIPE_NOT_CONNECTED   // 0xE9
+			|| code == ERROR_NO_DATA;             // 0xE8
+	}
+}
 
 std::string WStringToString(const std::wstring& wstr)
 {
@@ -63,8 +83,48 @@ void IPCClient::Connect()
 
 protocol::Response IPCClient::SendBlocking(const protocol::Request &request)
 {
-	Send(request);
-	return Receive();
+	try
+	{
+		Send(request);
+		return Receive();
+	}
+	catch (const BrokenPipeException &e)
+	{
+		// If we're already inside a reconnect attempt (e.g. handshake-after-reconnect
+		// hit another broken pipe), don't recurse — let the caller handle it.
+		if (inReconnect)
+			throw;
+
+		// SteamVR's vrserver may have restarted, leaving us with a stale pipe.
+		// Try to reconnect once and re-issue the request transparently.
+		fprintf(stderr,
+			"[IPCClient] Broken pipe (error %lu) during request; attempting reconnect...\n",
+			(unsigned long)e.errorCode);
+
+		if (pipe && pipe != INVALID_HANDLE_VALUE)
+		{
+			CloseHandle(pipe);
+			pipe = INVALID_HANDLE_VALUE;
+		}
+
+		inReconnect = true;
+		try
+		{
+			Connect();
+		}
+		catch (const std::exception &reconnectErr)
+		{
+			inReconnect = false;
+			fprintf(stderr, "[IPCClient] Reconnect failed: %s\n", reconnectErr.what());
+			throw std::runtime_error(std::string("IPC reconnect failed after broken pipe: ") + reconnectErr.what());
+		}
+		inReconnect = false;
+
+		// Retry once. If this also fails (broken pipe or otherwise),
+		// propagate the exception to the caller as the original would have.
+		Send(request);
+		return Receive();
+	}
 }
 
 void IPCClient::Send(const protocol::Request &request)
@@ -74,7 +134,12 @@ void IPCClient::Send(const protocol::Request &request)
 	if (!success)
 	{
 		DWORD lastError = GetLastError();
-		throw std::runtime_error("Error writing IPC request. Error " + std::to_string(lastError) + ": " + LastErrorString(lastError));
+		std::string msg = "Error writing IPC request. Error " + std::to_string(lastError) + ": " + LastErrorString(lastError);
+		if (IsBrokenPipeError(lastError))
+		{
+			throw BrokenPipeException(msg, lastError);
+		}
+		throw std::runtime_error(msg);
 	}
 }
 
@@ -89,7 +154,12 @@ protocol::Response IPCClient::Receive()
 		DWORD lastError = GetLastError();
 		if (lastError != ERROR_MORE_DATA)
 		{
-			throw std::runtime_error("Error reading IPC response. Error " + std::to_string(lastError) + ": " + LastErrorString(lastError));
+			std::string msg = "Error reading IPC response. Error " + std::to_string(lastError) + ": " + LastErrorString(lastError);
+			if (IsBrokenPipeError(lastError))
+			{
+				throw BrokenPipeException(msg, lastError);
+			}
+			throw std::runtime_error(msg);
 		}
 	}
 

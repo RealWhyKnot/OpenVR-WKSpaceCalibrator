@@ -15,4 +15,5 @@ public:
 
 private:
 	HANDLE pipe = INVALID_HANDLE_VALUE;
+	bool inReconnect = false;
 };
