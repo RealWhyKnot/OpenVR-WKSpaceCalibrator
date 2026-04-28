@@ -301,6 +301,27 @@ void CCal_DrawSettings() {
 			}
 			ImGui::PopID();
 
+			// Target latency offset (manual). Compensates for end-to-end latency
+			// differences between tracking systems by extrapolating the reference pose
+			// when collecting samples. Default 0 = no offset = no behaviour change.
+			ImGui::Text("Target latency offset (ms)");
+			ImGui::SameLine();
+			ImGui::PushID("target_latency_offset");
+			{
+				float latencyMs = (float)CalCtx.targetLatencyOffsetMs;
+				if (ImGui::SliderFloat("##target_latency_offset_slider", &latencyMs, -100.0f, 100.0f, "%.1f", 0)) {
+					CalCtx.targetLatencyOffsetMs = (double)latencyMs;
+				}
+			}
+			if (ImGui::IsItemHovered(0)) {
+				ImGui::SetTooltip("Manual end-to-end-latency offset for the target tracking system, in milliseconds.\n"
+					"Use this when the target system (e.g. Slime IMU, Quest) lags the reference (e.g. Lighthouse).\n"
+					"At sample-collection time the reference pose is extrapolated by this amount using its\n"
+					"reported velocity, so quick motions don't bias the calibration.\n"
+					"Default 0 disables the feature. Auto-detection is on the roadmap.");
+			}
+			ImGui::PopID();
+
 			ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
 			ImGui::TextWrapped("Controls how often SpaceCalibrator synchronises playspaces.");
 			ImGui::PopStyleColor();

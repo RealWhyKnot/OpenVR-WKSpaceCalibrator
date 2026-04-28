@@ -62,6 +62,16 @@ struct CalibrationContext
 	float maxRelativeErrorThreshold = 0.005f;
 	Eigen::Vector3d continuousCalibrationOffset;
 
+	// Manual per-target-system end-to-end-latency offset (milliseconds). When non-zero,
+	// CollectSample extrapolates the most recent reference pose forward/backward by the
+	// time delta between the reference and target shmem sample timestamps plus this
+	// offset, using the reference pose's reported linear/angular velocity. This
+	// compensates for systems with different latencies (e.g. a wireless tracker
+	// running ~10–30 ms behind a Lighthouse-tracked reference). Default 0 produces
+	// identical behaviour to before the offset was introduced. Auto-detection of
+	// the correct value is a separate feature (out of scope here).
+	double targetLatencyOffsetMs = 0.0;
+
 	protocol::AlignmentSpeedParams alignmentSpeedParams;
 	bool enableStaticRecalibration;
 	bool lockRelativePosition = false;
@@ -79,9 +89,16 @@ struct CalibrationContext
 
 	vr::DriverPose_t devicePoses[vr::k_unMaxTrackedDeviceCount];
 
+	// Per-device shmem-side QPC timestamps captured alongside the most recent pose.
+	// Populated by CalibrationTick when ingesting AugmentedPose entries from the
+	// driver shared-memory ring; consumed by CollectSample to compute the inter-system
+	// time delta used for velocity extrapolation when targetLatencyOffsetMs != 0.
+	LARGE_INTEGER devicePoseSampleTimes[vr::k_unMaxTrackedDeviceCount];
+
 	CalibrationContext() {
 		calibratedScale = 1.0;
 		memset(devicePoses, 0, sizeof(devicePoses));
+		memset(devicePoseSampleTimes, 0, sizeof(devicePoseSampleTimes));
 		ResetConfig();
 	}
 
