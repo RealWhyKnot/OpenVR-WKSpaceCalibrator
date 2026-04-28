@@ -45,6 +45,8 @@ void ShowVersionLine();
 static void DrawModePill();
 static void DrawUpdateBanner();
 static void CCal_DrawRecordingsPanel();
+static void DrawDiagnosticsPanel(ImVec2 panelSize);
+static void DrawTipPanel(ImVec2 panelSize);
 
 static bool runningInOverlay;
 
@@ -544,9 +546,17 @@ void CCal_DrawSettings() {
 	// panel size for boxes
 	ImVec2 panel_size { ImGui::GetWindowContentRegionMax().x - ImGui::GetWindowContentRegionMin().x, 0 };
 
-	ImGui::BeginGroupPanel("Tip", panel_size);
-	ImGui::Text("Hover over settings to learn more about them! Right-click any slider to reset it to default.");
-	ImGui::EndGroupPanel();
+	// Tip first (consistent with Basic). Tells the user about hover tooltips
+	// and right-click reset, which is even more relevant in Advanced where
+	// almost every row has a slider.
+	DrawTipPanel(panel_size);
+
+	// Diagnostics panel: stuck-loop watchdog + HMD-stall purge counters.
+	// Lives in Advanced because it's bug-report breadcrumbs, not something
+	// a casual user is going to action on. Keeping it visible (rather than
+	// behind another collapsing header) so a user with a problem can copy
+	// the numbers into a bug report without spelunking.
+	DrawDiagnosticsPanel(panel_size);
 
 	// === Advanced toggles =================================================
 	// Power-user checkboxes that aren't worth Basic real estate.  Kept at the
@@ -1288,89 +1298,107 @@ static bool DrawProfileMismatchBanner() {
 	return true;
 }
 
-void CCal_BasicInfo() {
-	// Mirror the profile-mismatch banner from BuildMenu so it's visible while
-	// the user is in continuous mode. Returns true if drawn — we just let it
-	// stack above the device-info table either way.
-	DrawProfileMismatchBanner();
+// Render the watchdog / HMD-stall diagnostic counters wrapped in a group panel.
+// Lives in Advanced (not Basic) since these are bug-report breadcrumbs, not
+// something a casual user needs to see while running.
+static void DrawDiagnosticsPanel(ImVec2 panelSize) {
+	ImGui::BeginGroupPanel("Diagnostics", panelSize);
 
-	// --- Watchdog/HMD-stall visibility row ---------------------------------
-	// Show the running stuck-loop watchdog count so users (and bug reports)
-	// have ground truth about whether the safety net has been firing. Flip
-	// the indicator amber for ~15 s after a fresh increment, similar to the
-	// continuous-recalibration banner pattern we use elsewhere.
-	{
-		static int s_lastSeenWatchdog = -1;
-		static double s_lastWatchdogResetTime = 0.0;
-		static int s_lastSeenStallCount = 0;
-		static int s_stallPurgeCount = 0;
-		static double s_lastStallPurgeTime = 0.0;
+	// Watchdog reset tracking. We reflect whether the count has changed
+	// recently (within ~15 s) by colouring the line amber, matching the
+	// continuous-recalibration banner pattern.
+	static int s_lastSeenWatchdog = -1;
+	static double s_lastWatchdogResetTime = 0.0;
+	static int s_lastSeenStallCount = 0;
+	static int s_stallPurgeCount = 0;
+	static double s_lastStallPurgeTime = 0.0;
 
-		const int wdResets = GetWatchdogResetCount();
-		const double now = ImGui::GetTime();
-		if (s_lastSeenWatchdog < 0) {
-			// First UI tick: initialise without flagging the existing count as
-			// "just happened".
-			s_lastSeenWatchdog = wdResets;
-		} else if (wdResets != s_lastSeenWatchdog) {
-			s_lastSeenWatchdog = wdResets;
-			s_lastWatchdogResetTime = now;
-		}
-
-		// HMD-stall purge is detected by watching consecutiveHmdStalls cross
-		// the threshold the calibration tick uses (30). We can't read the
-		// constant directly without touching Calibration.cpp, but the only
-		// thing we care about is "the value is high enough that the purge
-		// already fired" — pick a value at-or-above the source MaxHmdStalls.
-		const int kHmdStallPurgeThreshold = 30;
-		const int curStalls = CalCtx.consecutiveHmdStalls;
-		if (curStalls >= kHmdStallPurgeThreshold && s_lastSeenStallCount < kHmdStallPurgeThreshold) {
-			s_stallPurgeCount++;
-			s_lastStallPurgeTime = now;
-		}
-		s_lastSeenStallCount = curStalls;
-
-		const bool wdRecent = wdResets > 0 && (now - s_lastWatchdogResetTime) < 15.0 && s_lastWatchdogResetTime > 0.0;
-		if (wdRecent) {
-			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.30f, 1.0f));
-			ImGui::Text("Watchdog reset %.0fs ago — recollecting samples (count: %d)",
-			            now - s_lastWatchdogResetTime, wdResets);
-			ImGui::PopStyleColor();
-		} else if (wdResets == 0) {
-			ImGui::TextDisabled("Watchdog resets: 0 (last: never)");
-		} else {
-			ImGui::TextDisabled("Watchdog resets: %d (last: %.0fs ago)", wdResets,
-			                    s_lastWatchdogResetTime > 0.0 ? (now - s_lastWatchdogResetTime) : 0.0);
-		}
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("Stuck-loop watchdog: fires when continuous calibration has been rejecting every new\n"
-			                  "sample for ~25 seconds. When it fires, the current estimate is discarded and\n"
-			                  "we recollect from scratch. A high count here usually means motion conditioning is\n"
-			                  "poor (move slower, rotate around more axes) or trackers are drifting against each\n"
-			                  "other faster than the solver can keep up.");
-		}
-
-		const bool stallRecent = s_stallPurgeCount > 0 && (now - s_lastStallPurgeTime) < 15.0;
-		if (stallRecent) {
-			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.30f, 1.0f));
-			ImGui::Text("HMD-stall purge %.0fs ago — recollecting samples (count: %d)",
-			            now - s_lastStallPurgeTime, s_stallPurgeCount);
-			ImGui::PopStyleColor();
-		} else if (s_stallPurgeCount == 0) {
-			ImGui::TextDisabled("HMD-stall purges: 0 (last: never)");
-		} else {
-			ImGui::TextDisabled("HMD-stall purges: %d (last: %.0fs ago)", s_stallPurgeCount,
-			                    now - s_lastStallPurgeTime);
-		}
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("HMD-stall purge: fires when the headset stops reporting fresh poses for ~1.5 seconds\n"
-			                  "(SteamVR hiccup, tracking loss, sleep-wake). The sample buffer is purged because the\n"
-			                  "stale samples around the stall are unreliable. Normal during a brief tracking glitch;\n"
-			                  "frequent stalls suggest a tracking-environment problem (lighting, USB bandwidth, etc).");
-		}
-		ImGui::Separator();
+	const int wdResets = GetWatchdogResetCount();
+	const double now = ImGui::GetTime();
+	if (s_lastSeenWatchdog < 0) {
+		s_lastSeenWatchdog = wdResets;
+	} else if (wdResets != s_lastSeenWatchdog) {
+		s_lastSeenWatchdog = wdResets;
+		s_lastWatchdogResetTime = now;
 	}
 
+	// HMD-stall purge detection: watch CalCtx.consecutiveHmdStalls cross the
+	// threshold the calibration tick uses internally (~30 samples = ~1.5 s).
+	const int kHmdStallPurgeThreshold = 30;
+	const int curStalls = CalCtx.consecutiveHmdStalls;
+	if (curStalls >= kHmdStallPurgeThreshold && s_lastSeenStallCount < kHmdStallPurgeThreshold) {
+		s_stallPurgeCount++;
+		s_lastStallPurgeTime = now;
+	}
+	s_lastSeenStallCount = curStalls;
+
+	const bool wdRecent = wdResets > 0 && (now - s_lastWatchdogResetTime) < 15.0 && s_lastWatchdogResetTime > 0.0;
+	if (wdRecent) {
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.30f, 1.0f));
+		ImGui::Text("Watchdog reset %.0fs ago - recollecting samples (count: %d)",
+			now - s_lastWatchdogResetTime, wdResets);
+		ImGui::PopStyleColor();
+	} else if (wdResets == 0) {
+		ImGui::TextDisabled("Watchdog resets: 0 (last: never)");
+	} else {
+		ImGui::TextDisabled("Watchdog resets: %d (last: %.0fs ago)", wdResets,
+			s_lastWatchdogResetTime > 0.0 ? (now - s_lastWatchdogResetTime) : 0.0);
+	}
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Stuck-loop watchdog: fires when continuous calibration has been rejecting every new\n"
+		                  "sample for ~25 seconds. When it fires, the current estimate is discarded and\n"
+		                  "we recollect from scratch. A high count here usually means motion conditioning is\n"
+		                  "poor (move slower, rotate around more axes) or trackers are drifting against each\n"
+		                  "other faster than the solver can keep up.");
+	}
+
+	const bool stallRecent = s_stallPurgeCount > 0 && (now - s_lastStallPurgeTime) < 15.0;
+	if (stallRecent) {
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.30f, 1.0f));
+		ImGui::Text("HMD-stall purge %.0fs ago - recollecting samples (count: %d)",
+			now - s_lastStallPurgeTime, s_stallPurgeCount);
+		ImGui::PopStyleColor();
+	} else if (s_stallPurgeCount == 0) {
+		ImGui::TextDisabled("HMD-stall purges: 0 (last: never)");
+	} else {
+		ImGui::TextDisabled("HMD-stall purges: %d (last: %.0fs ago)", s_stallPurgeCount,
+			now - s_lastStallPurgeTime);
+	}
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("HMD-stall purge: fires when the headset stops reporting fresh poses for ~1.5 seconds\n"
+		                  "(SteamVR hiccup, tracking loss, sleep-wake). The sample buffer is purged because the\n"
+		                  "stale samples around the stall are unreliable. Normal during a brief tracking glitch;\n"
+		                  "frequent stalls suggest a tracking-environment problem (lighting, USB bandwidth, etc).");
+	}
+
+	ImGui::EndGroupPanel();
+}
+
+// Tip strip for both tabs. Reminds the user that hover = tooltip and
+// right-click on sliders = reset to default. Light-weight, identical between
+// Basic and Advanced so the hint is always reachable.
+static void DrawTipPanel(ImVec2 panelSize) {
+	ImGui::BeginGroupPanel("Tip", panelSize);
+	ImGui::TextWrapped("Hover over any setting to learn more about it. Right-click any slider to reset it to its default value.");
+	ImGui::EndGroupPanel();
+}
+
+void CCal_BasicInfo() {
+	// Mirror the profile-mismatch banner from BuildMenu so it's visible while
+	// the user is in continuous mode.
+	DrawProfileMismatchBanner();
+
+	ImVec2 panelSize{ ImGui::GetWindowContentRegionMax().x - ImGui::GetWindowContentRegionMin().x, 0 };
+
+	DrawTipPanel(panelSize);
+
+	// --- Devices panel -----------------------------------------------------
+	// The same reference + target table as before, but wrapped in a group
+	// panel so it visually matches the panels in Advanced. The panel widget
+	// owns its own width so we don't pass a non-zero panelSize here -- letting
+	// the panel auto-fit its content prevents a stray right-edge gap when the
+	// table is narrower than the window.
+	ImGui::BeginGroupPanel("Devices", panelSize);
 	if (ImGui::BeginTable("DeviceInfo", 2, 0)) {
 		ImGui::TableSetupColumn("Reference device");
 		ImGui::TableSetupColumn("Target device");
@@ -1423,13 +1451,13 @@ void CCal_BasicInfo() {
 
 		ImGui::EndTable();
 	}
+	ImGui::EndGroupPanel(); // Devices
 
+	// --- Actions panel -----------------------------------------------------
+	// Three-way grid (Cancel | Restart sampling | Pause) inside a group panel
+	// so it visually matches the rest of Basic.
+	ImGui::BeginGroupPanel("Actions", panelSize);
 	float width = ImGui::GetWindowContentRegionWidth(), scale = 1.0f;
-
-	// Recovery affordances: Cancel, Restart sampling, Pause. The old
-	// "Debug: Mark logs" debug button was removed — annotations are written
-	// automatically when the watchdog fires or the user presses the
-	// recalibrate buttons; that's enough to grep the log.
 	if (ImGui::BeginTable("##CCal_Cancel", 3, 0, ImVec2(width * scale, ImGui::GetTextLineHeight() * 2))) {
 		ImGui::TableNextRow();
 		ImGui::TableSetColumnIndex(0);
@@ -1478,61 +1506,74 @@ void CCal_BasicInfo() {
 
 		ImGui::EndTable();
 	}
+	ImGui::EndGroupPanel(); // Actions
 
 	// === Common settings ===================================================
-	// The handful of settings most users actually touch.  Moved here from the
-	// old "Settings" tab so a basic user has everything they need on one page
-	// without having to know what a "calibration speed" is.
-	ImVec2 panelSize{ ImGui::GetWindowContentRegionMax().x - ImGui::GetWindowContentRegionMin().x, 0 };
-
+	// The handful of settings most users actually touch.  Two-column table
+	// inside the panel so labels and sliders/checkboxes line up cleanly --
+	// the previous Text + SameLine + Slider layout was readable but the
+	// columns wandered with label width.
 	ImGui::BeginGroupPanel("Common settings", panelSize);
 
-	// Jitter threshold
-	ImGui::Text("Jitter threshold");
-	ImGui::SameLine();
-	ImGui::PushID("basic_jitter_threshold");
-	ImGui::SliderFloat("##basic_jitter_threshold_slider", &CalCtx.jitterThreshold, 0.1f, 10.0f, "%1.1f", 0);
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip("Controls how much jitter will be allowed for calibration.\n"
-			"Higher values allow worse tracking to calibrate, but may result in poorer tracking.");
-	}
-	AddResetContextMenu("basic_jitter_threshold_ctx", [] { CalCtx.jitterThreshold = 3.0f; });
-	ImGui::PopID();
+	// Two-column grid: label on the left, control on the right. Lets each row
+	// have a consistent baseline regardless of label length, instead of the
+	// previous Text + SameLine + Slider layout where columns wandered.
+	if (ImGui::BeginTable("##common_settings_grid", 2,
+			ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoBordersInBody)) {
+		ImGui::TableSetupColumn("##label", ImGuiTableColumnFlags_WidthFixed, 230.0f);
+		ImGui::TableSetupColumn("##control", ImGuiTableColumnFlags_WidthStretch);
 
-	// Recalibration threshold
-	ImGui::Text("Recalibration threshold");
-	ImGui::SameLine();
-	ImGui::PushID("basic_recalibration_threshold");
-	ImGui::SliderFloat("##basic_recalibration_threshold_slider", &CalCtx.continuousCalibrationThreshold, 1.01f, 10.0f, "%1.1f", 0);
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip("Controls how good the calibration must be before realigning the trackers.\n"
-			"Higher values cause calibration to happen less often, and may be useful for systems with lots of tracking drift.");
-	}
-	AddResetContextMenu("basic_recalibration_threshold_ctx", [] { CalCtx.continuousCalibrationThreshold = 1.5f; });
-	ImGui::PopID();
+		// --- Jitter threshold ---
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted("Jitter threshold");
+		ImGui::TableSetColumnIndex(1);
+		ImGui::PushID("basic_jitter_threshold");
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		ImGui::SliderFloat("##basic_jitter_threshold_slider", &CalCtx.jitterThreshold, 0.1f, 10.0f, "%1.1f", 0);
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Controls how much jitter will be allowed for calibration.\n"
+				"Higher values allow worse tracking to calibrate, but may result in poorer tracking.");
+		}
+		AddResetContextMenu("basic_jitter_threshold_ctx", [] { CalCtx.jitterThreshold = 3.0f; });
+		ImGui::PopID();
 
-	// Lock relative position -- tristate (Auto / On / Off).
-	// Auto detects rigid attachment from observed motion; we default to it
-	// because most users don't know whether their target is glued to the
-	// HMD or not, and the failure mode of an undetected rigid setup is
-	// "calibration slowly drifts as the math chases sensor noise".
-	{
-		ImGui::Text("Lock relative position");
-		ImGui::SameLine();
-		const char* labels[] = { "Off##lock", "On##lock", "Auto##lock" };
-		const auto modes = {
+		// --- Recalibration threshold ---
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted("Recalibration threshold");
+		ImGui::TableSetColumnIndex(1);
+		ImGui::PushID("basic_recalibration_threshold");
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		ImGui::SliderFloat("##basic_recalibration_threshold_slider", &CalCtx.continuousCalibrationThreshold, 1.01f, 10.0f, "%1.1f", 0);
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Controls how good the calibration must be before realigning the trackers.\n"
+				"Higher values cause calibration to happen less often, and may be useful for systems with lots of tracking drift.");
+		}
+		AddResetContextMenu("basic_recalibration_threshold_ctx", [] { CalCtx.continuousCalibrationThreshold = 1.5f; });
+		ImGui::PopID();
+
+		// --- Lock relative position (tristate) ---
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted("Lock relative position");
+		ImGui::TableSetColumnIndex(1);
+		ImGui::PushID("basic_lock_mode");
+		const char* lockLabels[] = { "Off", "On", "Auto" };
+		const CalibrationContext::LockMode lockModes[] = {
 			CalibrationContext::LockMode::OFF,
 			CalibrationContext::LockMode::ON,
 			CalibrationContext::LockMode::AUTO
 		};
-		int i = 0;
-		for (auto m : modes) {
-			ImGui::SameLine();
-			if (ImGui::RadioButton(labels[i], CalCtx.lockRelativePositionMode == m)) {
-				CalCtx.lockRelativePositionMode = m;
+		for (int i = 0; i < 3; ++i) {
+			if (i > 0) ImGui::SameLine();
+			if (ImGui::RadioButton(lockLabels[i], CalCtx.lockRelativePositionMode == lockModes[i])) {
+				CalCtx.lockRelativePositionMode = lockModes[i];
 				SaveProfile(CalCtx);
 			}
-			++i;
 		}
 		if (ImGui::IsItemHovered()) {
 			ImGui::SetTooltip(
@@ -1543,57 +1584,73 @@ void CCal_BasicInfo() {
 				"Auto: detect rigid attachment from observed motion. Recommended -- starts\n"
 				"      unlocked, then locks once the relative pose has been stable for ~15s.");
 		}
-
-		// Show resolved state when in Auto so the user can see what the detector decided.
+		// Resolved-state caption directly below the radios so the user sees
+		// what AUTO decided. Disabled-text colour keeps it visually subordinate.
 		if (CalCtx.lockRelativePositionMode == CalibrationContext::LockMode::AUTO) {
 			ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
 			if (CalCtx.autoLockEffectivelyLocked) {
-				ImGui::TextWrapped("    Auto: locked (detected as rigidly attached, %d samples)",
+				ImGui::TextWrapped("Auto: locked (detected as rigidly attached, %d samples)",
 					(int)CalCtx.autoLockHistory.size());
 			} else if (CalCtx.autoLockHistory.size() < 30) {
-				ImGui::TextWrapped("    Auto: collecting motion data (%d/30 samples)",
+				ImGui::TextWrapped("Auto: collecting motion data (%d/30 samples)",
 					(int)CalCtx.autoLockHistory.size());
 			} else {
-				ImGui::TextWrapped("    Auto: unlocked (devices move independently)");
+				ImGui::TextWrapped("Auto: unlocked (devices move independently)");
 			}
 			ImGui::PopStyleColor();
 		}
+		ImGui::PopID();
+
+		// --- Require trigger press ---
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted("Require trigger press");
+		ImGui::TableSetColumnIndex(1);
+		if (ImGui::Checkbox("##basic_require_trigger", &CalCtx.requireTriggerPressToApply)) {
+			SaveProfile(CalCtx);
+		}
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("If on, only apply the calibrated offset while a controller trigger is held.\n"
+				"Useful for verifying the result before committing.");
+		}
+
+		// --- Recalibrate on movement ---
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted("Recalibrate on movement");
+		ImGui::TableSetColumnIndex(1);
+		if (ImGui::Checkbox("##basic_recal_on_move", &CalCtx.recalibrateOnMovement)) {
+			SaveProfile(CalCtx);
+		}
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("When the calibration math updates, only blend the new offset in while you're actually moving.\n"
+				"Stationary users (e.g. lying down) won't see phantom body shifts; the catch-up happens during natural motion.\n"
+				"Default ON. Turn off to get instantaneous time-based blending regardless of motion state.");
+		}
+
+		// --- Debug logs ---
+		// Lives inside the same panel so the user doesn't have a checkbox
+		// floating in white space below the panel like before. Functionally
+		// the same; visually consistent with everything else in Basic.
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted("Enable debug logs");
+		ImGui::TableSetColumnIndex(1);
+		ImGui::Checkbox("##basic_debug_logs", &Metrics::enableLogs);
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Write a per-tick CSV log of calibration state to\n"
+			                  "%%LocalAppDataLow%%\\SpaceCalibrator\\Logs\\spacecal_log.<date>.txt\n"
+			                  "Useful for bug reports.  Also unlocks the Recordings tab where you can replay\n"
+			                  "a captured session against the live calibration math.");
+		}
+
+		ImGui::EndTable();
 	}
 
-	// Require triggers
-	if (ImGui::Checkbox("Require trigger press to apply", &CalCtx.requireTriggerPressToApply)) {
-		SaveProfile(CalCtx);
-	}
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip("If on, only apply the calibrated offset while a controller trigger is held.\n"
-			"Useful for verifying the result before committing.");
-	}
-
-	// Recalibrate on movement (default on)
-	if (ImGui::Checkbox("Recalibrate on movement", &CalCtx.recalibrateOnMovement)) {
-		SaveProfile(CalCtx);
-	}
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip("When the calibration math updates, only blend the new offset in while you're actually moving.\n"
-			"Stationary users (e.g. lying down) won't see phantom body shifts; the catch-up happens during natural motion.\n"
-			"Default ON. Turn off to get instantaneous time-based blending regardless of motion state.");
-	}
-
-	ImGui::EndGroupPanel();
-
-	// Debug logs toggle.  Outside the Common settings panel so it's clearly
-	// a separate concern (writes a file vs. tweaks a runtime knob).  Stays
-	// in Basic because a typical bug report starts with "enable logs and
-	// reproduce" — hiding it under Advanced would force every reporter to
-	// read a manual first.
-	ImGui::Spacing();
-	ImGui::Checkbox("Enable debug logs", &Metrics::enableLogs);
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip("Write a per-tick CSV log of calibration state to\n"
-		                  "%%LocalAppDataLow%%\\SpaceCalibrator\\Logs\\spacecal_log.<date>.txt\n"
-		                  "Useful for bug reports.  Also unlocks the Recordings tab where you can replay\n"
-		                  "a captured session against the live calibration math.");
-	}
+	ImGui::EndGroupPanel(); // Common settings
 
 	// === Status messages ===================================================
 	// Whatever the calibration state machine has logged this session, plus
