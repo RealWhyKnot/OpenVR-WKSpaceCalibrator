@@ -39,6 +39,60 @@ jobs:
           $version = $env:TAG_NAME -replace '^v', ''
           ./build.ps1 -Version $version
 
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          # makensis is not preinstalled on windows-latest. chocolatey is.
+          choco install nsis -y --no-progress
+          # Confirm makensis lands where we expect; fail fast if the install layout shifts.
+          $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
+          if (-not (Test-Path $makensis)) { throw "makensis.exe not found at $makensis after choco install nsis." }
+          Write-Host "makensis: $makensis"
+
+      - name: Build NSIS installer
+        id: installer
+        shell: pwsh
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          # Derive a 4-part dotted numeric version for NSIS's VIProductVersion, which rejects
+          # non-numeric components. Tag shapes (after stripping the leading "v"):
+          #   Release: YYYY.M.D.N           -> use as-is
+          #   Dev:     YYYY.M.D.N-XXXX      -> drop the -XXXX hex suffix
+          $version = $env:TAG_NAME -replace '^v', ''
+          $numeric = $version -replace '-[A-Fa-f0-9]+$', ''
+          if ($numeric -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+              throw "Could not derive a 4-part numeric version from tag '$env:TAG_NAME' (got '$numeric')."
+          }
+          Write-Host "Installer VERSION define: $numeric"
+
+          $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
+          $script   = Join-Path $PWD "install\installer.nsi"
+
+          # /V3 = informational verbosity. /DVERSION overrides the !ifndef'd default in the .nsi
+          # so the embedded version matches the release tag.
+          & $makensis /V3 "/DVERSION=$numeric" $script
+          if ($LASTEXITCODE -ne 0) {
+              throw "makensis failed with exit code $LASTEXITCODE."
+          }
+
+          # OutFile in installer.nsi is "SpaceCalibrator.exe" (relative), so it lands next to the
+          # script in install/.
+          $installer = Join-Path $PWD "install\SpaceCalibrator.exe"
+          if (-not (Test-Path $installer)) { throw "Installer not produced at $installer." }
+
+          # Rename to include the version so the GitHub release asset name is unambiguous.
+          $named = Join-Path $PWD "install\OpenVR-SpaceCalibrator-$version-Setup.exe"
+          if (Test-Path $named) { Remove-Item -Force $named }
+          Move-Item -Path $installer -Destination $named
+
+          $hash = (Get-FileHash $named -Algorithm SHA256).Hash
+          "path=$named"                  >> $env:GITHUB_OUTPUT
+          "name=$(Split-Path $named -Leaf)" >> $env:GITHUB_OUTPUT
+          "sha256=$hash"                 >> $env:GITHUB_OUTPUT
+          Write-Host "Installer: $named"
+          Write-Host "SHA256: $hash"
+
       - name: Locate release zip
         id: zip
         shell: pwsh
@@ -57,15 +111,23 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
-          $tag    = "${{ github.ref_name }}"
-          $zip    = "${{ steps.zip.outputs.path }}"
-          $sha    = "${{ steps.zip.outputs.sha256 }}"
-          $name   = "${{ steps.zip.outputs.name }}"
+          $tag        = "${{ github.ref_name }}"
+          $zip        = "${{ steps.zip.outputs.path }}"
+          $zipSha     = "${{ steps.zip.outputs.sha256 }}"
+          $zipName    = "${{ steps.zip.outputs.name }}"
+          $installer  = "${{ steps.installer.outputs.path }}"
+          $instSha    = "${{ steps.installer.outputs.sha256 }}"
+          $instName   = "${{ steps.installer.outputs.name }}"
           $notes  = @"
           ## OpenVR-SpaceCalibrator $tag
 
-          Download **$name** below and extract it. Drop the ``driver_01spacecalibrator/`` folder into ``<Steam>\steamapps\common\SteamVR\drivers\``, then run ``SpaceCalibrator.exe`` from wherever you put it.
+          Two download options:
 
-          SHA256: ``$sha``
+          - **$instName** — guided installer. Run it; it places the overlay and the SteamVR driver in the right places automatically.
+          - **$zipName** — drop-in zip. Extract anywhere, copy the ``driver_01spacecalibrator/`` folder into ``<Steam>\steamapps\common\SteamVR\drivers\``, and run ``SpaceCalibrator.exe`` from wherever you put it.
+
+          SHA256:
+          - $instName: ``$instSha``
+          - $zipName: ``$zipSha``
           "@
-          gh release create $tag $zip --title $tag --notes $notes
+          gh release create $tag $zip $installer --title $tag --notes $notes

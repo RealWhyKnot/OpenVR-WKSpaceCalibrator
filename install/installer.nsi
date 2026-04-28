@@ -17,8 +17,11 @@
 	RequestExecutionLevel admin
 	ShowInstDetails show
 
-	; Define the version number
-	!define VERSION "1.5.1.0"
+	; Define the version number. Wrapped in !ifndef so the release CI workflow can
+	; override it via `makensis /DVERSION=...` to match the git tag's version.
+	!ifndef VERSION
+		!define VERSION "1.5.1.0"
+	!endif
 	; Set version information
 	VIProductVersion "${VERSION}"
 	VIAddVersionKey /LANG=1033 "ProductName" "Space Calibrator"
