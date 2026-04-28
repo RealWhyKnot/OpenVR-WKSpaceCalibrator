@@ -83,6 +83,24 @@ private:
 		// keep calibration trackers' pose data clean while leaving smoothing tools
 		// active on every other device.
 		bool freezePrediction = false;
+
+		// When true, BlendTransform's lerp toward targetTransform only advances
+		// proportional to detected per-frame motion magnitude. A stationary user
+		// (lying down, sitting still) sees no calibration drift even when the
+		// math has updated — the catch-up happens during the user's next motion,
+		// hidden by the natural movement instead of looking like a phantom body
+		// shift. Default false; the overlay enables it per-device when the
+		// recalibrateOnMovement profile setting is on.
+		bool recalibrateOnMovement = false;
+
+		// Previous-frame world-space pose, captured each call to BlendTransform
+		// when recalibrateOnMovement is on. Used to compute per-frame motion
+		// magnitude that gates the blend. blendMotionInitialized is reset to
+		// false whenever recalibrateOnMovement transitions off so the first
+		// frame after re-enable doesn't see a giant stale delta.
+		Eigen::Vector3d lastBlendWorldPos = Eigen::Vector3d::Zero();
+		Eigen::Quaterniond lastBlendWorldRot = Eigen::Quaterniond::Identity();
+		bool blendMotionInitialized = false;
 	};
 
 	struct FallbackTransform
@@ -91,6 +109,7 @@ private:
 		IsoTransform transform;
 		double scale = 1.0;
 		bool freezePrediction = false;
+		bool recalibrateOnMovement = false;
 	};
 
 	// Tracking-system fallback slot. Stored as a fixed-size flat array indexed

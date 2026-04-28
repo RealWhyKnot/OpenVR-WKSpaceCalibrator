@@ -68,6 +68,14 @@ The biggest historical pain point with continuous calibration is getting stuck i
 
 Accepted continuous updates pass through a single-step EMA on the published transform: `α = 0.3` for the new estimate, `0.7` retained from the prior. This is skipped for first calibration (snap to the only thing we have) and for rapid-correct (the relative-pose path is supposed to snap to a known-better solution, not be smoothed). The 1.5x rejection gate already filters most bad updates; the EMA softens the per-tick wobble that survives the gate.
 
+## Recalibrate on movement
+
+The driver-side `BlendTransform` advances the active offset toward the latest target every tick. By default that progress is gated by per-frame motion magnitude — a stationary device gets ~zero blend progress; a moving one gets the full time-based rate. The result: a user lying still won't see calibration drift even when the math is updating; the catch-up happens during their next natural motion, hidden by the movement instead of looking like phantom body shifts.
+
+Threshold: each pose update computes the position delta and rotation delta from the previous frame. The "fully-moving" thresholds are 5 mm position OR ~1° rotation per frame. Below those, the gate is proportional (small jitter still produces small blend progress so the offset doesn't get permanently stuck); at or above, the gate is 1 (full convergence rate).
+
+Toggleable from the Continuous Calibration → Settings panel ("Recalibrate on movement"). Default **on**. Turning it off restores the pre-feature behaviour: the lerp advances purely on elapsed time, regardless of whether the device is moving — useful if you specifically want instantaneous corrections while stationary, or if the motion gate is stalling convergence on a tracker with unusually low natural motion.
+
 ## Inter-system latency offset (manual)
 
 Different tracking systems have different end-to-end latencies — a wireless tracker (Slime IMU, Oculus Quest tracker) typically lags a Lighthouse reference by 10–30 ms. During quick motion this lag manifests as motion-correlated calibration error: every collected sample pair is taken at slightly different effective times, and the difference shows up as a position error proportional to velocity.

@@ -541,6 +541,7 @@ namespace {
 		if (a.lerp != b.lerp) return false;
 		if (a.quash != b.quash) return false;
 		if (a.freezePrediction != b.freezePrediction) return false;
+		if (a.recalibrateOnMovement != b.recalibrateOnMovement) return false;
 		if (a.scale != b.scale) return false;
 		for (int i = 0; i < 3; i++) if (a.translation.v[i] != b.translation.v[i]) return false;
 		if (a.rotation.w != b.rotation.w || a.rotation.x != b.rotation.x ||
@@ -553,6 +554,7 @@ namespace {
 		if (memcmp(a.system_name, b.system_name, sizeof a.system_name) != 0) return false;
 		if (a.enabled != b.enabled) return false;
 		if (a.freezePrediction != b.freezePrediction) return false;
+		if (a.recalibrateOnMovement != b.recalibrateOnMovement) return false;
 		if (a.scale != b.scale) return false;
 		for (int i = 0; i < 3; i++) if (a.translation.v[i] != b.translation.v[i]) return false;
 		if (a.rotation.w != b.rotation.w || a.rotation.x != b.rotation.x ||
@@ -584,7 +586,7 @@ namespace {
 
 	void SendFallbackIfChanged(const std::string& systemName, bool enabled,
 		const Eigen::Vector3d& translationCm, const Eigen::Quaterniond& rotation, double scale,
-		bool freezePrediction)
+		bool freezePrediction, bool recalibrateOnMovement)
 	{
 		protocol::SetTrackingSystemFallback payload{};
 		size_t copyLen = systemName.size();
@@ -601,6 +603,7 @@ namespace {
 		payload.rotation.z = rotation.z();
 		payload.scale = scale;
 		payload.freezePrediction = freezePrediction;
+		payload.recalibrateOnMovement = recalibrateOnMovement;
 
 		if (g_lastFallbackSent && FallbackPayloadEqual(g_lastFallback, payload)) return;
 
@@ -713,7 +716,8 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 			Eigen::AngleAxisd(euler(2), Eigen::Vector3d::UnitX());
 		bool fallbackFreeze = ctx.externalSmoothingDetected && ctx.autoSuppressOnExternalTool;
 		SendFallbackIfChanged(ctx.targetTrackingSystem, true,
-			ctx.calibratedTranslation, rotQuat, ctx.calibratedScale, fallbackFreeze);
+			ctx.calibratedTranslation, rotQuat, ctx.calibratedScale, fallbackFreeze,
+			ctx.recalibrateOnMovement);
 	}
 
 	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
@@ -860,6 +864,12 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 			&& ctx.autoSuppressOnExternalTool
 			&& (static_cast<int32_t>(id) == ctx.referenceID || static_cast<int32_t>(id) == ctx.targetID);
 		payload.freezePrediction = suppressBySerial || suppressByAuto;
+
+		// Motion-gated blend — when on, the driver-side BlendTransform's lerp
+		// only advances proportional to detected per-frame motion. Hides offset
+		// shifts in the user's natural movement; eliminates "phantom drift" while
+		// stationary. Default on at the profile level.
+		payload.recalibrateOnMovement = ctx.recalibrateOnMovement;
 
 		SendDeviceTransformIfChanged(id, payload);
 

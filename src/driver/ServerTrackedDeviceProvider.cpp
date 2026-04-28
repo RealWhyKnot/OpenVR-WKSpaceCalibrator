@@ -142,6 +142,11 @@ double ServerTrackedDeviceProvider::GetTransformRate(DeltaSize delta) const {
 
 /**
  * Smoothly interpolates the device active transform towards the target transform.
+ * When recalibrateOnMovement is enabled on the slot, the lerp rate is gated by
+ * per-frame motion magnitude — a stationary device gets ~zero blend progress, a
+ * moving one gets the full time-based rate. This hides calibration shifts in
+ * the user's natural motion instead of producing visible "phantom drift" while
+ * the user is still (a noticeable issue when lying down).
  */
 void ServerTrackedDeviceProvider::BlendTransform(DeviceTransform& device, const IsoTransform &deviceWorldPose) const {
 	LARGE_INTEGER timestamp;
@@ -151,8 +156,40 @@ void ServerTrackedDeviceProvider::BlendTransform(DeviceTransform& device, const 
 	// here would be wasted work on the pose-update hot path.
 	double lerp = (timestamp.QuadPart - device.lastPoll.QuadPart) / (double)qpcFreq.QuadPart;
 	device.lastPoll = timestamp;
-	
+
 	lerp *= GetTransformRate(device.currentRate);
+
+	if (device.recalibrateOnMovement) {
+		if (!device.blendMotionInitialized) {
+			// First frame since the flag was enabled: capture the reference pose
+			// and skip blend progress this tick — there's nothing to compute a
+			// meaningful delta against yet, and we don't want a stale prior pose
+			// (from before re-enable) to produce a giant phantom motion gate.
+			device.lastBlendWorldPos = deviceWorldPose.translation;
+			device.lastBlendWorldRot = deviceWorldPose.rotation;
+			device.blendMotionInitialized = true;
+			lerp = 0.0;
+		} else {
+			// Per-frame motion magnitude in normalized units. kPosFullScale and
+			// kRotFullScale are the per-frame deltas at which the gate is fully
+			// open — small typical-jitter motions produce partial gate, sustained
+			// natural motion produces gate=1 (full time-based rate).
+			constexpr double kPosFullScale = 0.005;   // 5 mm
+			constexpr double kRotFullScale = 0.0175;  // ~1 deg in radians
+			const double posDelta = (deviceWorldPose.translation - device.lastBlendWorldPos).norm();
+			const double rotDelta = deviceWorldPose.rotation.angularDistance(device.lastBlendWorldRot);
+			const double motionGate = std::min(1.0,
+				std::max(posDelta / kPosFullScale, rotDelta / kRotFullScale));
+			lerp *= motionGate;
+			device.lastBlendWorldPos = deviceWorldPose.translation;
+			device.lastBlendWorldRot = deviceWorldPose.rotation;
+		}
+	} else if (device.blendMotionInitialized) {
+		// Flag was on but is now off — reset so re-enabling later doesn't see a
+		// stale prior pose.
+		device.blendMotionInitialized = false;
+	}
+
 	if (lerp > 1.0)
 		lerp = 1.0;
 	if (lerp < 0 || isnan(lerp))
@@ -221,6 +258,13 @@ void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTr
 	// Velocity-freeze flag. Cheap to update unconditionally; HandleDevicePoseUpdated
 	// gates on it once per pose update.
 	tf.freezePrediction = newTransform.freezePrediction;
+
+	// Motion-gated blend. When the flag transitions off, reset the captured
+	// previous-frame pose so a future re-enable doesn't see a stale delta.
+	if (tf.recalibrateOnMovement && !newTransform.recalibrateOnMovement) {
+		tf.blendMotionInitialized = false;
+	}
+	tf.recalibrateOnMovement = newTransform.recalibrateOnMovement;
 
 	if (newTransform.updateTranslation) {
 		tf.targetTransform.translation = convert(newTransform.translation);
@@ -340,6 +384,7 @@ void ServerTrackedDeviceProvider::SetTrackingSystemFallback(const protocol::SetT
 		newFallback.rotation.w, newFallback.rotation.x, newFallback.rotation.y, newFallback.rotation.z);
 	slot->tf.scale = newFallback.scale;
 	slot->tf.freezePrediction = newFallback.freezePrediction;
+	slot->tf.recalibrateOnMovement = newFallback.recalibrateOnMovement;
 }
 
 bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t &pose)
@@ -467,6 +512,13 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 			// Update the slot's blend target from the (possibly newly updated) fallback.
 			tf.targetTransform = fb.transform;
 			tf.scale = fb.scale;
+			// Propagate motion-gate setting so the fallback path also gets the
+			// movement-masked blend if the user has it enabled. Reset the captured
+			// previous-frame pose if the flag is transitioning off.
+			if (tf.recalibrateOnMovement && !fb.recalibrateOnMovement) {
+				tf.blendMotionInitialized = false;
+			}
+			tf.recalibrateOnMovement = fb.recalibrateOnMovement;
 
 			// First activation: snap so the device doesn't ramp in from an identity
 			// or otherwise stale `transform` value.
