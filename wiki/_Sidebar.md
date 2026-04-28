@@ -1,9 +1,12 @@
 **Start here**
 - [Home](Home)
+- [Setup Wizard](Setup-Wizard)
 - [Architecture](Architecture)
 - [Continuous Calibration](Continuous-Calibration)
 
 **Reference**
+- [Settings Reference](Settings-Reference)
+- [Multi-Ecosystem](Multi-Ecosystem)
 - [Driver Protocol](Driver-Protocol)
 - [Prediction Suppression](Prediction-Suppression)
 - [In-App Updater](In-App-Updater)

@@ -29,6 +29,84 @@ inline vr::HmdQuaternion_t operator*(const vr::HmdQuaternion_t& lhs, const vr::H
 
 CalibrationContext CalCtx;
 
+// AdditionalCalibration's special members live inline in the header now --
+// CalibrationCalc is complete at the include point, so the implicitly-defined
+// destructor handles the unique_ptr just fine.
+
+// Auto-lock detector tuning. The window must be long enough that brief tracking
+// glitches don't push us into "rigidly attached" mode prematurely, but short
+// enough that a real change (user repositioned the tracker) flips us back to
+// unlocked within a few seconds. With samples coming in at the continuous-cal
+// cadence (~2 Hz post-buffer-fill), a 30-sample window is ~15 seconds.
+namespace {
+	constexpr size_t kAutoLockHistoryMax = 30;
+	constexpr size_t kAutoLockSamplesNeeded = 30;
+	constexpr double kAutoLockTranslThreshM = 0.005;            // 5 mm
+	constexpr double kAutoLockRotThreshRad = 1.0 * EIGEN_PI / 180.0; // 1 deg
+}
+
+void CalibrationContext::UpdateAutoLockDetector(
+	const Eigen::AffineCompact3d& refWorld,
+	const Eigen::AffineCompact3d& targetWorld)
+{
+	// Relative pose: target expressed in the reference's local frame. For a
+	// rigidly attached pair (tracker glued to HMD), this is constant; for an
+	// independent pair (tracker on hip vs HMD on head), it varies as the
+	// user moves.
+	const Eigen::AffineCompact3d rel = refWorld.inverse() * targetWorld;
+	autoLockHistory.push_back(rel);
+	while (autoLockHistory.size() > kAutoLockHistoryMax) autoLockHistory.pop_front();
+
+	if (autoLockHistory.size() < kAutoLockSamplesNeeded) {
+		// Not enough data yet -- stay in "not detected" state. AUTO mode
+		// users see the calibration unlocked and re-solving until the
+		// detector earns confidence.
+		autoLockEffectivelyLocked = false;
+		return;
+	}
+
+	// Translation variance: classic mean + std-dev on the translation
+	// vector. Rigid attachment shows ~mm-level jitter from sensor noise;
+	// independent devices can vary by tens of cm as the user moves.
+	Eigen::Vector3d meanT = Eigen::Vector3d::Zero();
+	for (const auto& a : autoLockHistory) meanT += a.translation();
+	meanT /= (double)autoLockHistory.size();
+	double translVar = 0.0;
+	for (const auto& a : autoLockHistory) {
+		const Eigen::Vector3d d = a.translation() - meanT;
+		translVar += d.squaredNorm();
+	}
+	translVar /= (double)autoLockHistory.size();
+	const double translStdDev = std::sqrt(translVar);
+
+	// Rotation: max angular distance between any sample and the median.
+	// We don't bother computing the proper Frechet mean on SO(3) -- the
+	// median sample is good enough as a stand-in, and "max from median" is
+	// a tighter bound than "max consecutive". For a true rigid attachment,
+	// every sample sits within sensor jitter of the same rotation.
+	const auto& medianRot = autoLockHistory[autoLockHistory.size() / 2].rotation();
+	const Eigen::Quaterniond medianQ(medianRot);
+	double rotMaxAngle = 0.0;
+	for (const auto& a : autoLockHistory) {
+		const Eigen::Quaterniond q(a.rotation());
+		const double angle = medianQ.angularDistance(q);
+		if (angle > rotMaxAngle) rotMaxAngle = angle;
+	}
+
+	autoLockEffectivelyLocked =
+		(translStdDev < kAutoLockTranslThreshM) &&
+		(rotMaxAngle < kAutoLockRotThreshRad);
+}
+
+void CalibrationContext::ResolveLockMode()
+{
+	switch (lockRelativePositionMode) {
+	case LockMode::OFF:  lockRelativePosition = false; break;
+	case LockMode::ON:   lockRelativePosition = true;  break;
+	case LockMode::AUTO: lockRelativePosition = autoLockEffectivelyLocked; break;
+	}
+}
+
 // Auto-speed resolver. Reads the recent jitter samples from Metrics:: and picks
 // the calibration speed that should give a stable result without bogging down
 // convergence. Sticky: requires the new bucket to be right for ~5 consecutive
@@ -376,6 +454,19 @@ namespace {
 			glfwGetTime()
 		));
 
+		// Feed the auto-lock detector with the same sample. We use the world
+		// poses directly (not the post-calibration relative pose) so the
+		// rigidity check is independent of the math's current solution --
+		// the detector measures whether the two devices physically move
+		// together, not whether the calibration thinks they do.
+		Eigen::AffineCompact3d refWorld = Eigen::AffineCompact3d::Identity();
+		refWorld.linear() = ConvertPose(reference).rot;
+		refWorld.translation() = ConvertPose(reference).trans;
+		Eigen::AffineCompact3d tgtWorld = Eigen::AffineCompact3d::Identity();
+		tgtWorld.linear() = ConvertPose(target).rot;
+		tgtWorld.translation() = ConvertPose(target).trans;
+		const_cast<CalibrationContext&>(ctx).UpdateAutoLockDetector(refWorld, tgtWorld);
+
 		return true;
 	}
 
@@ -405,22 +496,45 @@ namespace {
 		return CalCtx.referenceID >= 0 && CalCtx.targetID >= 0;
 	}
 
-	// Periodically scan running processes for known external "smooth tracking" tools
-	// (currently OVR-SmoothTracking by yuumu, sold on BOOTH). When detected, the
-	// overlay shows a warning banner and — if autoSuppressOnExternalTool is on —
-	// auto-enables freezePrediction on the calibration reference + target trackers
-	// so the math sees clean pose data even though an external smoothing process is
-	// also running. The native suppression feature is the real fix; this detector
-	// just makes sure users who haven't migrated yet still get correct math.
+	// Periodically scan running processes for known external "smooth tracking"
+	// tools (OVR-SmoothTracking by yuumu, the most common one). When detected,
+	// the overlay shows a warning banner asking the user to stop the external
+	// tool and use our native per-tracker smoothness sliders instead. We DON'T
+	// try to interop -- our pose-update hook scales velocity/acceleration in a
+	// way that fights any external tool doing the same thing, and the resulting
+	// behaviour is unpredictable. Better to tell the user clearly than ship
+	// half-working interop.
 	struct ExternalSmoothingTool {
 		const wchar_t* exeName;
 		const char* humanName;
 	};
 	static const ExternalSmoothingTool kKnownTools[] = {
-		// Best-effort match patterns. Filename match is case-insensitive.
-		{ L"OVR-SmoothTracking.exe", "OVR-SmoothTracking" },
-		{ L"OVRSmoothTracking.exe",  "OVR-SmoothTracking" },
-		{ L"ovr_smooth_tracking.exe", "OVR-SmoothTracking" },
+		// Exact filenames we've seen in the wild. Case-insensitive comparison.
+		// The actual published binary on yuumu's BOOTH ships as
+		// "OpenVR-SmoothTracking.exe" (note: "Open" prefix, not "OVR").
+		// We keep the older "OVR-..." names as fallbacks for renamed/repacked
+		// variants and any third-party rebuild.
+		{ L"OpenVR-SmoothTracking.exe", "OpenVR-SmoothTracking" },
+		{ L"OpenVRSmoothTracking.exe",  "OpenVR-SmoothTracking" },
+		{ L"OVR-SmoothTracking.exe",    "OVR-SmoothTracking" },
+		{ L"OVRSmoothTracking.exe",     "OVR-SmoothTracking" },
+		{ L"ovr_smooth_tracking.exe",   "OVR-SmoothTracking" },
+	};
+
+	// Substring patterns checked when no exact name matched. Lowercase comparison
+	// against the lowercased process name. Catches future filename variants (e.g.
+	// versioned releases like "OpenVR-SmoothTracking-v2.exe") without us having to
+	// chase every rename. Kept narrow to avoid false positives: a process is
+	// counted as a smoothing tool only if its name contains BOTH "smooth" and
+	// "track" — the combination is specific enough that no unrelated software in
+	// our use cases will trip the heuristic.
+	struct SubstringSmoothingPattern {
+		const wchar_t* requireA;
+		const wchar_t* requireB;
+		const char* humanName;
+	};
+	static const SubstringSmoothingPattern kSubstringTools[] = {
+		{ L"smooth", L"track", "external smoothing tool" },
 	};
 
 	// Discrete cross-correlation between two equal-length speed series. Returns false
@@ -512,10 +626,30 @@ namespace {
 			CloseHandle(h);
 			if (len == 0) continue;
 
-			// Case-insensitive match against known patterns.
+			// 1. Case-insensitive match against the exact-name table. Highest
+			//    confidence; produces the canonical human name in the UI.
 			for (const auto& tool : kKnownTools) {
 				if (_wcsicmp(name, tool.exeName) == 0) {
 					outName = tool.humanName;
+					return true;
+				}
+			}
+
+			// 2. Substring fallback. Lowercase the process name once, then
+			//    require both required substrings to appear. Cheap; the loop
+			//    only runs when the exact match above didn't fire.
+			std::wstring lower(name, len);
+			for (auto& c : lower) c = (wchar_t)towlower(c);
+			for (const auto& pat : kSubstringTools) {
+				if (lower.find(pat.requireA) != std::wstring::npos &&
+				    lower.find(pat.requireB) != std::wstring::npos) {
+					// Convert the actual filename to UTF-8 for display.
+					// The user benefits from seeing the real binary name when
+					// it's something we hadn't catalogued in kKnownTools.
+					int n = WideCharToMultiByte(CP_UTF8, 0, name, (int)len, nullptr, 0, nullptr, nullptr);
+					std::string utf8(n, '\0');
+					WideCharToMultiByte(CP_UTF8, 0, name, (int)len, utf8.data(), n, nullptr, nullptr);
+					outName = utf8;
 					return true;
 				}
 			}
@@ -590,7 +724,7 @@ namespace {
 		if (a.updateScale != b.updateScale) return false;
 		if (a.lerp != b.lerp) return false;
 		if (a.quash != b.quash) return false;
-		if (a.freezePrediction != b.freezePrediction) return false;
+		if (a.predictionSmoothness != b.predictionSmoothness) return false;
 		if (a.recalibrateOnMovement != b.recalibrateOnMovement) return false;
 		if (a.scale != b.scale) return false;
 		for (int i = 0; i < 3; i++) if (a.translation.v[i] != b.translation.v[i]) return false;
@@ -603,7 +737,7 @@ namespace {
 	bool FallbackPayloadEqual(const protocol::SetTrackingSystemFallback& a, const protocol::SetTrackingSystemFallback& b) {
 		if (memcmp(a.system_name, b.system_name, sizeof a.system_name) != 0) return false;
 		if (a.enabled != b.enabled) return false;
-		if (a.freezePrediction != b.freezePrediction) return false;
+		if (a.predictionSmoothness != b.predictionSmoothness) return false;
 		if (a.recalibrateOnMovement != b.recalibrateOnMovement) return false;
 		if (a.scale != b.scale) return false;
 		for (int i = 0; i < 3; i++) if (a.translation.v[i] != b.translation.v[i]) return false;
@@ -634,9 +768,16 @@ namespace {
 		cache.payload = payload;
 	}
 
+	// Per-tracking-system cache so multi-ecosystem setups (3+ systems) don't
+	// thrash IPC: each system's fallback is compared against its OWN last-sent
+	// value. The previous single-slot g_lastFallback worked when only one
+	// system ever had a fallback active, but with extras we send N fallbacks
+	// per scan tick, and a single-slot cache would miss on every other call.
+	std::unordered_map<std::string, protocol::SetTrackingSystemFallback> g_lastFallbacksBySystem;
+
 	void SendFallbackIfChanged(const std::string& systemName, bool enabled,
 		const Eigen::Vector3d& translationCm, const Eigen::Quaterniond& rotation, double scale,
-		bool freezePrediction, bool recalibrateOnMovement)
+		uint8_t predictionSmoothness, bool recalibrateOnMovement)
 	{
 		protocol::SetTrackingSystemFallback payload{};
 		size_t copyLen = systemName.size();
@@ -652,14 +793,19 @@ namespace {
 		payload.rotation.y = rotation.y();
 		payload.rotation.z = rotation.z();
 		payload.scale = scale;
-		payload.freezePrediction = freezePrediction;
+		payload.predictionSmoothness = predictionSmoothness;
 		payload.recalibrateOnMovement = recalibrateOnMovement;
 
-		if (g_lastFallbackSent && FallbackPayloadEqual(g_lastFallback, payload)) return;
+		auto it = g_lastFallbacksBySystem.find(systemName);
+		if (it != g_lastFallbacksBySystem.end() && FallbackPayloadEqual(it->second, payload)) {
+			return;
+		}
 
 		protocol::Request req(protocol::RequestSetTrackingSystemFallback);
 		req.setTrackingSystemFallback = payload;
 		Driver.SendBlocking(req);
+		g_lastFallbacksBySystem[systemName] = payload;
+		// Legacy single-slot cache kept for any code that still reads it.
 		g_lastFallback = payload;
 		g_lastFallbackSent = true;
 	}
@@ -764,9 +910,40 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 			Eigen::AngleAxisd(euler(0), Eigen::Vector3d::UnitZ()) *
 			Eigen::AngleAxisd(euler(1), Eigen::Vector3d::UnitY()) *
 			Eigen::AngleAxisd(euler(2), Eigen::Vector3d::UnitX());
-		bool fallbackFreeze = ctx.externalSmoothingDetected && ctx.autoSuppressOnExternalTool;
+		// Per-tracking-system fallback never carries a smoothness value: the
+		// fallback applies to ANY device of that system that doesn't have an
+		// active per-ID transform, including potentially the HMD or a freshly-
+		// connected reference/target which we hard-block from suppression. The
+		// per-ID path below sends per-tracker smoothness; the fallback path
+		// stays at 0 to avoid surprise-suppressing a device the user didn't
+		// individually opt in.
 		SendFallbackIfChanged(ctx.targetTrackingSystem, true,
-			ctx.calibratedTranslation, rotQuat, ctx.calibratedScale, fallbackFreeze,
+			ctx.calibratedTranslation, rotQuat, ctx.calibratedScale,
+			/*predictionSmoothness=*/0,
+			ctx.recalibrateOnMovement);
+	}
+
+	// Multi-ecosystem extras: each entry contributes its own per-tracking-
+	// system fallback, applied to every device of that system that lacks a
+	// per-ID transform. Driver-side, these go into separate slots in the
+	// systemFallbacks[8] array, so they don't interfere. Each entry's
+	// per-system fallback is sent only when the entry itself is valid + enabled
+	// AND its target tracking system is non-empty AND distinct from the
+	// primary's (sending a duplicate fallback for the primary's system would
+	// race the primary's send above and cause flicker).
+	for (const auto& extra : ctx.additionalCalibrations) {
+		if (!extra.enabled || !extra.valid) continue;
+		if (extra.targetTrackingSystem.empty()) continue;
+		if (extra.targetTrackingSystem == ctx.targetTrackingSystem) continue;
+
+		auto eulerE = extra.calibratedRotation * EIGEN_PI / 180.0;
+		Eigen::Quaterniond rotQuatE =
+			Eigen::AngleAxisd(eulerE(0), Eigen::Vector3d::UnitZ()) *
+			Eigen::AngleAxisd(eulerE(1), Eigen::Vector3d::UnitY()) *
+			Eigen::AngleAxisd(eulerE(2), Eigen::Vector3d::UnitX());
+		SendFallbackIfChanged(extra.targetTrackingSystem, true,
+			extra.calibratedTranslation, rotQuatE, extra.calibratedScale,
+			/*predictionSmoothness=*/0,
 			ctx.recalibrateOnMovement);
 	}
 
@@ -899,21 +1076,32 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		payload.quash = CalCtx.state == CalibrationState::Continuous && id == CalCtx.targetID && CalCtx.quashTargetInContinuous;
 		SetTargetSystemField(payload, ctx.targetTrackingSystem);
 
-		// Native prediction-suppression. Ask the driver to zero velocity/acceleration
-		// for this device when:
-		//   1. the user has explicitly added this serial to suppressedSerials, or
-		//   2. an external smoothing tool (e.g. OVR-SmoothTracking) is detected
-		//      running AND auto-suppress is on AND this device is the calibration
-		//      reference or target (the ones whose pose the math reads).
-		// Either case zeroes velocity inside the driver hook so SteamVR's predictor
-		// has nothing to extrapolate; clean math whether or not the user ran an
-		// external tool.
-		bool suppressBySerial = !g_lastSeenSerial[id].empty()
-			&& ctx.suppressedSerials.find(g_lastSeenSerial[id]) != ctx.suppressedSerials.end();
-		bool suppressByAuto = ctx.externalSmoothingDetected
-			&& ctx.autoSuppressOnExternalTool
-			&& (static_cast<int32_t>(id) == ctx.referenceID || static_cast<int32_t>(id) == ctx.targetID);
-		payload.freezePrediction = suppressBySerial || suppressByAuto;
+		// Native prediction-suppression. Looks up the per-tracker smoothness
+		// (0..100) the user picked in the Prediction tab, with three hard
+		// blocks: HMD, calibration reference, and calibration target. Those
+		// must always run with raw poses -- suppressing the HMD causes judder
+		// in the user's view, and suppressing the calibration trackers feeds
+		// the math zeroed velocity (defeating cross-correlation latency
+		// estimation, motion-gated blend, etc.).
+		uint8_t smoothness = 0;
+		if (!g_lastSeenSerial[id].empty()) {
+			auto it = ctx.trackerSmoothness.find(g_lastSeenSerial[id]);
+			if (it != ctx.trackerSmoothness.end()) {
+				int v = it->second;
+				if (v < 0) v = 0;
+				if (v > 100) v = 100;
+				smoothness = (uint8_t)v;
+			}
+		}
+		const bool isHmd = vr::VRSystem()->GetTrackedDeviceClass(id)
+			== vr::TrackedDeviceClass_HMD;
+		const bool isRefOrTarget =
+			static_cast<int32_t>(id) == ctx.referenceID
+			|| static_cast<int32_t>(id) == ctx.targetID;
+		if (isHmd || isRefOrTarget) {
+			smoothness = 0;
+		}
+		payload.predictionSmoothness = smoothness;
 
 		// Motion-gated blend — when on, the driver-side BlendTransform's lerp
 		// only advances proportional to detected per-frame motion. Hides offset
@@ -1014,6 +1202,12 @@ void CalibrationTick(double time)
 	auto &ctx = CalCtx;
 	if ((time - ctx.timeLastTick) < 0.05)
 		return;
+
+	// Resolve LockMode -> lockRelativePosition every tick before any code
+	// downstream reads the bool. The detector itself is updated in
+	// CollectSample further down; this just transcribes mode + detector
+	// state into the resolved field.
+	ctx.ResolveLockMode();
 
 	// Bounds-check the device IDs once at the top of the tick. Many code paths
 	// downstream index devicePoses[ctx.referenceID] / devicePoses[ctx.targetID]
@@ -1132,10 +1326,23 @@ void CalibrationTick(double time)
 		if (detected != ctx.externalSmoothingDetected || detectedName != ctx.externalSmoothingToolName) {
 			ctx.externalSmoothingDetected = detected;
 			ctx.externalSmoothingToolName = detected ? detectedName : std::string();
-			if (detected && ctx.autoSuppressOnExternalTool) {
+
+			// Annotate the debug log on every detection state change. This is
+			// invaluable when triaging "smoothing tool wasn't detected" reports
+			// — the log will show whether the detector saw the process at all.
+			char ann[256];
+			if (detected) {
+				snprintf(ann, sizeof ann,
+					"external_smoothing_detected: %s", detectedName.c_str());
+			} else {
+				snprintf(ann, sizeof ann, "external_smoothing_cleared");
+			}
+			Metrics::WriteLogAnnotation(ann);
+
+			if (detected) {
 				char msg[256];
 				snprintf(msg, sizeof msg,
-					"%s detected — auto-applying built-in prediction suppression on calibration trackers.\n",
+					"%s detected -- not supported. Stop it and use the per-tracker smoothness sliders in the Prediction tab instead.\n",
 					detectedName.c_str());
 				CalCtx.Log(msg);
 			}
@@ -1391,6 +1598,86 @@ void CalibrationTick(double time)
 		// math doesn't fight the user trying to inspect the current result.
 		if (!CalCtx.calibrationPaused) {
 			calibration.ComputeIncremental(lerp, CalCtx.continuousCalibrationThreshold, CalCtx.maxRelativeErrorThreshold, CalCtx.ignoreOutliers);
+		}
+
+		// Multi-ecosystem extras: each runs its own continuous calibration
+		// loop in parallel with the primary, against the SAME reference
+		// device (the HMD) and its own target. Each extra has its own
+		// sample buffer (extra.calc) so noisy samples on one don't taint
+		// another. Cheap -- the math is bounded by sample-buffer size and
+		// runs at the same low cadence as the primary.
+		for (auto& extra : CalCtx.additionalCalibrations) {
+			if (!extra.enabled) continue;
+			if (extra.referenceID < 0 || extra.targetID < 0) continue;
+			if (extra.referenceID >= maxId || extra.targetID >= maxId) continue;
+
+			const auto& refPose = CalCtx.devicePoses[extra.referenceID];
+			const auto& tgtPose = CalCtx.devicePoses[extra.targetID];
+			if (!refPose.poseIsValid || !tgtPose.poseIsValid) continue;
+			if (refPose.result != vr::ETrackingResult::TrackingResult_Running_OK) continue;
+			if (tgtPose.result != vr::ETrackingResult::TrackingResult_Running_OK) continue;
+
+			Sample s(ConvertPose(refPose), ConvertPose(tgtPose), glfwGetTime());
+			extra.calc->PushSample(s);
+			while (extra.calc->SampleCount() > CalCtx.SampleCount()) extra.calc->ShiftSample();
+
+			// Per-extra auto-lock detector update.
+			Eigen::AffineCompact3d refW = Eigen::AffineCompact3d::Identity();
+			refW.linear() = ConvertPose(refPose).rot;
+			refW.translation() = ConvertPose(refPose).trans;
+			Eigen::AffineCompact3d tgtW = Eigen::AffineCompact3d::Identity();
+			tgtW.linear() = ConvertPose(tgtPose).rot;
+			tgtW.translation() = ConvertPose(tgtPose).trans;
+			const Eigen::AffineCompact3d rel = refW.inverse() * tgtW;
+			extra.autoLockHistory.push_back(rel);
+			while (extra.autoLockHistory.size() > 30) extra.autoLockHistory.pop_front();
+			// (mirrors the primary detector; a tiny duplication is fine for now)
+			if (extra.autoLockHistory.size() >= 30) {
+				Eigen::Vector3d meanT = Eigen::Vector3d::Zero();
+				for (const auto& a : extra.autoLockHistory) meanT += a.translation();
+				meanT /= (double)extra.autoLockHistory.size();
+				double translVar = 0.0;
+				for (const auto& a : extra.autoLockHistory) {
+					translVar += (a.translation() - meanT).squaredNorm();
+				}
+				translVar /= (double)extra.autoLockHistory.size();
+				const double translStd = std::sqrt(translVar);
+				const auto& medRot = extra.autoLockHistory[extra.autoLockHistory.size() / 2].rotation();
+				Eigen::Quaterniond medQ(medRot);
+				double rotMaxAng = 0.0;
+				for (const auto& a : extra.autoLockHistory) {
+					double ang = medQ.angularDistance(Eigen::Quaterniond(a.rotation()));
+					if (ang > rotMaxAng) rotMaxAng = ang;
+				}
+				extra.autoLockEffectivelyLocked =
+					(translStd < 0.005) && (rotMaxAng < 1.0 * EIGEN_PI / 180.0);
+			}
+			// Resolve effective lock for this extra.
+			switch (extra.lockMode) {
+			case 0:  extra.lockRelativePosition = false; break;
+			case 1:  extra.lockRelativePosition = true; break;
+			default: extra.lockRelativePosition = extra.autoLockEffectivelyLocked; break;
+			}
+
+			extra.calc->lockRelativePosition = extra.lockRelativePosition;
+			extra.calc->enableStaticRecalibration = CalCtx.enableStaticRecalibration;
+
+			if (!CalCtx.calibrationPaused && extra.calc->SampleCount() >= CalCtx.SampleCount()) {
+				bool extraLerp = false;
+				if (extra.calc->ComputeIncremental(extraLerp,
+						CalCtx.continuousCalibrationThreshold,
+						CalCtx.maxRelativeErrorThreshold,
+						CalCtx.ignoreOutliers)) {
+					if (extra.calc->isValid()) {
+						extra.calibratedRotation = extra.calc->EulerRotation();
+						extra.calibratedTranslation =
+							extra.calc->Transformation().translation() * 100.0;
+						extra.refToTargetPose = extra.calc->RelativeTransformation();
+						extra.relativePosCalibrated = extra.calc->isRelativeTransformationCalibrated();
+						extra.valid = true;
+					}
+				}
+			}
 		}
 	}
 	else {

@@ -255,9 +255,9 @@ void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTr
 	// calls will re-evaluate fallback eligibility.
 	tf.fallbackActive = false;
 
-	// Velocity-freeze flag. Cheap to update unconditionally; HandleDevicePoseUpdated
-	// gates on it once per pose update.
-	tf.freezePrediction = newTransform.freezePrediction;
+	// Prediction-smoothness strength (0..100). Cheap to update unconditionally;
+	// HandleDevicePoseUpdated reads it once per pose update.
+	tf.predictionSmoothness = newTransform.predictionSmoothness;
 
 	// Motion-gated blend. When the flag transitions off, reset the captured
 	// previous-frame pose so a future re-enable doesn't see a stale delta.
@@ -383,7 +383,7 @@ void ServerTrackedDeviceProvider::SetTrackingSystemFallback(const protocol::SetT
 	slot->tf.transform.rotation = Eigen::Quaterniond(
 		newFallback.rotation.w, newFallback.rotation.x, newFallback.rotation.y, newFallback.rotation.z);
 	slot->tf.scale = newFallback.scale;
-	slot->tf.freezePrediction = newFallback.freezePrediction;
+	slot->tf.predictionSmoothness = newFallback.predictionSmoothness;
 	slot->tf.recalibrateOnMovement = newFallback.recalibrateOnMovement;
 }
 
@@ -411,27 +411,44 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 	auto& tf = transforms[openVRID];
 
-	// Prediction-suppression: zero out velocity / acceleration / poseTimeOffset so
-	// downstream consumers (SteamVR's predictor, third-party smoothing tools that
-	// scale these fields) see a "stationary" tracker between samples. This is the
-	// native equivalent of OVR-SmoothTracking's behaviour, applied per-device.
-	// Triggered by either the per-ID freezePrediction flag OR a matching enabled
-	// fallback that has freezePrediction set. Zeroing happens BEFORE the shmem
-	// write so the overlay's sample-collection sees the same frozen pose data.
-	bool freeze = tf.freezePrediction;
-	if (!freeze && !tf.enabled && !deviceSystem[openVRID].empty()) {
+	// Native pose-prediction suppression. Scales the velocity / acceleration /
+	// poseTimeOffset fields by (1 - smoothness/100), where smoothness comes from
+	// either the per-ID slot or the matching tracking-system fallback (per-ID
+	// wins when both are set). The user picks the value from a 0..100 slider in
+	// the overlay's Prediction tab; 100 fully zeros the fields (matching the old
+	// "freeze" behaviour) and effectively defeats SteamVR's pose extrapolation.
+	// The HMD / calibration ref / calibration target are hard-blocked to 0
+	// upstream by the overlay, so by the time we read smoothness here it's
+	// already been vetted as safe to apply.
+	uint8_t smoothness = tf.predictionSmoothness;
+	if (smoothness == 0 && !tf.enabled && !deviceSystem[openVRID].empty()) {
 		const auto& sys = deviceSystem[openVRID];
 		const FallbackSlot* slot = FindFallbackSlot(sys.data(), sys.size());
-		if (slot && slot->tf.enabled && slot->tf.freezePrediction) {
-			freeze = true;
+		if (slot && slot->tf.enabled && slot->tf.predictionSmoothness > 0) {
+			smoothness = slot->tf.predictionSmoothness;
 		}
 	}
-	if (freeze) {
-		pose.vecVelocity[0] = pose.vecVelocity[1] = pose.vecVelocity[2] = 0;
-		pose.vecAcceleration[0] = pose.vecAcceleration[1] = pose.vecAcceleration[2] = 0;
-		pose.vecAngularVelocity[0] = pose.vecAngularVelocity[1] = pose.vecAngularVelocity[2] = 0;
-		pose.vecAngularAcceleration[0] = pose.vecAngularAcceleration[1] = pose.vecAngularAcceleration[2] = 0;
-		pose.poseTimeOffset = 0;
+	if (smoothness > 0) {
+		// Clamp defensively -- a buggy overlay (or a stale-protocol mismatch)
+		// shouldn't be able to push a value above 100 here.
+		if (smoothness > 100) smoothness = 100;
+		const double factor = 1.0 - (double)smoothness / 100.0;
+		pose.vecVelocity[0] *= factor;
+		pose.vecVelocity[1] *= factor;
+		pose.vecVelocity[2] *= factor;
+		pose.vecAcceleration[0] *= factor;
+		pose.vecAcceleration[1] *= factor;
+		pose.vecAcceleration[2] *= factor;
+		pose.vecAngularVelocity[0] *= factor;
+		pose.vecAngularVelocity[1] *= factor;
+		pose.vecAngularVelocity[2] *= factor;
+		pose.vecAngularAcceleration[0] *= factor;
+		pose.vecAngularAcceleration[1] *= factor;
+		pose.vecAngularAcceleration[2] *= factor;
+		// poseTimeOffset is multiplicative on the predictor: zeroing it cancels
+		// extrapolation; halving it halves the lookahead time. Same factor as
+		// velocity for consistency.
+		pose.poseTimeOffset *= factor;
 	}
 
 	shmem.SetPose(openVRID, pose);

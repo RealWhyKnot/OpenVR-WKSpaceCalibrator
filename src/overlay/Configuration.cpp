@@ -11,35 +11,83 @@
 
 // Profile schema versioning.
 //
-// Persisted profiles now include a "schema_version" integer at the top level of each
-// profile object. This lets us evolve the on-disk JSON shape without silently breaking
-// or corrupting profiles written by older overlay builds.
+// Persisted profiles include a "schema_version" integer at the top level. This
+// lets us evolve the JSON shape -- rename keys, change defaults, drop deprecated
+// fields -- without writing one-off migration code in the load path every time.
+//
+// Two design rules keep migrations cheap:
+//
+//   1. Default-only fields are not written. SaveProfile compares each setting
+//      against a freshly-constructed CalibrationContext (the defaults) and only
+//      writes the fields the user actually changed. Adding a new setting needs
+//      no migration: old profiles silently pick up the new default; new profiles
+//      that don't customise it write nothing.
+//
+//   2. The load path is tolerant of missing keys for any field with a sensible
+//      default. We only need a migration step when the meaning of a field
+//      changes -- e.g. a renamed key, a removed enum value the old default
+//      pointed at, or a unit change.
 //
 // Version history:
-//   0 - Implicit version of legacy profiles (no "schema_version" key present). All
-//       fields prior to this commit. Loaded in compatibility mode.
-//   1 - First explicitly-versioned schema. Same field set as version 0, but writes
-//       the version key so future migrations have a starting point.
+//   0 - Implicit version of legacy profiles (no "schema_version" key present).
+//   1 - First explicitly-versioned schema. Same field set as 0; just writes the
+//       version key so future migrations have a starting point.
+//   2 - calibrationSpeed: SLOW (1) was the default before AUTO (3) was added.
+//       Profiles whose stored value is SLOW were almost certainly never
+//       customised away from the old default; rewrite them to AUTO so the user
+//       gets the new sensible default automatically.
+//       Also drops the deprecated "auto_suppress_on_external_tool" key, since
+//       we no longer try to interop with external smoothing tools.
+//   3 - Adds "additional_calibrations" array for multi-ecosystem (3+ tracking
+//       system) setups. v2 profiles transparently load with an empty array;
+//       no field renames or removals.
+//       Adds "lock_relative_position_mode" (int 0/1/2 = OFF/ON/AUTO) replacing
+//       the legacy "lock_relative_position" bool. Migration: bool true -> ON,
+//       bool false -> AUTO (the new safer default that detects rigidity).
 //
 // When you change the schema:
 //   1. Bump kProfileSchemaVersion below.
-//   2. Add a step inside MigrateProfile() that transforms a parsed picojson::object
-//      from the previous version to the new one (rename keys, fill defaults, etc.).
-//   3. Keep the load path tolerant of missing keys for fields you add.
-static const int kProfileSchemaVersion = 1;
+//   2. Add a step inside MigrateProfile() for the new bump.
+//   3. Keep the load path tolerant of missing keys for any new field.
+static const int kProfileSchemaVersion = 3;
 
 // Forward-migrate an already-parsed profile object in place from `from_version`
 // up to kProfileSchemaVersion. Called between JSON parse and field population.
-//
-// Each future schema bump should add a `if (from_version < N) { ... }` block here
-// that rewrites the object to the version-N shape. Steps must be cumulative: a
-// profile at version 0 should pass through every step on its way to current.
-static void MigrateProfile(int from_version, picojson::object &profile)
+// Each future schema bump should add a `if (from_version < N) { ... }` block.
+// Steps must be cumulative -- a v0 profile passes through every step on its way
+// up to the current version.
+static void MigrateProfile(int from_version, picojson::object& profile)
 {
-	// from_version 0 -> 1: no field changes; the only difference is the presence
-	// of the "schema_version" key itself, so nothing to rewrite here.
-	(void)from_version;
-	(void)profile;
+	// 0 -> 1: no field changes; only the addition of schema_version itself.
+	// Nothing to rewrite.
+
+	// 1 -> 2: SLOW was the default calibration speed before AUTO existed.
+	// Treat any stored SLOW (=1) on a v0/v1 profile as "user never customised
+	// this" and rewrite to AUTO (=3). Users who explicitly chose SLOW lose
+	// their preference here -- a one-time cost we accept because the alternative
+	// is leaving most users on the worse default forever.
+	//
+	// Also remove "auto_suppress_on_external_tool": we no longer interop with
+	// external smoothing tools. Leaving the key around would just confuse the
+	// next person reading the JSON.
+	if (from_version < 2) {
+		auto it = profile.find("calibration_speed");
+		if (it != profile.end() && it->second.is<double>()) {
+			const int raw = (int)it->second.get<double>();
+			constexpr int kOldSlow = 1;
+			constexpr int kAuto = 3;
+			if (raw == kOldSlow) {
+				double newSpeed = (double)kAuto;
+				it->second.set<double>(newSpeed);
+			}
+		}
+		profile.erase("auto_suppress_on_external_tool");
+		// Skip-if-default also deprecates "suppressed_serials" (replaced by
+		// "tracker_smoothness"). The load path already handles either, so
+		// don't strip it here -- if the user downgrades the build they'll
+		// keep that data. The next save with kProfileSchemaVersion >= 2 will
+		// drop it for new profiles.
+	}
 }
 
 static picojson::array FloatArray(const float *buf, size_t numFloats)
@@ -195,48 +243,55 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	if (obj["static_calibration"].is<bool>()) {
 		ctx.enableStaticRecalibration = obj["static_calibration"].get<bool>();
 	}
-	if (obj["jitter_threshold"].is<double>()) {
-		ctx.jitterThreshold = ((float) obj["jitter_threshold"].get<double>());
-	} else {
-		ctx.jitterThreshold = 0.1f;
-	}
-	if (obj["max_relative_error_threshold"].is<double>()) {
-		ctx.maxRelativeErrorThreshold = ((float) obj["max_relative_error_threshold"].get<double>());
-	} else {
-		ctx.maxRelativeErrorThreshold = 0.005f;
-	}
-
-	if (obj["target_latency_offset_ms"].is<double>()) {
+	// Skip-if-default: missing keys mean "use the in-code default". ResetConfig
+	// (called via LoadAlignmentParams above) already populated the defaults, so
+	// each block here is "if present in JSON, override; else keep the default".
+	// The previous code had explicit `else` clauses that re-set defaults; they
+	// were redundant at best and had at least one bug -- jitter_threshold's
+	// missing-key fallback was 0.1f, contradicting the 3.0f default set by
+	// ResetConfig.
+	if (obj["jitter_threshold"].is<double>())
+		ctx.jitterThreshold = (float)obj["jitter_threshold"].get<double>();
+	if (obj["max_relative_error_threshold"].is<double>())
+		ctx.maxRelativeErrorThreshold = (float)obj["max_relative_error_threshold"].get<double>();
+	if (obj["target_latency_offset_ms"].is<double>())
 		ctx.targetLatencyOffsetMs = obj["target_latency_offset_ms"].get<double>();
-	} else {
-		ctx.targetLatencyOffsetMs = 0.0;
-	}
-
-	if (obj["latency_auto_detect"].is<bool>()) {
+	if (obj["latency_auto_detect"].is<bool>())
 		ctx.latencyAutoDetect = obj["latency_auto_detect"].get<bool>();
-	} else {
-		ctx.latencyAutoDetect = false;
-	}
-	if (obj["estimated_latency_offset_ms"].is<double>()) {
+	if (obj["estimated_latency_offset_ms"].is<double>())
 		ctx.estimatedLatencyOffsetMs = obj["estimated_latency_offset_ms"].get<double>();
-	} else {
-		ctx.estimatedLatencyOffsetMs = 0.0;
-	}
 
 	// Native prediction-suppression settings.
-	ctx.suppressedSerials.clear();
-	if (obj["suppressed_serials"].is<picojson::array>()) {
+	//
+	// New schema (v2026.4.28+): "tracker_smoothness" is an object mapping
+	// each tracker's serial number to a 0..100 strength.  Anything missing
+	// or 0 means the tracker isn't suppressed.
+	//
+	// Old schema (pre-2026.4.28): "suppressed_serials" was a string array
+	// (binary on/off).  Migrate by mapping every entry to smoothness=100,
+	// which matches the old "fully zero velocity" behaviour.  We don't
+	// rewrite the JSON on load -- the next SaveProfile will emit the new
+	// schema -- so a downgrade keeps the legacy data readable too.
+	ctx.trackerSmoothness.clear();
+	if (obj["tracker_smoothness"].is<picojson::object>()) {
+		for (auto& kv : obj["tracker_smoothness"].get<picojson::object>()) {
+			if (!kv.second.is<double>()) continue;
+			int v = (int)kv.second.get<double>();
+			if (v < 0) v = 0;
+			if (v > 100) v = 100;
+			if (v > 0) ctx.trackerSmoothness[kv.first] = v;
+		}
+	} else if (obj["suppressed_serials"].is<picojson::array>()) {
+		// Legacy migration path.
 		for (auto& v : obj["suppressed_serials"].get<picojson::array>()) {
 			if (v.is<std::string>()) {
-				ctx.suppressedSerials.insert(v.get<std::string>());
+				ctx.trackerSmoothness[v.get<std::string>()] = 100;
 			}
 		}
 	}
-	if (obj["auto_suppress_on_external_tool"].is<bool>()) {
-		ctx.autoSuppressOnExternalTool = obj["auto_suppress_on_external_tool"].get<bool>();
-	} else {
-		ctx.autoSuppressOnExternalTool = true;
-	}
+	// auto_suppress_on_external_tool was removed in v2026.4.28+ (we no longer
+	// try to interop with external smoothing tools -- we just warn the user).
+	// Silently drop the legacy key on load.
 
 	if (obj["recalibrate_on_movement"].is<bool>()) {
 		ctx.recalibrateOnMovement = obj["recalibrate_on_movement"].get<bool>();
@@ -264,15 +319,10 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	// Note: when calibration_speed is absent (older profile or new install) the
 	// CalibrationContext default of AUTO applies.
 
-	// View mode preference. New in 2026.4.28.x; older profiles get the GRAPH
-	// default. Bounds-check so a hand-edited profile with garbage doesn't
-	// crash on next render.
-	if (obj["view_mode"].is<double>()) {
-		const int raw = (int)obj["view_mode"].get<double>();
-		if (raw >= 0 && raw <= 2) {
-			ctx.viewMode = (CalibrationContext::ViewMode)raw;
-		}
-	}
+	// "view_mode" was a per-profile UI density preference (BASIC/GRAPH/ADVANCED).
+	// Replaced by actual top-level tabs (Basic/Graphs/Advanced) in 2026.4.28+;
+	// the JSON key is dead. Skip-if-default save means new profiles won't emit
+	// it; old profiles just leave the key on disk where future loads ignore it.
 
 	if (obj["chaperone"].is<picojson::object>()) {
 		auto chaperone = obj["chaperone"].get<picojson::object>();
@@ -311,8 +361,19 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	if (obj["relative_pos_calibrated"].is<bool>()) {
 		ctx.relativePosCalibrated = obj["relative_pos_calibrated"].get<bool>();
 	}
-	if (obj["lock_relative_position"].is<bool>()) {
-		ctx.lockRelativePosition = obj["lock_relative_position"].get<bool>();
+	// Lock-mode tristate. New schema (v3+) stores "lock_relative_position_mode"
+	// as a 0/1/2 int (OFF/ON/AUTO).  Legacy schemas stored a bool
+	// "lock_relative_position" -- map true -> ON, false -> AUTO (was the old
+	// implicit behaviour when locked).  No write of the legacy key in v3+.
+	if (obj["lock_relative_position_mode"].is<double>()) {
+		const int raw = (int)obj["lock_relative_position_mode"].get<double>();
+		if (raw >= 0 && raw <= 2) {
+			ctx.lockRelativePositionMode = (CalibrationContext::LockMode)raw;
+		}
+	} else if (obj["lock_relative_position"].is<bool>()) {
+		ctx.lockRelativePositionMode = obj["lock_relative_position"].get<bool>()
+			? CalibrationContext::LockMode::ON
+			: CalibrationContext::LockMode::AUTO;
 	}
 	if (obj["relative_transform"].is<picojson::object>()) {
 		auto relTransform = obj["relative_transform"].get<picojson::object>();
@@ -358,6 +419,44 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		ctx.refToTargetPose.translation() = refToTargetTranslation;
 	}
 
+	// Multi-ecosystem extras. Each entry mirrors the calibration data fields
+	// of the primary plus its own per-extra lock mode. Standby device records
+	// stay tied to the entry so we can re-resolve referenceID/targetID at
+	// next scan tick after a restart.
+	ctx.additionalCalibrations.clear();
+	if (obj["additional_calibrations"].is<picojson::array>()) {
+		for (auto& v : obj["additional_calibrations"].get<picojson::array>()) {
+			if (!v.is<picojson::object>()) continue;
+			auto& extraObj = v.get<picojson::object>();
+			AdditionalCalibration extra;
+			if (extraObj["target_tracking_system"].is<std::string>()) {
+				extra.targetTrackingSystem = extraObj["target_tracking_system"].get<std::string>();
+			}
+			if (extraObj["target_device"].is<picojson::object>()) {
+				LoadStandby(extra.targetStandby, extraObj["target_device"]);
+			}
+			if (extraObj["roll"].is<double>())  extra.calibratedRotation(0) = extraObj["roll"].get<double>();
+			if (extraObj["yaw"].is<double>())   extra.calibratedRotation(1) = extraObj["yaw"].get<double>();
+			if (extraObj["pitch"].is<double>()) extra.calibratedRotation(2) = extraObj["pitch"].get<double>();
+			if (extraObj["x"].is<double>()) extra.calibratedTranslation(0) = extraObj["x"].get<double>();
+			if (extraObj["y"].is<double>()) extra.calibratedTranslation(1) = extraObj["y"].get<double>();
+			if (extraObj["z"].is<double>()) extra.calibratedTranslation(2) = extraObj["z"].get<double>();
+			if (extraObj["scale"].is<double>()) extra.calibratedScale = extraObj["scale"].get<double>();
+			if (extraObj["lock_mode"].is<double>()) {
+				int raw = (int)extraObj["lock_mode"].get<double>();
+				if (raw < 0 || raw > 2) raw = 2;
+				extra.lockMode = raw;
+			}
+			if (extraObj["valid"].is<bool>()) extra.valid = extraObj["valid"].get<bool>();
+			if (extraObj["enabled"].is<bool>()) extra.enabled = extraObj["enabled"].get<bool>();
+			ctx.additionalCalibrations.push_back(std::move(extra));
+		}
+	}
+
+	if (obj["wizard_completed"].is<bool>()) {
+		ctx.wizardCompleted = obj["wizard_completed"].get<bool>();
+	}
+
 	ctx.validProfile = true;
 }
 
@@ -386,8 +485,19 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	// stored in a local before being passed.
 	double schemaVersionDouble = (double)kProfileSchemaVersion;
 	profile["schema_version"].set<double>(schemaVersionDouble);
-	profile["alignment_params"].set<picojson::object>(SaveAlignmentParams(ctx));
 
+	// "Defaults" reference -- a freshly-constructed CalibrationContext.  Settings
+	// fields that match this reference are NOT written to the JSON: the loader
+	// will fall back to the same defaults next time, and we save disk space and
+	// cognitive load on humans reading the file.  Only fields the user has
+	// actually customised hit disk.
+	//
+	// Calibration data (translation, rotation, calibrated_scale, the standby
+	// device records) is always written -- it IS the calibration, not a tunable.
+	const CalibrationContext defaults;
+
+	// --- Calibration data (always written) ------------------------------------
+	profile["alignment_params"].set<picojson::object>(SaveAlignmentParams(ctx));
 	profile["reference_tracking_system"].set<std::string>(ctx.referenceTrackingSystem);
 	profile["target_tracking_system"].set<std::string>(ctx.targetTrackingSystem);
 	profile["roll"].set<double>(ctx.calibratedRotation(0));
@@ -399,39 +509,64 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	profile["scale"].set<double>(ctx.calibratedScale);
 	WriteStandby(ctx.referenceStandby, profile["reference_device"]);
 	WriteStandby(ctx.targetStandby, profile["target_device"]);
-	bool isInContinuousCalibrationMode = ctx.state == CalibrationState::Continuous || ctx.state == CalibrationState::ContinuousStandby;
-	profile["autostart_continuous_calibration"].set<bool>(isInContinuousCalibrationMode);
-	profile["quash_target_in_continuous"].set<bool>(ctx.quashTargetInContinuous);
-	profile["require_trigger_press_to_apply"].set<bool>(ctx.requireTriggerPressToApply);
-	profile["ignore_outliers"].set<bool>(ctx.ignoreOutliers);
 	profile["continuous_calibration_target_offset_x"].set<double>(ctx.continuousCalibrationOffset(0));
 	profile["continuous_calibration_target_offset_y"].set<double>(ctx.continuousCalibrationOffset(1));
 	profile["continuous_calibration_target_offset_z"].set<double>(ctx.continuousCalibrationOffset(2));
-	profile["static_calibration"].set<bool>(ctx.enableStaticRecalibration);
-	double jitterThreshold = (double)ctx.jitterThreshold;
-	profile["jitter_threshold"].set<double>(jitterThreshold);
-	double maxRelErrorThresTmp = (double)ctx.maxRelativeErrorThreshold;
-	profile["max_relative_error_threshold"].set<double>(maxRelErrorThresTmp);
-	profile["target_latency_offset_ms"].set<double>(ctx.targetLatencyOffsetMs);
-	profile["latency_auto_detect"].set<bool>(ctx.latencyAutoDetect);
-	profile["estimated_latency_offset_ms"].set<double>(ctx.estimatedLatencyOffsetMs);
 
-	// Native prediction-suppression settings.
-	picojson::array suppressedSerials;
-	for (const auto& serial : ctx.suppressedSerials) {
-		picojson::value v;
-		v.set<std::string>(serial);
-		suppressedSerials.push_back(v);
+	// --- State that's tied to the profile (not really a "default-able" knob) --
+	bool isInContinuousCalibrationMode = ctx.state == CalibrationState::Continuous
+		|| ctx.state == CalibrationState::ContinuousStandby;
+	if (isInContinuousCalibrationMode) {
+		// Only write the autostart flag when it's true; absent => don't autostart.
+		// picojson's set<bool> is only specialized for the const-ref overload --
+		// passing a literal `true` would resolve to the un-defined rvalue
+		// template. Bind to a local first.
+		bool autostart = true;
+		profile["autostart_continuous_calibration"].set<bool>(autostart);
 	}
-	profile["suppressed_serials"].set<picojson::array>(suppressedSerials);
-	profile["auto_suppress_on_external_tool"].set<bool>(ctx.autoSuppressOnExternalTool);
-	profile["recalibrate_on_movement"].set<bool>(ctx.recalibrateOnMovement);
 
-	double speed = (int) ctx.calibrationSpeed;
-	profile["calibration_speed"].set<double>(speed);
+	// --- Settings: skip-if-default ---------------------------------------------
+	// Local helper macros keep the boilerplate readable. WRITE_IF_CHANGED writes
+	// `field` to `key` only when ctx.field differs from defaults.field. picojson's
+	// set<T> takes a non-const T& (no rvalue overload), so the value must be
+	// bound to a local before the call -- the inner braces also hide the local
+	// from the caller's scope.
+#define WRITE_IF_CHANGED_BOOL(KEY, FIELD) \
+	do { if (ctx.FIELD != defaults.FIELD) { bool _v = ctx.FIELD; profile[KEY].set<bool>(_v); } } while (0)
+#define WRITE_IF_CHANGED_DOUBLE(KEY, FIELD) \
+	do { if (ctx.FIELD != defaults.FIELD) { double _v = (double)ctx.FIELD; profile[KEY].set<double>(_v); } } while (0)
 
-	double viewMode = (int) ctx.viewMode;
-	profile["view_mode"].set<double>(viewMode);
+	WRITE_IF_CHANGED_BOOL  ("quash_target_in_continuous",   quashTargetInContinuous);
+	WRITE_IF_CHANGED_BOOL  ("require_trigger_press_to_apply", requireTriggerPressToApply);
+	WRITE_IF_CHANGED_BOOL  ("ignore_outliers",              ignoreOutliers);
+	WRITE_IF_CHANGED_BOOL  ("static_calibration",           enableStaticRecalibration);
+	WRITE_IF_CHANGED_DOUBLE("jitter_threshold",             jitterThreshold);
+	WRITE_IF_CHANGED_DOUBLE("max_relative_error_threshold", maxRelativeErrorThreshold);
+	WRITE_IF_CHANGED_DOUBLE("target_latency_offset_ms",     targetLatencyOffsetMs);
+	WRITE_IF_CHANGED_BOOL  ("latency_auto_detect",          latencyAutoDetect);
+	WRITE_IF_CHANGED_DOUBLE("estimated_latency_offset_ms",  estimatedLatencyOffsetMs);
+	WRITE_IF_CHANGED_BOOL  ("recalibrate_on_movement",      recalibrateOnMovement);
+	WRITE_IF_CHANGED_DOUBLE("calibration_speed",            calibrationSpeed);
+
+#undef WRITE_IF_CHANGED_BOOL
+#undef WRITE_IF_CHANGED_DOUBLE
+
+	// --- Per-tracker prediction smoothness (always written when populated) ----
+	// Empty map => omit the key entirely. Old "suppressed_serials" array isn't
+	// written; load path migrates v0/v1 profiles from it on first read.
+	if (!ctx.trackerSmoothness.empty()) {
+		picojson::object trackerSmoothness;
+		for (const auto& kv : ctx.trackerSmoothness) {
+			if (kv.second <= 0) continue;
+			picojson::value v;
+			double smoothness = (double)kv.second;
+			v.set<double>(smoothness);
+			trackerSmoothness[kv.first] = v;
+		}
+		if (!trackerSmoothness.empty()) {
+			profile["tracker_smoothness"].set<picojson::object>(trackerSmoothness);
+		}
+	}
 
 	if (ctx.chaperone.valid) {
 		picojson::object chaperone;
@@ -467,9 +602,54 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	refToTarget["quat_x"].set<double>(refToTargetQuat.x());
 	refToTarget["quat_y"].set<double>(refToTargetQuat.y());
 	refToTarget["quat_z"].set<double>(refToTargetQuat.z());
+	// relative_pos_calibrated is profile state (was the rel-pose calibrated?), not a
+	// user-tunable setting -- always emit so a load can tell the difference between
+	// "no rel-pose data" and "rel-pose data, freshly initialised". The lock mode
+	// is a setting; skip-if-default applies.
 	profile["relative_pos_calibrated"].set<bool>(ctx.relativePosCalibrated);
-	profile["lock_relative_position"].set<bool>(ctx.lockRelativePosition);
+	if (ctx.lockRelativePositionMode != defaults.lockRelativePositionMode) {
+		double lockMode = (double)(int)ctx.lockRelativePositionMode;
+		profile["lock_relative_position_mode"].set<double>(lockMode);
+	}
 	profile["relative_transform"].set<picojson::object>(refToTarget);
+
+	// Multi-ecosystem extras. Always emit when non-empty; skip the key entirely
+	// when the user hasn't added any (keeps profiles for the typical 2-system
+	// case looking identical to v2 except for the schema_version bump).
+	if (!ctx.additionalCalibrations.empty()) {
+		picojson::array extrasArr;
+		for (const auto& extra : ctx.additionalCalibrations) {
+			picojson::object e;
+			e["target_tracking_system"].set<std::string>(extra.targetTrackingSystem);
+			picojson::value tgtDev;
+			WriteStandby(const_cast<StandbyDevice&>(extra.targetStandby), tgtDev);
+			e["target_device"] = tgtDev;
+			e["roll"].set<double>(extra.calibratedRotation(0));
+			e["yaw"].set<double>(extra.calibratedRotation(1));
+			e["pitch"].set<double>(extra.calibratedRotation(2));
+			e["x"].set<double>(extra.calibratedTranslation(0));
+			e["y"].set<double>(extra.calibratedTranslation(1));
+			e["z"].set<double>(extra.calibratedTranslation(2));
+			e["scale"].set<double>(extra.calibratedScale);
+			double lockMode = (double)extra.lockMode;
+			e["lock_mode"].set<double>(lockMode);
+			bool eValid = extra.valid;
+			bool eEnabled = extra.enabled;
+			e["valid"].set<bool>(eValid);
+			e["enabled"].set<bool>(eEnabled);
+			picojson::value entry;
+			entry.set<picojson::object>(e);
+			extrasArr.push_back(entry);
+		}
+		profile["additional_calibrations"].set<picojson::array>(extrasArr);
+	}
+
+	// Wizard-completion flag. Skipped when default (false) per skip-if-default,
+	// emitted as true once the user has finished or dismissed the wizard.
+	if (ctx.wizardCompleted) {
+		bool wc = true;
+		profile["wizard_completed"].set<bool>(wc);
+	}
 
 	picojson::value profileV;
 	profileV.set<picojson::object>(profile);

@@ -20,6 +20,7 @@
 #include <dwmapi.h>
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 
 #include <shellapi.h>
 
@@ -35,7 +36,15 @@ std::string c_SPACE_CALIBRATOR_STEAM_APP_ID = "3368750";
 std::string c_STEAMVR_STEAM_APP_ID = "250820";
 constexpr const char* STEAM_MUTEX_KEY = "Global\\MUTEX__SpaceCalibrator_Steam";
 HANDLE hSteamMutex = INVALID_HANDLE_VALUE;
-bool s_isGitHubVersionInstalled = false;
+// Set true at startup when we detect that Steam's library has the Steam-store
+// version of Space Calibrator installed alongside this fork. We're the GitHub
+// fork (actively maintained); the Steam Store version is the upstream that
+// shipped before the fork and isn't getting these fixes. When both are
+// installed they fight over the same SteamVR overlay manifest, so the user
+// should remove the Steam version. The reverse-direction check the original
+// code did ("uninstall the GitHub version") was wrong for this fork.
+bool s_isSteamVersionInstalled = false;
+std::string s_steamVersionPath;     // populated when detection succeeds, for display.
 
 extern "C" __declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;
 extern "C" __declspec(dllexport) DWORD AmdPowerXpressRequestHighPerformance = 0x00000001;
@@ -455,26 +464,36 @@ void RunLoop() {
 
 			BuildMainWindow(dashboardVisible);
 
-			// @TODO: Move to a separate function, for now it works
-			static bool githubPopupDismissed = false;
+			// Conflict popup -- the Steam-store version is installed in addition to
+			// this GitHub fork.  Both register the same SteamVR overlay manifest
+			// and fight over which binary launches when the user opens the
+			// dashboard.  Recommend uninstalling the Steam version since this fork
+			// is what's actively maintained.
+			static bool steamPopupDismissed = false;
 
-			if (s_isGitHubVersionInstalled && !githubPopupDismissed) {
+			if (s_isSteamVersionInstalled && !steamPopupDismissed) {
 				ImGui::OpenPopup("Conflicting Space Calibrator install");
 				if (ImGui::BeginPopupModal("Conflicting Space Calibrator install", 0, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize)) {
-					ImGui::Text("You have multiple versions of Space Calibrator installed!\n\nPlease uninstall the GitHub version to use the Steam version of Space Calibrator.\n\nDo you wish to open the settings app to uninstall the GitHub version of Space Calibrator? (SteamVR will have to be closed)");
+					ImGui::TextWrapped(
+						"You have both the Steam-store version and this GitHub fork of Space Calibrator installed.\n\n"
+						"This fork is the actively-maintained version. We recommend uninstalling the Steam version "
+						"so they don't fight over the same SteamVR overlay manifest.\n\n"
+						"Open Windows Settings -> Apps to uninstall the Steam version? (SteamVR will need to be closed.)");
 
 					ImGui::NewLine();
 
 					float windowWidth = ImGui::GetWindowWidth();
 					ImGui::SetCursorPosX(windowWidth / 11.0f);
-					if (ImGui::Button("Yes", ImVec2(windowWidth * 3.0f / 11.0f, 0))) {
+					if (ImGui::Button("Open Windows Settings", ImVec2(windowWidth * 4.0f / 11.0f, 0))) {
+						// Same Settings deep-link the original code used; users
+						// uninstall Steam apps from Windows-Settings -> Apps too.
 						UninstallGithubSpaceCalibrator();
-						githubPopupDismissed = true;
+						steamPopupDismissed = true;
 					}
 					ImGui::SameLine();
 					ImGui::SetCursorPosX(windowWidth / 11.0f * 6.0f);
-					if (ImGui::Button("No", ImVec2(windowWidth * 3.0f / 11.0f, 0))) {
-						githubPopupDismissed = true;
+					if (ImGui::Button("Dismiss", ImVec2(windowWidth * 4.0f / 11.0f, 0))) {
+						steamPopupDismissed = true;
 					}
 
 					ImGui::EndPopup();
@@ -593,49 +612,127 @@ void VerifySetupCorrect() {
 	}
 }
 
-// Checks if a GitHub install of Space Calibrator is available when running via Steam.
-// If the GitHub version is found, we yell at the user telling them to uninstall it first as it conflicts with the Steam version
-void CheckGithubVersionInstalledOnSteam() {
-	// there are 3 locations for the uninstall string, test each one of them
-	
-	// HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\OpenVRSpaceCalibrator
-	std::string uninstallKeyValue = GetRegistryString(HKEY_LOCAL_MACHINE, "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OpenVRSpaceCalibrator", "UninstallString");
-	if (!uninstallKeyValue.empty()) {
-		// Space Calibrator was installed via GitHub, but we're running via Steam! Uh oh!
-		s_isGitHubVersionInstalled = true;
-		return;
+// Steam-store install detection.
+//
+// This fork is the canonical GitHub-distributed version. The previous logic
+// here detected the GitHub install and asked the user to remove it -- correct
+// when Steam was the canonical source (pre-fork), backwards now. We've flipped
+// the check: detect a *Steam-store* install of the same app, and prompt the
+// user to remove THAT one instead so it doesn't fight us over the SteamVR
+// overlay manifest registration.
+//
+// Detection: SteamApp ID 3368750 is OpenVR Space Calibrator on the Steam
+// store. If Steam has it installed, an `appmanifest_3368750.acf` file exists
+// in one of Steam's library folders. We:
+//   1. Find Steam's install path from the registry.
+//   2. Check the default `<steam>/steamapps/` library.
+//   3. Parse `<steam>/config/libraryfolders.vdf` for additional libraries.
+// If the manifest is found anywhere, the Steam version is installed.
+//
+// This deliberately does NOT use SteamVR's IsApplicationInstalled() for the
+// `steam.overlay.3368750` key -- both the Steam version and this fork register
+// against that key, so the answer is always "yes installed" and useless for
+// distinguishing.
+namespace {
+
+// Resolve Steam's install directory (e.g. C:\Program Files (x86)\Steam).
+// Returns empty string when Steam isn't installed at all.
+std::filesystem::path GetSteamInstallPath() {
+	// 32-bit-as-WOW6432 (most common — Steam ships as a 32-bit installer).
+	std::string p = GetRegistryString(HKEY_LOCAL_MACHINE,
+		"SOFTWARE\\WOW6432Node\\Valve\\Steam", "InstallPath");
+	if (p.empty()) {
+		// Native 64-bit fallback.
+		p = GetRegistryString(HKEY_LOCAL_MACHINE,
+			"SOFTWARE\\Valve\\Steam", "InstallPath");
+	}
+	if (p.empty()) {
+		// Per-user install (rare; Steam is usually system-wide).
+		p = GetRegistryString(HKEY_CURRENT_USER, "SOFTWARE\\Valve\\Steam", "SteamPath");
+	}
+	if (p.empty()) return {};
+	return std::filesystem::path(p);
+}
+
+// Read libraryfolders.vdf and yield every library path it lists. The VDF
+// format is hierarchical key/value text; we don't need a full parser, just
+// the paths. They appear as `"path"  "<C:\\Some\\Library>"` lines (the
+// double-backslashes are how Steam escapes them on disk).
+std::vector<std::filesystem::path> EnumerateSteamLibraries(const std::filesystem::path& steamRoot) {
+	std::vector<std::filesystem::path> out;
+	if (steamRoot.empty()) return out;
+
+	// The default library is always `<steam>/steamapps/`.
+	auto defaultLib = steamRoot / "steamapps";
+	if (std::filesystem::exists(defaultLib)) out.push_back(defaultLib);
+
+	// Newer Steam (post-2021) puts this under config/. Older/legacy installs
+	// keep it next to steamapps/. Try both.
+	std::filesystem::path candidates[] = {
+		steamRoot / "config" / "libraryfolders.vdf",
+		steamRoot / "steamapps" / "libraryfolders.vdf",
+	};
+	for (const auto& vdfPath : candidates) {
+		if (!std::filesystem::exists(vdfPath)) continue;
+		std::ifstream in(vdfPath);
+		if (!in) continue;
+		std::string line;
+		while (std::getline(in, line)) {
+			// Match `"path"  "<value>"` -- the VDF emits two tabs between
+			// key and value but the exact spacing varies, so do a permissive
+			// substring scan.
+			auto keyPos = line.find("\"path\"");
+			if (keyPos == std::string::npos) continue;
+			auto firstQuote = line.find('"', keyPos + 6);
+			if (firstQuote == std::string::npos) continue;
+			auto secondQuote = line.find('"', firstQuote + 1);
+			if (secondQuote == std::string::npos) continue;
+			std::string raw = line.substr(firstQuote + 1, secondQuote - firstQuote - 1);
+			// Steam writes "C:\\Some\\Library" with escaped backslashes. Normalise.
+			std::string normalised;
+			normalised.reserve(raw.size());
+			for (size_t i = 0; i < raw.size(); ++i) {
+				if (raw[i] == '\\' && i + 1 < raw.size() && raw[i + 1] == '\\') {
+					normalised.push_back('\\');
+					++i;
+				} else {
+					normalised.push_back(raw[i]);
+				}
+			}
+			std::filesystem::path lib = std::filesystem::path(normalised) / "steamapps";
+			if (std::filesystem::exists(lib)) out.push_back(std::move(lib));
+		}
+		break; // first successfully-opened VDF wins.
 	}
 
-	// HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\OpenVRSpaceCalibrator
-	uninstallKeyValue = GetRegistryString(HKEY_LOCAL_MACHINE, "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OpenVRSpaceCalibrator", "UninstallString");
-	if (!uninstallKeyValue.empty()) {
-		// Space Calibrator was installed via GitHub, but we're running via Steam! Uh oh!
-		s_isGitHubVersionInstalled = true;
-		return;
-	}
+	// De-duplicate (some Steam installs list the default library a second
+	// time inside libraryfolders.vdf with index "0").
+	std::sort(out.begin(), out.end());
+	out.erase(std::unique(out.begin(), out.end()), out.end());
+	return out;
+}
 
-	// HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall
-	uninstallKeyValue = GetRegistryString(HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OpenVRSpaceCalibrator", "UninstallString");
-	if (!uninstallKeyValue.empty()) {
-		// Space Calibrator was installed via GitHub, but we're running via Steam! Uh oh!
-		s_isGitHubVersionInstalled = true;
-		return;
-	}
+constexpr const char* kSteamSpaceCalibratorAppId = "3368750";
 
-	// Also check for the presence of a driver in the SteamVR runtime's drivers directory (I should really make the installer not install the driver there...)
-	char cVrRuntimePath[MAX_PATH] = { 0 };
-	unsigned int szPathLen = 0;
-	vr::VR_GetRuntimePath(cVrRuntimePath, MAX_PATH, &szPathLen);
-	if (szPathLen > 0 && std::filesystem::is_directory(cVrRuntimePath)) {
-		// vr runtime path is valid, check if the drivers dir exists and likewise 01spacecalibrator is present
-		// can be found at: {runtimedir}\\drivers\\01spacecalibrator
-		std::filesystem::path spaceCalibratorGitHubDriverPath = cVrRuntimePath;
-		spaceCalibratorGitHubDriverPath = spaceCalibratorGitHubDriverPath / "drivers" / "01spacecalibrator";
-		if (std::filesystem::is_directory(spaceCalibratorGitHubDriverPath)) {
-			// drivers dir exists, so set state
-			s_isGitHubVersionInstalled = true;
+} // namespace
+
+// Returns true if a Steam-store install of Space Calibrator (App ID 3368750)
+// is detected on the system. Populates outManifestPath with the manifest's
+// path on success so the popup can show the user *where* the conflicting
+// install lives.
+bool CheckSteamVersionInstalled(std::string& outManifestPath) {
+	auto steamRoot = GetSteamInstallPath();
+	if (steamRoot.empty()) return false;
+	auto libraries = EnumerateSteamLibraries(steamRoot);
+	const std::string manifestName = std::string("appmanifest_") + kSteamSpaceCalibratorAppId + ".acf";
+	for (const auto& lib : libraries) {
+		auto manifest = lib / manifestName;
+		if (std::filesystem::exists(manifest)) {
+			outManifestPath = manifest.string();
+			return true;
 		}
 	}
+	return false;
 }
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nCmdShow)
@@ -682,13 +779,17 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 	try {
 		InitVR();
 		printf("isSteam: %d\n", isRunningViaSteam);
-		if (isRunningViaSteam) {
-			CheckGithubVersionInstalledOnSteam();
-			printf("foundGithub: %d\n", s_isGitHubVersionInstalled);
-			if (s_isGitHubVersionInstalled) {
 
-			}
-		}
+		// Always check for a Steam-store version, regardless of how this fork
+		// was launched. The previous logic only checked when running under
+		// SteamVR — but the conflict exists either way (both register the same
+		// SteamVR overlay manifest), so users who launch via the start menu
+		// should also see the warning.
+		s_isSteamVersionInstalled = CheckSteamVersionInstalled(s_steamVersionPath);
+		printf("foundSteamVersion: %d (manifest: %s)\n",
+			s_isSteamVersionInstalled,
+			s_steamVersionPath.c_str());
+
 		VerifySetupCorrect();
 		CreateGLFWWindow();
 		InitCalibrator();
