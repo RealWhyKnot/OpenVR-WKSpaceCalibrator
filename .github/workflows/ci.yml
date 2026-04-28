@@ -1,17 +1,15 @@
 name: CI
 
+# Triggered on PRs and on manual dispatch. We deliberately do NOT run CI on
+# direct pushes to main: every release-tag push triggers release.yml, which
+# does a full build via build.ps1 — running CI on the same SHA would be pure
+# duplication. Direct-to-main pushes that aren't part of a release (docs,
+# wiki, hot fixes between releases) are validated locally via build.ps1; the
+# next release-tag push gives us the CI signal anyway.
+#
+# To run CI manually for a specific commit, use the "Run workflow" button on
+# the Actions page (triggers workflow_dispatch).
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'wiki/**'
-      - 'LICENSE'
-      - 'NOTICE'
-      - '.gitignore'
-      - '.gitattributes'
-      - '.github/ISSUE_TEMPLATE/**'
-      - '.github/workflows/wiki-sync.yml'
   pull_request:
     branches: [main]
     paths-ignore:
@@ -23,6 +21,7 @@ on:
       - '.gitattributes'
       - '.github/ISSUE_TEMPLATE/**'
       - '.github/workflows/wiki-sync.yml'
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
