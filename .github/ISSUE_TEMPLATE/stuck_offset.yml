@@ -1,0 +1,108 @@
+name: Stuck offset / drifted calibration
+description: Continuous calibration appears to lock to a wrong offset until SteamVR is restarted.
+title: "[stuck-offset] "
+labels: ["bug", "stuck-offset"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a stuck-offset case — these are tricky and the data below makes them actionable.
+
+        **Before filing**, please check the [Troubleshooting wiki page](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Troubleshooting).
+        Common causes (lighthouse base station bumped, IMU-only extrapolation, tracker reconnect mid-calibration) are documented there.
+
+  - type: dropdown
+    id: tracking-systems
+    attributes:
+      label: Tracking systems involved
+      description: Which playspaces were being calibrated together when the offset stuck?
+      multiple: true
+      options:
+        - Lighthouse (Vive / Index / Tundra)
+        - Oculus / Meta (Quest Link, Air Link, Rift)
+        - SlimeVR
+        - Pimax Crystal
+        - WMR / HP Reverb
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: textarea
+    id: when-happened
+    attributes:
+      label: When did the offset get stuck?
+      description: What was happening right before the offset went bad? Continuous mode running for a while, right after a tracker reconnected, after wake-from-sleep, after a controller battery swap, etc.
+      placeholder: |
+        e.g. Continuous mode had been running ~20 min. Vive tracker dropped out and reconnected;
+        from that point everything was offset by ~30 cm and never re-converged.
+    validations:
+      required: true
+
+  - type: textarea
+    id: watchdog-fired
+    attributes:
+      label: Did the stuck-loop watchdog fire?
+      description: |
+        Open the in-app log panel (or the CSV file) and search for the line:
+        `Continuous calibration appears stuck — recollecting samples`
+        Paste the surrounding lines here, or say "no such line found".
+      placeholder: |
+        [12:34:56] Continuous calibration appears stuck — recollecting samples
+        [12:34:56] ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: csv-log
+    attributes:
+      label: Last ~30 seconds of the CSV log
+      description: |
+        Located at `%LOCALAPPDATA%\Low\SpaceCalibrator\Logs\spacecal_log.<timestamp>.txt`.
+        Paste the final ~30 s of rows leading up to (and through) the stuck behaviour.
+
+        We specifically need these columns visible:
+        - `error_currentCal`
+        - `error_rawComputed`
+        - `consecutiveRejections`
+        - `rotationConditionRatio`
+
+        If the file is large, attach it instead of pasting.
+      render: csv
+    validations:
+      required: true
+
+  - type: input
+    id: spacecal-version
+    attributes:
+      label: SpaceCalibrator version
+      description: From `version.txt` next to the executable, or the About panel inside the app.
+      placeholder: e.g. 1.12-whyknot.4
+    validations:
+      required: true
+
+  - type: input
+    id: steamvr-version
+    attributes:
+      label: SteamVR version
+      description: SteamVR > Settings > About, or right-click the SteamVR status window.
+      placeholder: e.g. 2.5.5
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra-context
+    attributes:
+      label: Anything else?
+      description: Hardware quirks, room layout changes, recent driver updates, screenshots, video clips — anything that might matter.
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I read the [Troubleshooting wiki page](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Troubleshooting).
+          required: true
+        - label: I tried toggling continuous calibration off and back on; the offset persisted.
+          required: true
+        - label: I am using the WhyKnot fork (this repo). For upstream issues, file at pushrax/OpenVR-SpaceCalibrator instead.
+          required: true
