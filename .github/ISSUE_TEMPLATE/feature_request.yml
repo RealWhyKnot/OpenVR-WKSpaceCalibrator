@@ -1,0 +1,39 @@
+name: Feature request
+description: Suggest an idea for this project.
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to suggest an improvement.
+        For quick discussion before opening a request, the upstream [Discord](https://discord.com/invite/m7g2Wyj) is also a good place.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Is your feature request related to a problem? Describe the use case.
+      placeholder: e.g. "When calibrating a SlimeVR setup against lighthouse, I have to ... and it would be much easier if ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: A clear description of what you want to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any alternative solutions or workarounds you have tried.
+
+  - type: textarea
+    id: extra-context
+    attributes:
+      label: Additional context
+      description: Screenshots, links to similar features in other tools, references — anything that helps.
