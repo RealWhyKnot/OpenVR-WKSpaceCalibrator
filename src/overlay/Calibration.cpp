@@ -1881,6 +1881,15 @@ void CalibrationTick(double time)
 					Metrics::WriteLogAnnotation("hmd_recenter: calibration delta-corrected");
 
 					InvalidateAllTransformCaches();
+
+					// The silent-recal sample buffer's existing samples were
+					// collected in the OLD reference-tracking-world. Mixing
+					// those with post-recenter samples produces a corrupted
+					// fit that mostly captures the recenter delta itself.
+					// Drop the buffer + EMA and let it re-fill from scratch.
+					silentRecalCalc.Clear();
+					silentRecalEMAPrimed = false;
+					silentRecalTPoseHoldStartTime = -1.0;
 				}
 			}
 
