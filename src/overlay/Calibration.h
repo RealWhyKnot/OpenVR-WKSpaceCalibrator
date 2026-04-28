@@ -6,6 +6,8 @@
 #include <openvr.h>
 #include <vector>
 #include <deque>
+#include <set>
+#include <string>
 
 #include "Protocol.h"
 
@@ -75,6 +77,33 @@ struct CalibrationContext
 	protocol::AlignmentSpeedParams alignmentSpeedParams;
 	bool enableStaticRecalibration;
 	bool lockRelativePosition = false;
+
+	// Native prediction-suppression (see wiki/Prediction-Suppression). Replaces
+	// external tools like OVR-SmoothTracking by zeroing velocity/acceleration on
+	// per-device pose updates inside our SteamVR driver, which is the same trick
+	// those tools use. Driver-side per-slot freezePrediction is the actual control
+	// surface; these overlay-side fields are the user-visible knobs that drive it.
+	//
+	// suppressedSerials: serial numbers of devices the user has explicitly opted
+	// in for. ScanAndApplyProfile sends freezePrediction=true to any device whose
+	// Prop_SerialNumber_String is in this set.
+	std::set<std::string> suppressedSerials;
+	// When true and an external smoothing tool is detected running, automatically
+	// suppress prediction on the calibration reference + target trackers (they're
+	// the ones whose pose the math reads, so they matter most). Default on so a
+	// user who installs OVR-SmoothTracking and forgets gets clean math by default;
+	// the in-app warning tells them what we did.
+	bool autoSuppressOnExternalTool = true;
+	// Set by the periodic external-tool detector. Read by the UI (status banner)
+	// and by ScanAndApplyProfile (gates the auto-suppress behaviour above).
+	bool externalSmoothingDetected = false;
+	// Name of the detected external tool (for the warning text). Empty when nothing
+	// is detected.
+	std::string externalSmoothingToolName;
+	// Time-of-last-detector-run, in glfw seconds. CalibrationTick re-runs the scan
+	// every ~5 seconds to keep detection responsive without burning CPU on a tight
+	// process-enumeration loop.
+	double timeLastSmoothingScan = 0;
 
 	Eigen::AffineCompact3d refToTargetPose = Eigen::AffineCompact3d::Identity();
 	bool relativePosCalibrated = false;

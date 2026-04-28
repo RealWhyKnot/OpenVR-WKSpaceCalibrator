@@ -92,7 +92,7 @@ namespace vr {
 
 namespace protocol
 {
-	const uint32_t Version = 5;
+	const uint32_t Version = 6;
 
 	// Maximum length of a tracking-system-name string (e.g., "lighthouse", "oculus",
 	// "Pimax Crystal HMD"). 32 bytes is more than enough for known systems and keeps
@@ -162,23 +162,33 @@ namespace protocol
 		// querying VR properties on every pose update. Empty string means "unknown".
 		char target_system[MaxTrackingSystemNameLen];
 
+		// When true, the driver zeroes vecVelocity / vecAcceleration / vecAngularVelocity
+		// / vecAngularAcceleration / poseTimeOffset on every pose update for this device
+		// before doing anything else. This defeats both SteamVR's own pose extrapolation
+		// AND third-party smoothing tools (e.g. OVR-SmoothTracking) that work by clamping
+		// those same fields — there's nothing left for them to scale. Used to keep the
+		// calibration trackers' pose data clean for the math, while leaving smoothing
+		// active on every other tracker. Off by default; the overlay toggles it on for
+		// devices receiving calibration offsets when freezeTrackerPrediction is enabled.
+		bool freezePrediction;
+
 		SetDeviceTransform(uint32_t id, bool enabled) :
-			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(false), updateScale(false), translation({}), rotation({1,0,0,0}), scale(1), lerp(false), quash(false), target_system{} { }
+			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(false), updateScale(false), translation({}), rotation({1,0,0,0}), scale(1), lerp(false), quash(false), target_system{}, freezePrediction(false) { }
 
 		SetDeviceTransform(uint32_t id, bool enabled, vr::HmdVector3d_t translation) :
-			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(false), updateScale(false), translation(translation), rotation({ 1,0,0,0 }), scale(1), lerp(false), quash(false), target_system{} { }
+			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(false), updateScale(false), translation(translation), rotation({ 1,0,0,0 }), scale(1), lerp(false), quash(false), target_system{}, freezePrediction(false) { }
 
 		SetDeviceTransform(uint32_t id, bool enabled, vr::HmdQuaternion_t rotation) :
-			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(true), updateScale(false), translation({}), rotation(rotation), scale(1), lerp(false), quash(false), target_system{} { }
+			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(true), updateScale(false), translation({}), rotation(rotation), scale(1), lerp(false), quash(false), target_system{}, freezePrediction(false) { }
 
 		SetDeviceTransform(uint32_t id, bool enabled, double scale) :
-			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(false), updateScale(true), translation({}), rotation({ 1,0,0,0 }), scale(scale), lerp(false), quash(false), target_system{} { }
+			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(false), updateScale(true), translation({}), rotation({ 1,0,0,0 }), scale(scale), lerp(false), quash(false), target_system{}, freezePrediction(false) { }
 
 		SetDeviceTransform(uint32_t id, bool enabled, vr::HmdVector3d_t translation, vr::HmdQuaternion_t rotation) :
-			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(true), updateScale(false), translation(translation), rotation(rotation), scale(1), lerp(false), quash(false), target_system{} { }
+			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(true), updateScale(false), translation(translation), rotation(rotation), scale(1), lerp(false), quash(false), target_system{}, freezePrediction(false) { }
 
 		SetDeviceTransform(uint32_t id, bool enabled, vr::HmdVector3d_t translation, vr::HmdQuaternion_t rotation, double scale) :
-			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(true), updateScale(true), translation(translation), rotation(rotation), scale(scale), lerp(false), quash(false), target_system{} { }
+			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(true), updateScale(true), translation(translation), rotation(rotation), scale(scale), lerp(false), quash(false), target_system{}, freezePrediction(false) { }
 	};
 
 	// Per-tracking-system fallback transform. Applied to any device whose tracking
@@ -192,6 +202,10 @@ namespace protocol
 		vr::HmdVector3d_t translation;
 		vr::HmdQuaternion_t rotation;
 		double scale;
+		// Same semantics as SetDeviceTransform::freezePrediction. Applied to every
+		// device that picks up this fallback (i.e. every device of the matching
+		// tracking system that doesn't have an active per-ID transform).
+		bool freezePrediction;
 	};
 
 	struct Request

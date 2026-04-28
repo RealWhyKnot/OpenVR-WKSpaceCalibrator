@@ -212,6 +212,21 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		ctx.targetLatencyOffsetMs = 0.0;
 	}
 
+	// Native prediction-suppression settings.
+	ctx.suppressedSerials.clear();
+	if (obj["suppressed_serials"].is<picojson::array>()) {
+		for (auto& v : obj["suppressed_serials"].get<picojson::array>()) {
+			if (v.is<std::string>()) {
+				ctx.suppressedSerials.insert(v.get<std::string>());
+			}
+		}
+	}
+	if (obj["auto_suppress_on_external_tool"].is<bool>()) {
+		ctx.autoSuppressOnExternalTool = obj["auto_suppress_on_external_tool"].get<bool>();
+	} else {
+		ctx.autoSuppressOnExternalTool = true;
+	}
+
 	if (obj["scale"].is<double>()) {
 		ctx.calibratedScale = obj["scale"].get<double>();
 	} else {
@@ -331,6 +346,16 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	double maxRelErrorThresTmp = (double)ctx.maxRelativeErrorThreshold;
 	profile["max_relative_error_threshold"].set<double>(maxRelErrorThresTmp);
 	profile["target_latency_offset_ms"].set<double>(ctx.targetLatencyOffsetMs);
+
+	// Native prediction-suppression settings.
+	picojson::array suppressedSerials;
+	for (const auto& serial : ctx.suppressedSerials) {
+		picojson::value v;
+		v.set<std::string>(serial);
+		suppressedSerials.push_back(v);
+	}
+	profile["suppressed_serials"].set<picojson::array>(suppressedSerials);
+	profile["auto_suppress_on_external_tool"].set<bool>(ctx.autoSuppressOnExternalTool);
 
 	double speed = (int) ctx.calibrationSpeed;
 	profile["calibration_speed"].set<double>(speed);

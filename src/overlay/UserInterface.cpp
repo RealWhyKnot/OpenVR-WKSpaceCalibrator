@@ -89,6 +89,7 @@ void ShowVersionLine() {
 
 void CCal_BasicInfo();
 void CCal_DrawSettings();
+void CCal_DrawPredictionSuppression();
 
 void BuildContinuousCalDisplay() {
 	ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -124,6 +125,11 @@ void BuildContinuousCalDisplay() {
 		
 		if (ImGui::BeginTabItem("Settings")) {
 			CCal_DrawSettings();
+			ImGui::EndTabItem();
+		}
+
+		if (ImGui::BeginTabItem("Prediction")) {
+			CCal_DrawPredictionSuppression();
 			ImGui::EndTabItem();
 		}
 
@@ -410,6 +416,95 @@ inline const char* GetPrettyTrackingSystemName(const std::string& value) {
 		return "SteamVR Tracking";
 	}
 	return value.c_str();
+}
+
+void CCal_DrawPredictionSuppression() {
+	auto& ctx = CalCtx;
+
+	// External-tool detection banner. Shown only when something matched the
+	// process scan AND auto-suppress is on (or the user has explicitly disabled
+	// auto-suppress; we show a different message there).
+	if (ctx.externalSmoothingDetected) {
+		const char* tool = ctx.externalSmoothingToolName.empty() ? "an external smoothing tool" : ctx.externalSmoothingToolName.c_str();
+		if (ctx.autoSuppressOnExternalTool) {
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.4f, 1.0f));
+			ImGui::TextWrapped(
+				"%s is running. Auto-applying built-in prediction suppression to the calibration "
+				"reference and target trackers so the math stays clean. You can disable %s — this "
+				"fork has the same fix natively (see the per-device list below).",
+				tool, tool);
+			ImGui::PopStyleColor();
+		} else {
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.55f, 1.0f));
+			ImGui::TextWrapped(
+				"%s is running but auto-suppress is off. Calibration math may be disturbed by its "
+				"velocity scaling. Either re-enable auto-suppress, manually pick devices in the list "
+				"below, or stop %s.",
+				tool, tool);
+			ImGui::PopStyleColor();
+		}
+		ImGui::Separator();
+	}
+
+	ImGui::TextWrapped(
+		"Native prediction suppression replaces external tools like OVR-SmoothTracking. When a "
+		"device is enabled below, the SteamVR driver zeroes its velocity/acceleration on every pose "
+		"update — defeating SteamVR's pose extrapolation and any external smoothing tool that "
+		"scales the same fields. Calibration math then sees clean (un-extrapolated) pose data.");
+	ImGui::Spacing();
+
+	bool autoSup = ctx.autoSuppressOnExternalTool;
+	if (ImGui::Checkbox("Auto-apply on calibration trackers when an external smoothing tool is detected", &autoSup)) {
+		ctx.autoSuppressOnExternalTool = autoSup;
+		SaveProfile(ctx);
+	}
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::TextDisabled("Per-device suppression");
+	ImGui::Spacing();
+
+	// Enumerate currently-known devices. Show a checkbox per device. The
+	// suppression set is keyed by serial — that survives ID reassignment, so a
+	// tracker that disconnects and reconnects keeps its suppression setting.
+	auto vrSystem = vr::VRSystem();
+	if (!vrSystem) {
+		ImGui::TextDisabled("(VR system not available)");
+		return;
+	}
+
+	bool anyShown = false;
+	char buffer[vr::k_unMaxPropertyStringSize];
+	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id) {
+		auto deviceClass = vrSystem->GetTrackedDeviceClass(id);
+		if (deviceClass == vr::TrackedDeviceClass_Invalid) continue;
+		// HMD shouldn't be suppressed (would degrade reprojection); skip.
+		if (deviceClass == vr::TrackedDeviceClass_HMD) continue;
+
+		vr::ETrackedPropertyError err = vr::TrackedProp_Success;
+		vrSystem->GetStringTrackedDeviceProperty(id, vr::Prop_SerialNumber_String, buffer, sizeof buffer, &err);
+		if (err != vr::TrackedProp_Success || buffer[0] == 0) continue;
+		std::string serial = buffer;
+
+		vrSystem->GetStringTrackedDeviceProperty(id, vr::Prop_RenderModelName_String, buffer, sizeof buffer, &err);
+		std::string model = (err == vr::TrackedProp_Success) ? buffer : "";
+
+		vrSystem->GetStringTrackedDeviceProperty(id, vr::Prop_TrackingSystemName_String, buffer, sizeof buffer, &err);
+		std::string sys = (err == vr::TrackedProp_Success) ? GetPrettyTrackingSystemName(buffer) : "";
+
+		bool enabled = ctx.suppressedSerials.find(serial) != ctx.suppressedSerials.end();
+		std::string label = "##suppress_" + serial;
+		if (ImGui::Checkbox(label.c_str(), &enabled)) {
+			if (enabled) ctx.suppressedSerials.insert(serial);
+			else ctx.suppressedSerials.erase(serial);
+			SaveProfile(ctx);
+		}
+		ImGui::SameLine();
+		ImGui::Text("%s  [%s]  serial: %s", model.c_str(), sys.c_str(), serial.c_str());
+		anyShown = true;
+	}
+	if (!anyShown) {
+		ImGui::TextDisabled("(No tracked devices found.)");
+	}
 }
 
 void CCal_BasicInfo() {

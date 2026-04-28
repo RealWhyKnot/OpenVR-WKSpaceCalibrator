@@ -26,5 +26,6 @@ The wiki git repo only materialises after a maintainer creates the first page th
 - [Architecture](Architecture.md)
 - [Continuous Calibration](Continuous-Calibration.md)
 - [Driver Protocol](Driver-Protocol.md)
+- [Prediction Suppression](Prediction-Suppression.md)
 - [Building](Building.md)
 - [Troubleshooting](Troubleshooting.md)

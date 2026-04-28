@@ -9,9 +9,13 @@
 #include <string>
 #include <vector>
 #include <iostream>
+#include <algorithm>
+#include <psapi.h>
 
 #include <Eigen/Dense>
 #include <GLFW/glfw3.h>
+
+#pragma comment(lib, "psapi.lib")
 
 inline vr::HmdQuaternion_t operator*(const vr::HmdQuaternion_t& lhs, const vr::HmdQuaternion_t& rhs) {
 	return {
@@ -317,6 +321,50 @@ namespace {
 
 		return CalCtx.referenceID >= 0 && CalCtx.targetID >= 0;
 	}
+
+	// Periodically scan running processes for known external "smooth tracking" tools
+	// (currently OVR-SmoothTracking by yuumu, sold on BOOTH). When detected, the
+	// overlay shows a warning banner and — if autoSuppressOnExternalTool is on —
+	// auto-enables freezePrediction on the calibration reference + target trackers
+	// so the math sees clean pose data even though an external smoothing process is
+	// also running. The native suppression feature is the real fix; this detector
+	// just makes sure users who haven't migrated yet still get correct math.
+	struct ExternalSmoothingTool {
+		const wchar_t* exeName;
+		const char* humanName;
+	};
+	static const ExternalSmoothingTool kKnownTools[] = {
+		// Best-effort match patterns. Filename match is case-insensitive.
+		{ L"OVR-SmoothTracking.exe", "OVR-SmoothTracking" },
+		{ L"OVRSmoothTracking.exe",  "OVR-SmoothTracking" },
+		{ L"ovr_smooth_tracking.exe", "OVR-SmoothTracking" },
+	};
+
+	bool DetectExternalSmoothingTool(std::string& outName) {
+		// EnumProcesses returns at most cb/sizeof(DWORD) PIDs; bump if it ever fills.
+		DWORD pids[2048];
+		DWORD bytesNeeded = 0;
+		if (!EnumProcesses(pids, sizeof pids, &bytesNeeded)) return false;
+		const DWORD count = bytesNeeded / sizeof(DWORD);
+
+		for (DWORD i = 0; i < count; i++) {
+			HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, pids[i]);
+			if (!h) continue;
+			wchar_t name[MAX_PATH] = {0};
+			DWORD len = GetModuleBaseNameW(h, NULL, name, MAX_PATH);
+			CloseHandle(h);
+			if (len == 0) continue;
+
+			// Case-insensitive match against known patterns.
+			for (const auto& tool : kKnownTools) {
+				if (_wcsicmp(name, tool.exeName) == 0) {
+					outName = tool.humanName;
+					return true;
+				}
+			}
+		}
+		return false;
+	}
 }
 
 void InitCalibrator()
@@ -362,6 +410,7 @@ namespace {
 		if (a.updateScale != b.updateScale) return false;
 		if (a.lerp != b.lerp) return false;
 		if (a.quash != b.quash) return false;
+		if (a.freezePrediction != b.freezePrediction) return false;
 		if (a.scale != b.scale) return false;
 		for (int i = 0; i < 3; i++) if (a.translation.v[i] != b.translation.v[i]) return false;
 		if (a.rotation.w != b.rotation.w || a.rotation.x != b.rotation.x ||
@@ -373,6 +422,7 @@ namespace {
 	bool FallbackPayloadEqual(const protocol::SetTrackingSystemFallback& a, const protocol::SetTrackingSystemFallback& b) {
 		if (memcmp(a.system_name, b.system_name, sizeof a.system_name) != 0) return false;
 		if (a.enabled != b.enabled) return false;
+		if (a.freezePrediction != b.freezePrediction) return false;
 		if (a.scale != b.scale) return false;
 		for (int i = 0; i < 3; i++) if (a.translation.v[i] != b.translation.v[i]) return false;
 		if (a.rotation.w != b.rotation.w || a.rotation.x != b.rotation.x ||
@@ -403,7 +453,8 @@ namespace {
 	}
 
 	void SendFallbackIfChanged(const std::string& systemName, bool enabled,
-		const Eigen::Vector3d& translationCm, const Eigen::Quaterniond& rotation, double scale)
+		const Eigen::Vector3d& translationCm, const Eigen::Quaterniond& rotation, double scale,
+		bool freezePrediction)
 	{
 		protocol::SetTrackingSystemFallback payload{};
 		size_t copyLen = systemName.size();
@@ -419,6 +470,7 @@ namespace {
 		payload.rotation.y = rotation.y();
 		payload.rotation.z = rotation.z();
 		payload.scale = scale;
+		payload.freezePrediction = freezePrediction;
 
 		if (g_lastFallbackSent && FallbackPayloadEqual(g_lastFallback, payload)) return;
 
@@ -502,15 +554,20 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 
 	// Push the per-tracking-system fallback so any device on `targetTrackingSystem`
 	// that connects between scans inherits the calibrated offset on its first pose
-	// update — without waiting for the next per-ID scan.
+	// update — without waiting for the next per-ID scan. The fallback's freeze flag
+	// fires whenever an external smoothing tool was detected and auto-suppress is on:
+	// any newly-connected matching-system tracker (handled exclusively by the
+	// fallback path until the next 1Hz scan tick promotes it to a per-ID transform)
+	// gets clean-velocity behaviour from its very first pose update.
 	if (ctx.enabled && !ctx.targetTrackingSystem.empty()) {
 		auto euler = ctx.calibratedRotation * EIGEN_PI / 180.0;
 		Eigen::Quaterniond rotQuat =
 			Eigen::AngleAxisd(euler(0), Eigen::Vector3d::UnitZ()) *
 			Eigen::AngleAxisd(euler(1), Eigen::Vector3d::UnitY()) *
 			Eigen::AngleAxisd(euler(2), Eigen::Vector3d::UnitX());
+		bool fallbackFreeze = ctx.externalSmoothingDetected && ctx.autoSuppressOnExternalTool;
 		SendFallbackIfChanged(ctx.targetTrackingSystem, true,
-			ctx.calibratedTranslation, rotQuat, ctx.calibratedScale);
+			ctx.calibratedTranslation, rotQuat, ctx.calibratedScale, fallbackFreeze);
 	}
 
 	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
@@ -642,6 +699,22 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		payload.quash = CalCtx.state == CalibrationState::Continuous && id == CalCtx.targetID && CalCtx.quashTargetInContinuous;
 		SetTargetSystemField(payload, ctx.targetTrackingSystem);
 
+		// Native prediction-suppression. Ask the driver to zero velocity/acceleration
+		// for this device when:
+		//   1. the user has explicitly added this serial to suppressedSerials, or
+		//   2. an external smoothing tool (e.g. OVR-SmoothTracking) is detected
+		//      running AND auto-suppress is on AND this device is the calibration
+		//      reference or target (the ones whose pose the math reads).
+		// Either case zeroes velocity inside the driver hook so SteamVR's predictor
+		// has nothing to extrapolate; clean math whether or not the user ran an
+		// external tool.
+		bool suppressBySerial = !g_lastSeenSerial[id].empty()
+			&& ctx.suppressedSerials.find(g_lastSeenSerial[id]) != ctx.suppressedSerials.end();
+		bool suppressByAuto = ctx.externalSmoothingDetected
+			&& ctx.autoSuppressOnExternalTool
+			&& (static_cast<int32_t>(id) == ctx.referenceID || static_cast<int32_t>(id) == ctx.targetID);
+		payload.freezePrediction = suppressBySerial || suppressByAuto;
+
 		SendDeviceTransformIfChanged(id, payload);
 	}
 
@@ -708,6 +781,26 @@ void CalibrationTick(double time)
 			// rescan devices every 10 seconds or so if we are using controller data
 			ctx.timeLastAssign = time;
 			AssignTargets();
+		}
+	}
+
+	// Re-scan for known external smoothing tools every 5 seconds. Cheap; the
+	// process enumeration is bounded and the result feeds both the UI banner and
+	// the auto-suppress logic in ScanAndApplyProfile.
+	if ((time - ctx.timeLastSmoothingScan) > 5.0) {
+		ctx.timeLastSmoothingScan = time;
+		std::string detectedName;
+		bool detected = DetectExternalSmoothingTool(detectedName);
+		if (detected != ctx.externalSmoothingDetected || detectedName != ctx.externalSmoothingToolName) {
+			ctx.externalSmoothingDetected = detected;
+			ctx.externalSmoothingToolName = detected ? detectedName : std::string();
+			if (detected && ctx.autoSuppressOnExternalTool) {
+				char msg[256];
+				snprintf(msg, sizeof msg,
+					"%s detected — auto-applying built-in prediction suppression on calibration trackers.\n",
+					detectedName.c_str());
+				CalCtx.Log(msg);
+			}
 		}
 	}
 
