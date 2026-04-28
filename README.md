@@ -20,8 +20,6 @@ This fork focuses on **continuous-calibration robustness**: auto-adopting tracke
 4. Run `SpaceCalibrator.exe` from the unzipped folder (or let it auto-register itself as a SteamVR overlay on first launch).
 5. Start SteamVR. Open the Space Calibrator overlay from the dashboard and follow the on-screen flow. See the [wiki](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki) for the calibration walkthrough and [Continuous Calibration](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Continuous-Calibration) for the auto-aligning mode.
 
-> If you previously installed Space Calibrator from Steam, see [Steam vs GitHub builds](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Home) — the fork detects and handles the conflict on launch.
-
 ## Build from source
 
 See the [Building wiki page](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Building) for the full walkthrough (toolchain, MSVC version, signing). The short version, after cloning:

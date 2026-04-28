@@ -39,7 +39,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           submodules: recursive
 
@@ -68,7 +68,7 @@ jobs:
           Copy-Item -Path "bin/driver_01spacecalibrator" -Destination $stage -Recurse
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: spacecalibrator-${{ github.sha }}
           path: stage

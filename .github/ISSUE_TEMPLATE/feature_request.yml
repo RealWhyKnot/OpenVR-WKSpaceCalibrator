@@ -6,8 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to suggest an improvement.
-        For quick discussion before opening a request, the upstream [Discord](https://discord.com/invite/m7g2Wyj) is also a good place.
+        Thanks for taking the time to suggest an improvement. Skim the [wiki](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki) first to check whether the behaviour you want already exists or has been considered.
 
   - type: textarea
     id: problem
