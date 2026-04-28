@@ -70,9 +70,32 @@ struct CalibrationContext
 	// offset, using the reference pose's reported linear/angular velocity. This
 	// compensates for systems with different latencies (e.g. a wireless tracker
 	// running ~10–30 ms behind a Lighthouse-tracked reference). Default 0 produces
-	// identical behaviour to before the offset was introduced. Auto-detection of
-	// the correct value is a separate feature (out of scope here).
+	// identical behaviour to before the offset was introduced. Auto-detection (see
+	// latencyAutoDetect / estimatedLatencyOffsetMs below) can override this at runtime.
 	double targetLatencyOffsetMs = 0.0;
+
+	// When true, the cross-correlation latency auto-detector overrides
+	// targetLatencyOffsetMs at each scan tick with the most recent estimate.
+	// When false, the manual targetLatencyOffsetMs value is used.
+	bool latencyAutoDetect = false;
+	// EMA of the estimated latency offset in milliseconds, produced by the
+	// auto-detector (see refSpeedHistory / targetSpeedHistory below). Persisted
+	// across overlay restarts so the auto-detect value is restored when the
+	// user re-enables latencyAutoDetect.
+	double estimatedLatencyOffsetMs = 0.0;
+
+	// Ring buffers of recent reference / target device linear-speed magnitudes,
+	// timestamped with the glfw time at the moment CollectSample pushed them. The
+	// auto-detector cross-correlates these once per second to estimate the time
+	// shift that maximises signal alignment; that lag is converted to ms and
+	// fed into estimatedLatencyOffsetMs through an EMA. Capacity targets ~5 s
+	// of history at the calibrator's natural sample rate. The buffers are
+	// trimmed in CollectSample when they exceed kLatencyHistoryCapacity below.
+	static const size_t kLatencyHistoryCapacity = 100;
+	std::deque<double> refSpeedHistory;
+	std::deque<double> targetSpeedHistory;
+	std::deque<double> speedSampleTimes;
+	double timeLastLatencyEstimate = 0.0;
 
 	protocol::AlignmentSpeedParams alignmentSpeedParams;
 	bool enableStaticRecalibration;
@@ -278,3 +301,17 @@ void DebugApplyRandomOffset();
 // underlying CalibrationCalc instance lives in an anonymous namespace inside
 // Calibration.cpp, so we expose this via a free function.
 int GetWatchdogResetCount();
+
+// Re-open the driver pose shared-memory segment. The IPC client invokes this
+// after a successful reconnect to vrserver: when vrserver crashes and respawns,
+// the named-mapping the overlay had open is destroyed, the mapped view detaches
+// silently, and ReadNewPoses() begins yielding zeros. Re-opening picks up the
+// new mapping the freshly-respawned driver creates.
+void ReopenShmem();
+
+// Returns the latency offset (in ms) that should currently be applied to
+// reference-pose extrapolation. When ctx.latencyAutoDetect is true, this is
+// the auto-detected EMA value (estimatedLatencyOffsetMs); otherwise it is the
+// user-supplied manual value (targetLatencyOffsetMs). Centralising the choice
+// here keeps the manual/auto switch a single read.
+double GetActiveLatencyOffsetMs(const CalibrationContext& ctx);
