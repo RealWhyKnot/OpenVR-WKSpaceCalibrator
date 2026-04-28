@@ -43,10 +43,37 @@ jobs:
         shell: pwsh
         run: |
           # makensis is not preinstalled on windows-latest. chocolatey is.
-          choco install nsis -y --no-progress
-          # Confirm makensis lands where we expect; fail fast if the install layout shifts.
+          # Chocolatey's community feed occasionally returns 504s during peak hours
+          # (a 504 broke a release on 2026-04-28); retry up to 3 times with backoff
+          # before giving up. Fall back to direct download from sourceforge if
+          # chocolatey stays down.
           $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
-          if (-not (Test-Path $makensis)) { throw "makensis.exe not found at $makensis after choco install nsis." }
+          $installed = $false
+          for ($i = 1; $i -le 3 -and -not $installed; $i++) {
+              Write-Host "choco install nsis (attempt $i/3)..."
+              choco install nsis -y --no-progress
+              if ($LASTEXITCODE -eq 0 -and (Test-Path $makensis)) {
+                  $installed = $true
+                  break
+              }
+              if ($i -lt 3) {
+                  Write-Host "Attempt $i failed; sleeping 15s before retry..."
+                  Start-Sleep -Seconds 15
+              }
+          }
+
+          if (-not $installed) {
+              # Fallback: pull NSIS directly from sourceforge. Slower but bypasses
+              # the chocolatey community feed entirely.
+              Write-Host "Chocolatey failed all attempts; falling back to direct sourceforge download."
+              $nsisUrl = "https://sourceforge.net/projects/nsis/files/NSIS%203/3.10/nsis-3.10-setup.exe/download"
+              $nsisInstaller = Join-Path $env:RUNNER_TEMP "nsis-setup.exe"
+              Invoke-WebRequest -Uri $nsisUrl -OutFile $nsisInstaller -UseBasicParsing -MaximumRedirection 5
+              & $nsisInstaller /S | Out-Null
+              if (-not (Test-Path $makensis)) {
+                  throw "makensis.exe not found at $makensis after both chocolatey and sourceforge fallback."
+              }
+          }
           Write-Host "makensis: $makensis"
 
       - name: Download VC++ Redistributable
