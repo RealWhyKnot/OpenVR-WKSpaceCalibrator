@@ -143,6 +143,15 @@ struct CalibrationContext
 	bool wasWaitingForTriggers = false;
 	bool hasAppliedCalibrationResult = false;
 
+	// Master kill switch for the Phase 1+2 silent drift-correction subsystem
+	// (HMD recenter compensation + T-pose / idle / hand-on-HMD / wake / floor-
+	// touch / residual-EMA silent recal). Default OFF: the subsystem proved to
+	// produce worse tracking than no-correction in real-world testing, and its
+	// internal "Not updating: ..." diagnostics leaked into the Calibration
+	// Progress popup. Users who want to test it can opt in via the Advanced
+	// tab; the default keeps one-shot users on pre-Phase-1 behaviour.
+	bool silentRecalEnabled = false;
+
 	float xprev, yprev, zprev;
 	int consecutiveHmdStalls = 0;
 
@@ -342,7 +351,14 @@ struct CalibrationContext
 
 		continuousCalibrationOffset = Eigen::Vector3d::Zero();
 
-		enableStaticRecalibration = false;
+		// Static recalibration: when Lock relative position has identified a
+		// rigid attachment (Lock=ON or Lock=AUTO and the auto-detector fired),
+		// snap to the locked relative pose if the live solver diverges from it.
+		// No-op for independent devices (no locked relative pose to snap to),
+		// so leaving it on by default is safe and accelerates recovery from
+		// brief tracking glitches on rigid setups. The user can still flip it
+		// off in Advanced if they want pure incremental behaviour.
+		enableStaticRecalibration = true;
 	}
 
 	struct Chaperone

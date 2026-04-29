@@ -975,7 +975,7 @@ bool CalibrationCalc::CalibrateByRelPose(Eigen::AffineCompact3d &out) const {
 
 
 
-bool CalibrationCalc::ComputeOneshot(const bool ignoreOutliers) {
+bool CalibrationCalc::ComputeOneshot(const bool ignoreOutliers, bool quiet) {
 	// Below ~6 samples, the step=5 outlier-detection produces no deltas, several
 	// downstream solves end up with empty matrices, and validation degenerates.
 	// Refuse to attempt a calibration on too-small inputs rather than letting
@@ -983,7 +983,7 @@ bool CalibrationCalc::ComputeOneshot(const bool ignoreOutliers) {
 	// caller already gates on SampleCount() (100+) so production never hits this
 	// branch — it's a safety net for direct callers (the replay harness, tests).
 	if (m_samples.size() < 6) {
-		CalCtx.Log("Not updating: too few samples to compute a calibration\n");
+		if (!quiet) CalCtx.Log("Not updating: too few samples to compute a calibration\n");
 		return false;
 	}
 
@@ -1002,6 +1002,12 @@ bool CalibrationCalc::ComputeOneshot(const bool ignoreOutliers) {
 		m_estimatedTransformation = calibration; // @NOTE: Normal calibration
 		m_isValid = true;
 		return true;
+	}
+	else if (quiet) {
+		// Silent caller: skip the user-facing rejection messaging entirely.
+		// They have their own accept/reject path that gates on RMS comparison
+		// and motion-coverage diversity; if their gate trips, that's enough.
+		return false;
 	}
 	else {
 		// Item #5: branch the user-facing log on which threshold tripped. The

@@ -700,8 +700,11 @@ namespace {
 		(void)silentRecalCalc.ValidateCalibration(curCal, &curRMS);
 
 		// Run the silent recal. ignoreOutliers=false -- we want the gate to
-		// fire on bad samples rather than fitting through them.
-		if (!silentRecalCalc.ComputeOneshot(/*ignoreOutliers=*/false)) {
+		// fire on bad samples rather than fitting through them. quiet=true so
+		// CalibrationCalc's user-facing "Not updating: ..." rejection messages
+		// don't leak into the Calibration Progress popup; we have our own
+		// accept/reject path with its own gates.
+		if (!silentRecalCalc.ComputeOneshot(/*ignoreOutliers=*/false, /*quiet=*/true)) {
 			return false;
 		}
 
@@ -2062,12 +2065,14 @@ void CalibrationTick(double time)
 	// user's body. Without this, every recenter breaks tracking visibly and
 	// the user has to manually recalibrate.
 	//
-	// Gates: a profile must be loaded; previous HMD frame must have been valid
-	// AND recent (<0.5 s) so we don't conflate tracking-dropout return with a
+	// Gates: master kill switch silentRecalEnabled must be on (default off
+	// after Phase 1+2 produced worse tracking in real-world testing); a
+	// profile must be loaded; previous HMD frame must have been valid AND
+	// recent (<0.5 s) so we don't conflate tracking-dropout return with a
 	// recenter; calibration must not be actively running (the cal math pins
 	// the reference frame across collection and a mid-buffer compensation
 	// would corrupt samples).
-	{
+	if (ctx.silentRecalEnabled) {
 		static bool s_havePrevHmdPose = false;
 		static Eigen::Affine3d s_prevHmdPose = Eigen::Affine3d::Identity();
 		static double s_prevHmdTime = 0.0;
@@ -2197,12 +2202,14 @@ void CalibrationTick(double time)
 	}
 
 	if (ctx.state == CalibrationState::None) {
-		// F: passive T-pose silent recalibration. Only meaningful when a
-		// profile is loaded; otherwise there's nothing to refine. We also
-		// suppress when the user has explicitly disabled the offset (the
-		// calibration is dormant and the driver isn't applying it -- a
-		// silent recal would surprise the user when they re-enable).
-		if (ctx.validProfile && ctx.enabled) {
+		// Phase 1+2 silent drift-correction subsystem. Master kill switch is
+		// CalCtx.silentRecalEnabled (default OFF) -- the subsystem produced
+		// worse tracking in real-world testing than leaving the calibration
+		// alone, and its internal "Not updating: ..." diagnostics leaked into
+		// the user-facing Calibration Progress popup. Off-by-default keeps
+		// one-shot users on the well-tested pre-Phase-1 behaviour; opt-in
+		// from the Advanced tab.
+		if (ctx.silentRecalEnabled && ctx.validProfile && ctx.enabled) {
 			TickSilentTPoseRecal(time);
 		}
 		ctx.wantedUpdateInterval = 1.0;
