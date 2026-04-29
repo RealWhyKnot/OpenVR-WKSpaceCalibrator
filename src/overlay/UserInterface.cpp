@@ -43,7 +43,7 @@ static const ImGuiWindowFlags bareWindowFlags =
 
 void BuildContinuousCalDisplay();
 void ShowVersionLine();
-static void DrawModePill();
+static void GetModeStatus(const char*& label, const char*& tooltip, ImVec4& accent);
 static void DrawUpdateBanner();
 static void DrawVRWaitingBanner();
 static void CCal_DrawLogsPanel();
@@ -194,26 +194,22 @@ static void DrawStatusDot(ImU32 color, float radiusScale = 0.32f) {
 
 void ShowVersionLine() {
 	// Footer is two short rows:
-	//   row 1: [MODE PILL]   Driver: ...   |   Space Calibrator vX
-	//   row 2: Hover for tooltips. Right-click sliders to reset.
-	// The mode pill and the hover-tip used to live at the top of every tab,
-	// stacking up vertical real estate above the actually-actionable
-	// content. Pinning them in the footer means the user always knows the
-	// session state + the tooltip hint without those panels eating space
-	// inside each tab.
-	const float pillHeight = ImGui::GetTextLineHeight() + 8.0f; // padding from DrawModePill
-	const float tipHeight  = ImGui::GetTextLineHeight() + 4.0f;
-	const float footerH = pillHeight + tipHeight + 6.0f;
+	//   row 1: Hover for tooltips. Right-click sliders to reset.
+	//   row 2: ● Driver: ...   |   Space Calibrator <build>   |   mode
+	// The hover tip sits above so the more-prominent status row is
+	// visually anchored to the bottom edge of the window.
+	const float lineH  = ImGui::GetTextLineHeight();
+	const float footerH = lineH * 2.0f + 12.0f;
 	ImGui::SetNextWindowPos(ImVec2(10.0f, ImGui::GetWindowHeight() - footerH));
 	if (!ImGui::BeginChild("bottom line", ImVec2(ImGui::GetWindowWidth() - 20.0f, footerH), ImGuiChildFlags_None)) {
 		ImGui::EndChild();
 		return;
 	}
 
-	// --- Row 1: mode pill + driver status + version ---
-	DrawModePill();
-	ImGui::SameLine();
+	// --- Row 1: hover-for-tooltip hint ---
+	ImGui::TextDisabled("Hover any setting for help. Right-click a slider to reset it.");
 
+	// --- Row 2: driver status + version + mode ---
 	// Driver-connection dot. Three states:
 	//   green  - connected, everything's working.
 	//   amber  - VR stack hasn't connected yet (SteamVR not running, or the
@@ -222,133 +218,100 @@ void ShowVersionLine() {
 	//   red    - established connection has dropped (IPC pipe broke after
 	//            initial handshake). This is the case where reinstalling the
 	//            driver is genuinely the right advice.
-	// The version we show is the build-time client protocol version --
-	// IPCClient::Connect() throws unless the driver reports the same number,
-	// so when IsConnected() is true that number is also the live driver
-	// version.
 	const bool driverConnected = Driver.IsConnected();
 	if (driverConnected) {
 		DrawStatusDot(IM_COL32(80, 200, 120, 255));
 		ImGui::TextColored(ImVec4(0.5f, 0.85f, 0.55f, 1.0f),
 			"Driver: connected (v%u)", (unsigned)protocol::Version);
 	} else if (!IsVRReady()) {
-		// Pre-connection. Not an error; SteamVR just isn't up yet.
 		DrawStatusDot(IM_COL32(220, 170, 60, 255));
 		ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.40f, 1.0f),
 			"Driver: waiting for SteamVR");
 	} else {
-		// We did successfully connect to OpenVR (so IsVRReady is true), but the
-		// IPC pipe is down. That means SteamVR is running without our driver
-		// loaded -- typically a missing or broken driver install.
 		DrawStatusDot(IM_COL32(220, 80, 80, 255));
 		ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.45f, 1.0f),
 			"Driver: disconnected — reinstall the SteamVR driver");
 	}
 
 	ImGui::SameLine();
-	ImGui::Text("  |  Space Calibrator v" SPACECAL_VERSION_STRING);
+	ImGui::Text("  |  Space Calibrator " SPACECAL_BUILD_STAMP);
 	if (runningInOverlay)
 	{
 		ImGui::SameLine();
 		ImGui::Text("- close VR overlay to use mouse");
 	}
 
-	// --- Row 2: hover-for-tooltip hint ---
-	ImGui::TextDisabled("Hover any setting for help. Right-click a slider to reset it.");
+	// Mode label after the version. Plain text styled the same way as the
+	// driver-status text -- we apply the per-mode accent colour but no
+	// rounded-pill background. Tooltip on hover for the longer
+	// explanation.
+	{
+		const char* modeLabel = nullptr;
+		const char* modeTooltip = nullptr;
+		ImVec4 modeAccent;
+		GetModeStatus(modeLabel, modeTooltip, modeAccent);
+		ImGui::SameLine();
+		ImGui::TextColored(modeAccent, "  |  %s", modeLabel);
+		if (modeTooltip && ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("%s", modeTooltip);
+		}
+	}
 
 	ImGui::EndChild();
 }
 
-// Render the persistent rounded "mode pill" that summarises the current
-// calibration state. Called from BuildContinuousCalDisplay (and BuildMainWindow
-// for the non-continuous flows) so the user always sees at a glance whether a
-// fixed offset is live, continuous mode is updating, etc.
-static void DrawModePill() {
+// Compute the current calibration-state label + tooltip + accent colour.
+// Used by the footer where it renders as plain text styled like the
+// surrounding driver-status / version row, rather than a coloured pill.
+static void GetModeStatus(const char*& label, const char*& tooltip, ImVec4& accent) {
 	const auto state = CalCtx.state;
 	const bool validProfile = CalCtx.validProfile;
 	const bool enabled = CalCtx.enabled;
 
-	const char* label = nullptr;
-	const char* tooltip = nullptr;
-	ImVec4 textColor;
-	ImVec4 bgColor;
-
 	if (!validProfile) {
-		label = "[NO PROFILE]";
+		label = "no profile";
 		tooltip = "No saved calibration profile is loaded.\n"
 		          "Hit \"Start Calibration\" or \"Continuous Calibration\" below to create one.";
-		textColor = ImVec4(0.85f, 0.85f, 0.85f, 1.0f);
-		bgColor   = ImVec4(0.30f, 0.30f, 0.30f, 1.0f);
+		accent = ImVec4(0.70f, 0.70f, 0.70f, 1.0f);
 	} else if (state == CalibrationState::ContinuousStandby) {
-		label = "[STANDBY — waiting for tracking]";
+		label = "standby — waiting for tracking";
 		tooltip = "Continuous calibration is on, but the reference or target tracker isn't currently\n"
 		          "reporting valid poses. Calibration resumes automatically when both come back online.";
-		textColor = ImVec4(0.95f, 0.95f, 0.95f, 1.0f);
-		bgColor   = ImVec4(0.40f, 0.40f, 0.42f, 1.0f);
+		accent = ImVec4(0.85f, 0.85f, 0.55f, 1.0f);
 	} else if (state == CalibrationState::Continuous) {
-		// Amber when we've been rejecting samples for a while — calibration is
-		// nominally running but hasn't accepted anything recently.
 		const double now = ImGui::GetTime();
 		const double sinceAccept = now - Metrics::error_currentCal.lastTs();
 		const bool searching = Metrics::consecutiveRejections.last() > 10.0;
 		const bool recentlyUpdated = sinceAccept >= 0.0 && sinceAccept < 5.0;
 		if (searching) {
-			label = "[LIVE — searching]";
+			label = "live — searching";
 			tooltip = "Continuous calibration is running but hasn't accepted a new estimate in a while.\n"
 			          "Usually means the user isn't moving enough to give the solver useful samples.\n"
 			          "Try slowly rotating + translating the target tracker through varied directions.";
-			textColor = ImVec4(0.10f, 0.10f, 0.10f, 1.0f);
-			bgColor   = ImVec4(0.95f, 0.70f, 0.20f, 1.0f);
+			accent = ImVec4(0.95f, 0.70f, 0.20f, 1.0f);
 		} else if (recentlyUpdated) {
-			label = "[LIVE — updating]";
+			label = "live — updating";
 			tooltip = "Continuous calibration is running and just accepted a fresh estimate.\n"
 			          "The driver is blending toward the new offset; if Recalibrate-on-movement is on,\n"
 			          "the blend only progresses while the device is actively moving.";
-			textColor = ImVec4(0.95f, 0.95f, 1.00f, 1.0f);
-			bgColor   = ImVec4(0.20f, 0.50f, 0.85f, 1.0f);
+			accent = ImVec4(0.55f, 0.75f, 0.95f, 1.0f);
 		} else {
-			label = "[LIVE]";
+			label = "live";
 			tooltip = "Continuous calibration is running and the current estimate is being applied.\n"
 			          "No recent updates needed — the calibration is stable.";
-			textColor = ImVec4(0.95f, 0.95f, 1.00f, 1.0f);
-			bgColor   = ImVec4(0.25f, 0.45f, 0.75f, 1.0f);
+			accent = ImVec4(0.55f, 0.75f, 0.95f, 1.0f);
 		}
 	} else if (enabled && state == CalibrationState::None) {
-		label = "[FIXED OFFSET ACTIVE]";
+		label = "fixed offset active";
 		tooltip = "A one-shot calibration is applied as a fixed offset. The driver applies the\n"
 		          "stored transform; no continuous re-solving. Switch to Continuous mode if the\n"
 		          "offset drifts over time.";
-		textColor = ImVec4(0.10f, 0.20f, 0.10f, 1.0f);
-		bgColor   = ImVec4(0.45f, 0.80f, 0.45f, 1.0f);
+		accent = ImVec4(0.55f, 0.85f, 0.55f, 1.0f);
 	} else {
-		// validProfile but not enabled and not in a continuous state — treat as
-		// idle/no-op rather than hide the pill entirely so the user always has
-		// a status they can point to in a bug report.
-		label = "[IDLE]";
+		label = "idle";
 		tooltip = "A profile is loaded but no calibration is being applied. This usually means the\n"
 		          "current HMD tracking system doesn't match the profile's reference system.";
-		textColor = ImVec4(0.85f, 0.85f, 0.85f, 1.0f);
-		bgColor   = ImVec4(0.30f, 0.30f, 0.30f, 1.0f);
-	}
-
-	// Draw a rounded filled rectangle behind the label. Kept compact so the pill
-	// doesn't push the rest of the UI down too much.
-	const ImVec2 textSize = ImGui::CalcTextSize(label);
-	const ImVec2 padding(10.0f, 4.0f);
-	ImVec2 cursor = ImGui::GetCursorScreenPos();
-	ImVec2 rectMin = cursor;
-	ImVec2 rectMax(cursor.x + textSize.x + padding.x * 2.0f,
-	               cursor.y + textSize.y + padding.y * 2.0f);
-	ImDrawList* dl = ImGui::GetWindowDrawList();
-	dl->AddRectFilled(rectMin, rectMax, ImGui::GetColorU32(bgColor), 8.0f);
-	dl->AddText(ImVec2(rectMin.x + padding.x, rectMin.y + padding.y),
-	            ImGui::GetColorU32(textColor), label);
-	// Use a Dummy widget for layout reservation AND hover-detection. ImGui's
-	// IsItemHovered() checks the last submitted widget, so the Dummy must come
-	// before the SetTooltip — which is the call below.
-	ImGui::Dummy(ImVec2(textSize.x + padding.x * 2.0f, textSize.y + padding.y * 2.0f));
-	if (tooltip && ImGui::IsItemHovered()) {
-		ImGui::SetTooltip("%s", tooltip);
+		accent = ImVec4(0.70f, 0.70f, 0.70f, 1.0f);
 	}
 }
 
@@ -1348,7 +1311,11 @@ static void CCal_DrawLogsPanel() {
 	if (state.files.empty()) {
 		ImGui::TextDisabled("(No log files found in the Logs directory.)");
 	} else {
-		// Selectable list of log files, newest first.
+		// Selectable list of log files, newest first. Each row has a small
+		// Delete button on the right; clicking it removes the file from disk
+		// and rebuilds the list. Selection state stays consistent (clamped
+		// to the new file count) so the action buttons below don't reference
+		// a stale index.
 		const float listHeight = ImGui::GetTextLineHeightWithSpacing() * 8.0f;
 		if (ImGui::BeginChild("##logs_list",
 				ImVec2(0, listHeight), ImGuiChildFlags_Border)) {
@@ -1359,8 +1326,34 @@ static void CCal_DrawLogsPanel() {
 					f.name.c_str(),
 					FormatBytesShort(f.sizeBytes).c_str(),
 					FormatFileAge(f.mtimeFileTime).c_str());
-				if (ImGui::Selectable(label, state.selectedIdx == i)) {
+
+				// Reserve room for the Delete button on the right edge so
+				// the Selectable doesn't fill the whole line.
+				const float deleteBtnWidth = 70.0f;
+				const float rowWidth = ImGui::GetContentRegionAvail().x - deleteBtnWidth - 8.0f;
+				if (ImGui::Selectable(label, state.selectedIdx == i, 0, ImVec2(rowWidth, 0))) {
 					state.selectedIdx = i;
+				}
+				ImGui::SameLine();
+				char delId[64];
+				snprintf(delId, sizeof delId, "Delete##log%d", i);
+				if (ImGui::SmallButton(delId)) {
+					// Best-effort delete -- DeleteFileW returns non-zero on
+					// success. If it fails (file in use, permission), surface
+					// the error in the same transient hint slot the Copy path
+					// button uses.
+					BOOL ok = DeleteFileW(state.files[i].fullPath.c_str());
+					if (ok) {
+						state.copyHint = "Deleted " + state.files[i].name;
+					} else {
+						state.copyHint = "Could not delete (file may be in use)";
+					}
+					state.copyHintExpireTime = ImGui::GetTime() + 2.5;
+					RebuildLogsList();
+					if (state.selectedIdx >= (int)state.files.size()) {
+						state.selectedIdx = -1;
+					}
+					break; // list mutated, bail this iteration
 				}
 			}
 		}
@@ -1654,17 +1647,9 @@ static void OneShot_DrawSettings() {
 			                  "OFF: never adjust the calibration based on base station poses.");
 		}
 
-		// --- Debug logs ---
-		ImGui::TableNextRow();
-		ImGui::TableSetColumnIndex(0);
-		ImGui::AlignTextToFramePadding();
-		ImGui::TextUnformatted("Enable debug logs");
-		ImGui::TableSetColumnIndex(1);
-		ImGui::Checkbox("##oneshot_debug_logs", &Metrics::enableLogs);
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("Write a per-tick CSV log of calibration state. Useful for bug reports.\n"
-			                  "The Logs tab lists captured sessions and lets you copy paths.");
-		}
+		// (Enable debug logs toggle removed -- it lives in the Logs tab now,
+		// where the user can flip it on right where they're managing the
+		// log files.)
 
 		ImGui::EndTable();
 	}
@@ -1814,14 +1799,16 @@ void CCal_BasicInfo() {
 
 		ImGui::EndTable();
 	}
-	ImGui::EndGroupPanel(); // Actions
 
-	// Profile-mismatch banner -- moved here so the Devices panel (the more
-	// useful "where does my hardware stand right now" readout) can sit at
-	// the very top of the tab. The banner only renders when the active
-	// HMD's tracking system disagrees with the saved profile, so users
-	// without a mismatch never see it.
+	// Profile-mismatch banner lives inside the Actions panel. The banner
+	// only renders when the active HMD's tracking system disagrees with
+	// the saved profile, so users without a mismatch see no extra rows.
+	// Inside-the-panel placement keeps the recovery actions (Clear
+	// profile / Recalibrate) visually grouped with the rest of the
+	// session-control buttons above.
 	DrawProfileMismatchBanner();
+
+	ImGui::EndGroupPanel(); // Actions
 
 	// === Common settings ===================================================
 	// The handful of settings most users actually touch.  Two-column table
@@ -1917,22 +1904,8 @@ void CCal_BasicInfo() {
 				"Default ON. Turn off to get instantaneous time-based blending regardless of motion state.");
 		}
 
-		// --- Debug logs ---
-		// Lives inside the same panel so the user doesn't have a checkbox
-		// floating in white space below the panel like before. Functionally
-		// the same; visually consistent with everything else in Basic.
-		ImGui::TableNextRow();
-		ImGui::TableSetColumnIndex(0);
-		ImGui::AlignTextToFramePadding();
-		ImGui::TextUnformatted("Enable debug logs");
-		ImGui::TableSetColumnIndex(1);
-		ImGui::Checkbox("##basic_debug_logs", &Metrics::enableLogs);
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("Write a per-tick CSV log of calibration state to\n"
-			                  "%%LocalAppDataLow%%\\SpaceCalibrator\\Logs\\spacecal_log.<date>.txt\n"
-			                  "Useful for bug reports. The Logs tab lists all captured sessions\n"
-			                  "and lets you copy paths or open the folder for attaching files.");
-		}
+		// (Enable debug logs toggle moved to the Logs tab where the user is
+		// already managing log files. The checkbox here was redundant.)
 
 		ImGui::EndTable();
 	}

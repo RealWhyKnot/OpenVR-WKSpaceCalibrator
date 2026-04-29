@@ -131,6 +131,8 @@ namespace {
 	struct GraphInfo {
 		const char* name;
 		void (*callback)();
+		const char* tooltip; // shown on hover for users who don't know what
+		                     // the metric means.
 	};
 
 	void SetupXAxis() {
@@ -374,18 +376,54 @@ namespace {
 	}
 
 	const struct GraphInfo graphs[] = {
-		{ "Position Error", G_PosOffset_PosError },
-		{ "Axis Variance", G_AxisVariance },
-		{ "Offset: Raw Computed", G_PosOffset_RawComputed },
-		{ "Offset: Current Calibration", G_PosOffset_CurrentCal },
-		{ "Offset: Last Sample", G_PosOffset_LastSample },
-		{ "Offset: By Rel Pose", G_PosOffset_ByRelPose },
-		{ "Processing time", G_ComputationTime },
-		{ "Reference Jitter", G_JitterReference },
-		{ "Target Jitter", G_JitterTarget },
-		{ "Rotation Condition Ratio", G_RotationConditionRatio },
-		{ "Consecutive Rejections", G_ConsecutiveRejections },
-		{ "Apply rate (Hz)", G_ApplyRate }
+		{ "Position Error", G_PosOffset_PosError,
+			"RMS position error of the various calibration estimates against the live samples (mm).\n"
+			"'Active' is the offset currently applied to your body trackers. 'Candidate' is the latest\n"
+			"value the solver computed before the acceptance gate. Lower is tighter; bumps usually\n"
+			"correspond to the math finding (and gating on) a fresh estimate." },
+		{ "Axis Variance", G_AxisVariance,
+			"4D quaternion-PCA variance of the rotation samples in the buffer.\n"
+			"Drops toward zero when rotational motion is too planar (e.g. only yaw, no pitch/roll),\n"
+			"which is the math telling you it can't reliably fit a 3D rotation from your samples." },
+		{ "Offset: Raw Computed", G_PosOffset_RawComputed,
+			"The most recent position offset the math computed, in mm, before the acceptance gate.\n"
+			"Can be noisy as the solver experiments. Compare to Current Calibration to see how often\n"
+			"a candidate beats the gate." },
+		{ "Offset: Current Calibration", G_PosOffset_CurrentCal,
+			"The position offset (mm) currently applied to body trackers.\n"
+			"This is what the driver is publishing, blended toward each accepted candidate." },
+		{ "Offset: Last Sample", G_PosOffset_LastSample,
+			"Per-tick offset (mm) between the reference HMD pose and the target tracker pose on\n"
+			"the most recent sample. Mostly useful for sanity-checking the input stream." },
+		{ "Offset: By Rel Pose", G_PosOffset_ByRelPose,
+			"Position offset (mm) implied by the locked reference->target relative pose, when\n"
+			"Lock relative position is on or AUTO has detected a rigid attachment.\n"
+			"Stays flat for rigid setups; diverges from Current Calibration when the live solver\n"
+			"is fighting the lock." },
+		{ "Processing time", G_ComputationTime,
+			"Per-tick math computation time (ms). Useful for performance debugging on slower\n"
+			"machines or after large profile changes -- normal values are well under 5 ms." },
+		{ "Reference Jitter", G_JitterReference,
+			"Welford std-dev of the reference HMD's translation over the sample buffer (mm).\n"
+			"High values indicate unstable tracking on the reference (e.g. lighthouse occlusion,\n"
+			"wireless dropout) and feed AUTO calibration speed's bucketing." },
+		{ "Target Jitter", G_JitterTarget,
+			"Welford std-dev of the target tracker's translation over the sample buffer (mm).\n"
+			"Same shape as Reference Jitter, for the target side. Big differences between the\n"
+			"two suggest one tracking system is noisier than the other." },
+		{ "Rotation Condition Ratio", G_RotationConditionRatio,
+			"2D Kabsch min/max singular-value ratio. A measure of how varied the rotation samples\n"
+			"are -- drops toward zero when motion is single-axis. The math gates on this; values\n"
+			"under ~0.05 mean the rotation fit isn't trustworthy." },
+		{ "Consecutive Rejections", G_ConsecutiveRejections,
+			"Number of consecutive ticks the acceptance gate has refused a new estimate.\n"
+			"Climbs when the user isn't moving enough or the samples are too noisy. Watchdog\n"
+			"resets when this gets very high (~50)." },
+		{ "Apply rate (Hz)", G_ApplyRate,
+			"Per-tracking-system rate at which the driver applies pose transforms, in Hz.\n"
+			"Should hover around 100-150 Hz on a healthy session. Drops indicate the driver\n"
+			"is dedup-suppressing identical transforms (Per-ID), or falling back to the\n"
+			"system-wide transform (Fallback)." }
 	};
 
 	const int N_GRAPHS = sizeof(graphs) / sizeof(graphs[0]);
@@ -446,10 +484,20 @@ void ShowCalibrationDebug(int rows, int cols) {
 					if (ImGui::Selectable(graphs[j].name, isSelected)) {
 						curIndexes[i] = j;
 					}
+					// Per-row tooltip in the dropdown -- so the user can read
+					// the description of any graph before switching to it.
+					if (graphs[j].tooltip && ImGui::IsItemHovered()) {
+						ImGui::SetTooltip("%s", graphs[j].tooltip);
+					}
 
 					if (isSelected) ImGui::SetItemDefaultFocus();
 				}
 				ImGui::EndCombo();
+			}
+			// Tooltip on the closed combo too, so the user doesn't have to
+			// open it to see what the currently-displayed graph means.
+			if (graphs[curIndexes[i]].tooltip && ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("%s", graphs[curIndexes[i]].tooltip);
 			}
 
 			graphs[curIndexes[i]].callback();

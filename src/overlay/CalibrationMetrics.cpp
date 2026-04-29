@@ -91,7 +91,20 @@ namespace Metrics {
 		CurrentTime = timestamp();
 	}
 
-	bool enableLogs = false;
+	// Debug-log toggle. Default depends on the build channel:
+	//   - dev builds (build.ps1 without -Version, SPACECAL_BUILD_CHANNEL="dev"):
+	//     ON. Local development sessions reproduce issues that benefit from
+	//     a CSV trail without the developer having to remember to flip the
+	//     toggle every launch.
+	//   - release builds (CI tag publish, SPACECAL_BUILD_CHANNEL="release"):
+	//     OFF. End users only opt in when investigating a bug.
+	// The user can flip it either direction from the Logs tab regardless;
+	// this is just the boot default.
+#if defined(SPACECAL_BUILD_CHANNEL_IS_DEV)
+	bool enableLogs = true;
+#else
+	bool enableLogs = (std::string(SPACECAL_BUILD_CHANNEL) == "dev");
+#endif
 
 	static std::ofstream logFile;
 	static bool logFileIsOpen = false;
