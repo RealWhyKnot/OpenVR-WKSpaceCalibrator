@@ -183,7 +183,7 @@ static picojson::object SaveAlignmentParams(CalibrationContext& ctx) {
 	return obj;
 }
 
-static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
+void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 {
 	picojson::value v;
 	std::string err = picojson::parse(v, stream);
@@ -483,7 +483,7 @@ static void WriteStandby(StandbyDevice& device, picojson::value& value) {
 }
 
 
-static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
+void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 {
 	if (!ctx.validProfile) {
 		return;
