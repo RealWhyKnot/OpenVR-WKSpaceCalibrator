@@ -25,17 +25,17 @@ If you're seeing genuinely stuck behavior (waited > 30 seconds, the watchdog nev
 
 **Symptom:** you ran a one-shot calibration once and don't want continuous mode running, but tracking has drifted over the session.
 
-Yes — there's a passive silent-recal subsystem that runs whenever continuous calibration is off and a profile is loaded. It watches for natural moments to fix drift without any user action: T-poses (perfect for VRChat), idle stillness, the hand-on-HMD adjustment moment, HMD wake (putting the headset back on), and a residual-error monitor that fires when the calibration silently degrades. There's also a floor-touch Y-anchor that fires when a body tracker is sitting on the floor. See [Continuous Calibration § Silent drift correction](Continuous-Calibration#silent-drift-correction-one-shot-users-only) for the full list.
+There's an experimental passive silent-recal subsystem (Phase 1+2) that watches for natural moments to silently re-fit your calibration: T-poses, idle stillness, hand-on-HMD adjustment, HMD wake events, residual-EMA drift, and floor-touch Y-anchor. It is **off by default** because in current testing it produces worse tracking than no correction in some setups. Opt in via the **Silent drift correction** checkbox in the Settings panel (one-shot Settings tab or continuous Basic). See [Continuous Calibration § Silent drift correction](Continuous-Calibration#silent-drift-correction-one-shot-users-only) for the trigger list.
 
-If the silent system isn't firing when you expect:
+If you've enabled it and it isn't firing when you expect:
 
-1. **Confirm the profile is loaded and enabled.** The mode pill at the top of the overlay should show `[FIXED OFFSET ACTIVE]` (or `[LIVE]` if you have continuous on, in which case the silent system intentionally isn't running). `[NO PROFILE]` means there's nothing to refine.
+1. **Confirm the toggle is on AND a profile is loaded and enabled.** The mode pill at the top should show `[FIXED OFFSET ACTIVE]`. `[NO PROFILE]` means there's nothing to refine. The silent-recal driver also no-ops while continuous mode (`[LIVE]`) is running -- continuous already updates every tick.
 2. **Confirm you're actually wearing the headset.** The whole subsystem suppresses itself when SteamVR reports the HMD as Idle / Standby / Idle_Timeout — i.e. the user has taken the headset off. Put it back on and give the activity-level a few seconds to flip to UserInteraction.
 3. **Throttle.** At most one accepted recal fires per ~30 seconds across all triggers. If you just had a recal accept, the next one won't fire for 30 s.
 4. **Acceptance gate.** A candidate must beat the current calibration's RMS by ≥10% to be applied. If the user has been moving very little or in a degenerate pattern (only side-to-side, etc.), there may not be enough motion variety in the buffer to find a meaningfully-better fit. Move around for ~30 s before expecting a fire.
 5. **Tracking-quality gate.** The triggers are suppressed when the most recent reference or target pose is anything other than `Running_OK` — wireless dropouts, out-of-bounds frames, etc. defer the trigger.
 
-If you'd rather see calibration corrections in real-time as you move, switch to continuous mode. The silent subsystem is specifically for users who don't want continuous mode running.
+If you'd rather see calibration corrections in real-time as you move, switch to continuous mode. The silent subsystem is specifically for users who don't want continuous mode running but want some passive maintenance.
 
 ## My body visibly drifts while I'm lying still
 
@@ -55,14 +55,11 @@ To intentionally restore the pre-feature instant-blend behavior (e.g. you specif
 
 **Symptom:** you press the Quest Home button to recenter your view (or your headset's tracking otherwise re-origins) and your body trackers visibly teleport to the wrong place.
 
-The HMD recenter compensation path detects this automatically. When the HMD's pose in reference-tracking world jumps by more than 30 cm or 30° in a single tick — faster than legitimate motion can produce — it interprets the jump as a driver-side re-origin and applies the same delta to the stored calibrated transform (primary plus every multi-ecosystem extra). The body trackers move with the new HMD frame instead of being orphaned in the old one.
+The HMD recenter compensation path can detect this automatically -- but it's **part of the experimental silent-recal subsystem and is off by default**. Toggle on via the **Silent drift correction** checkbox in Settings to enable it. When on, an HMD pose jump >30 cm or >30° in a single tick (faster than legitimate motion) is interpreted as a driver-side re-origin, and the same delta is applied to every stored calibrated transform so body trackers stay aligned with the user's body.
 
-Compensation is **suppressed during active calibration** (Begin/Rotation/Translation/Continuous): a recenter mid-session would corrupt the cal math's pinned reference frame. If you recentered while running a one-shot session, restart the session.
+Compensation is suppressed during active calibration (Begin/Rotation/Translation/Continuous) and outside `state == None`. It also requires the previous HMD frame to have been valid AND recent (< 0.5 s).
 
-If you're seeing a recenter-related miscompensation:
-
-1. The recenter check requires the previous frame's HMD pose to be valid AND recent (< 0.5 s) — a recenter coinciding with a longer tracking dropout produces no detection. Result: the calibration isn't compensated, but it also isn't mis-compensated. The silent recal subsystem will fix it within ~30 s of fresh motion via the residual-EMA trigger.
-2. The check also requires `validProfile && enabled`. If you've manually disabled the offset, recenter compensation is skipped.
+If recenter compensation isn't doing what you expect, capture a debug log (the Logs tab is the easiest path) and attach it to a bug report -- this is exactly the kind of failure mode the team is debugging the silent-recal subsystem against.
 
 ## Newly connected tracker doesn't pick up the offset
 
