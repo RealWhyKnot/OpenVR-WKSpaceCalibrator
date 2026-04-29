@@ -93,7 +93,9 @@ Both the toggle and the EMA value persist in the registry profile (`latency_auto
 
 ## Silent drift correction (one-shot users only)
 
-When continuous calibration is **off** and a profile is loaded (the typical "I calibrated once and now I'm playing" flow), a separate passive subsystem watches for drift and silently corrects it. None of these triggers run while continuous calibration is active — the math there already updates every tick — and none run while a calibration session is in progress (Begin/Rotation/Translation states). They only fire when `state == None`, a profile is loaded, the offset is enabled, and the HMD's activity level is `UserInteraction` or `UserInteraction_Timeout` (i.e. the user is currently in VR, not just left the headset on a desk).
+> **Disabled by default.** Toggle on via the **"Silent drift correction"** checkbox in the Settings panel (continuous mode's Basic tab, or the non-continuous Settings tab). The subsystem produced worse tracking than no-correction in real-world testing during the Phase 1+2 rollout, and its internal "Not updating: ..." rejection diagnostics leaked into the user-facing Calibration Progress popup. The flag is persisted in the profile, so a one-time opt-in sticks across launches.
+
+When the toggle is on AND continuous calibration is off AND a profile is loaded (the typical "I calibrated once and now I'm playing" flow), a passive subsystem watches for drift and silently corrects it. None of these triggers run while continuous calibration is active — the math there already updates every tick — and none run while a calibration session is in progress (Begin/Rotation/Translation states). They only fire when `state == None`, the toggle is on, a profile is loaded, the offset is enabled, and the HMD's activity level is `UserInteraction` or `UserInteraction_Timeout` (i.e. the user is currently in VR, not just left the headset on a desk).
 
 A single 30-second throttle is shared across every trigger so the user never sees more than one accepted recal per ~30 s. Every full-recal trigger goes through the same accept-if-better gate: a candidate must beat the current calibration's RMS by ≥10% on the silent-recal sample buffer to be applied, otherwise the existing offset is left alone.
 
@@ -115,6 +117,20 @@ The silent-recal sample buffer is dedicated (`silentRecalCalc`, separate from th
 - A successful accepted recal (so the next trigger collects fresh post-recal motion rather than re-fitting against samples that already produced this offset).
 
 There's also an HMD recenter compensation path that runs every tick: when the HMD's pose in the reference tracking world jumps by >30 cm or >30° between two consecutive valid frames, the same delta is applied to every stored calibrated transform (primary + every additional ecosystem). This catches Quest Home-button recenters and Oculus Link resets, where the reference-tracking-world re-origins but the body-tracker world doesn't — without this, the user's body trackers would visibly fly across the room.
+
+## One-shot auto-completion (Rotation phase)
+
+The one-shot path (Start Calibration -> Rotation -> ComputeOneshot) used to be a fixed-duration sample collection: wave for X seconds (X = AUTO-resolved buffer size), math runs once, pass-or-fail. With AUTO picking VERY_SLOW (500 samples = ~25 s) for noisy IMU rigs, a user could wave for the full duration and then get rejected for "motion too planar" -- a frustrating outcome the program could have prevented mid-collection.
+
+The current behaviour gates the math on **both** conditions:
+1. Buffer is at least the AUTO-resolved size (noise averaging satisfied).
+2. `TranslationDiversity` AND `RotationDiversity` are both ≥ 70% (motion variety satisfied).
+
+Below the variety threshold, the buffer rolls forward (oldest sample dropped each tick) and CollectSample keeps going. The motion-coverage progress bars in the Calibration Progress popup show both diversities in real time, so the user can see whether they're missing a translation axis or a rotation direction. Above the variety threshold, ComputeOneshot runs and -- if RMS-valid -- the calibration is saved and the popup advances.
+
+## AUTO calibration speed (jitter staleness fix)
+
+The AUTO calibration speed selector (FAST / SLOW / VERY_SLOW based on observed jitter) reads `Metrics::jitterRef.last()` and `Metrics::jitterTarget.last()` to bucket the right speed. Originally those metrics were pushed exactly once -- in the Begin state, when the sample buffer was still empty -- so jitter always read 0 and AUTO was permanently stuck on FAST. Fixed by pushing jitter from inside `CollectSample` after every accepted sample; the buckets now reflect live tracker quality. If you see the resolved-speed caption show "(jitter ref 0.00 mm, target 0.00 mm)" you're on a build older than this fix.
 
 ## Diagnostics
 
