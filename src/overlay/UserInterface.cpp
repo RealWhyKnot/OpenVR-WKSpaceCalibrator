@@ -81,7 +81,17 @@ void BuildMainWindow(bool runningInOverlay_)
 	ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
 	ImGui::SetNextWindowSize(io.DisplaySize, ImGuiCond_Always);
 
-	if (!ImGui::Begin("SpaceCalibrator", nullptr, bareWindowFlags))
+	// Scroll allowed on the main window: bareWindowFlags disables it (right
+	// for the calibration-progress popup and the continuous-mode root,
+	// where content fits by construction), but the main page mixes
+	// device dropdowns + action buttons + a tab bar and can overflow on
+	// short windows. Without this, content past the bottom edge gets
+	// silently clipped (no scrollbar, no scroll-with-mouse), which is
+	// what produced the "I can't scroll down" report.
+	const ImGuiWindowFlags mainFlags =
+		bareWindowFlags & ~ImGuiWindowFlags_NoScrollbar
+		                & ~ImGuiWindowFlags_NoScrollWithMouse;
+	if (!ImGui::Begin("SpaceCalibrator", nullptr, mainFlags))
 	{
 		ImGui::End();
 		return;
@@ -1656,6 +1666,74 @@ static void OneShot_DrawSettings() {
 
 	ImGui::EndGroupPanel(); // Settings
 
+	// Calibration speed -- moved here from above the tab bar (was being
+	// rendered inline in BuildMenu, stacking the speed picker on top of the
+	// device + action rows and pushing the tabs off-screen on small
+	// windows). Lives in Settings rather than Advanced because it's a
+	// common knob most users want one click away.
+	ImGui::Spacing();
+	ImGui::BeginGroupPanel("Calibration speed", panelSize);
+	{
+		auto speed = CalCtx.calibrationSpeed;
+		struct Opt { const char* label; CalibrationContext::Speed value; const char* tooltip; };
+		const Opt opts[] = {
+			{ "Auto",      CalibrationContext::AUTO,
+				"Pick FAST / SLOW / VERY SLOW automatically from observed jitter. Recommended." },
+			{ "Fast",      CalibrationContext::FAST,
+				"100 samples (~5 s buffer). Best for low-jitter setups where motion is varied." },
+			{ "Slow",      CalibrationContext::SLOW,
+				"250 samples (~12 s). Better for moderately noisy trackers." },
+			{ "Very Slow", CalibrationContext::VERY_SLOW,
+				"500 samples (~25 s). Use for noisy IMU-based body trackers." },
+		};
+		for (size_t i = 0; i < sizeof(opts) / sizeof(opts[0]); ++i) {
+			if (i > 0) ImGui::SameLine();
+			if (ImGui::RadioButton(opts[i].label, speed == opts[i].value)) {
+				CalCtx.calibrationSpeed = opts[i].value;
+				SaveProfile(CalCtx);
+			}
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("%s", opts[i].tooltip);
+			}
+		}
+	}
+	ImGui::EndGroupPanel();
+
+	// Chaperone -- moved here from BuildMenu for the same reason. Copy/Paste
+	// + auto-apply checkbox; Paste only meaningful when the profile already
+	// has stored bounds.
+	ImGui::Spacing();
+	ImGui::BeginGroupPanel("Chaperone bounds", panelSize);
+	{
+		ImGui::BeginDisabled(!IsVRReady());
+		if (ImGui::Button("Copy chaperone bounds to profile")) {
+			LoadChaperoneBounds();
+			SaveProfile(CalCtx);
+		}
+		ImGui::EndDisabled();
+		if (!IsVRReady() && ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Waiting for SteamVR.");
+		}
+		if (CalCtx.chaperone.valid) {
+			ImGui::SameLine();
+			ImGui::BeginDisabled(!IsVRReady());
+			if (ImGui::Button("Paste chaperone bounds")) {
+				ApplyChaperoneBounds();
+			}
+			ImGui::EndDisabled();
+			if (!IsVRReady() && ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("Waiting for SteamVR.");
+			}
+
+			if (ImGui::Checkbox("Paste automatically when geometry resets", &CalCtx.chaperone.autoApply)) {
+				SaveProfile(CalCtx);
+			}
+		} else {
+			ImGui::TextDisabled("(No bounds saved in profile yet -- press Copy first.)");
+		}
+	}
+	ImGui::EndGroupPanel();
+
 	// Wizard / reset actions, grouped in their own panel so they don't read
 	// as floating buttons under the Settings table.
 	ImGui::Spacing();
@@ -2034,79 +2112,12 @@ void BuildMenu(bool runningInOverlay)
 			}
 		}
 
-		width = ImGui::GetWindowContentRegionWidth();
-		scale = 1.0f;
-		if (CalCtx.chaperone.valid)
-		{
-			width -= style.FramePadding.x * 2.0f;
-			scale = 0.5;
-		}
-
-		ImGui::Text("");
-		ImGui::BeginDisabled(!IsVRReady());
-		if (ImGui::Button("Copy Chaperone Bounds to profile", ImVec2(width * scale, ImGui::GetTextLineHeight() * 2)))
-		{
-			LoadChaperoneBounds();
-			SaveProfile(CalCtx);
-		}
-		ImGui::EndDisabled();
-		if (!IsVRReady() && ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("Waiting for SteamVR.");
-		}
-
-		if (CalCtx.chaperone.valid)
-		{
-			ImGui::SameLine();
-			ImGui::BeginDisabled(!IsVRReady());
-			if (ImGui::Button("Paste Chaperone Bounds", ImVec2(width * scale, ImGui::GetTextLineHeight() * 2)))
-			{
-				ApplyChaperoneBounds();
-			}
-			ImGui::EndDisabled();
-			if (!IsVRReady() && ImGui::IsItemHovered()) {
-				ImGui::SetTooltip("Waiting for SteamVR.");
-			}
-
-			if (ImGui::Checkbox(" Paste Chaperone Bounds automatically when geometry resets", &CalCtx.chaperone.autoApply))
-			{
-				SaveProfile(CalCtx);
-			}
-		}
-
-		ImGui::Text("");
-		auto speed = CalCtx.calibrationSpeed;
-
-		ImGui::Columns(5, nullptr, false);
-		ImGui::Text("Calibration Speed");
-
-		ImGui::NextColumn();
-		if (ImGui::RadioButton(" Auto          ", speed == CalibrationContext::AUTO)) {
-			CalCtx.calibrationSpeed = CalibrationContext::AUTO;
-			SaveProfile(CalCtx);
-		}
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("Pick automatically from observed jitter. Recommended.");
-		}
-
-		ImGui::NextColumn();
-		if (ImGui::RadioButton(" Fast          ", speed == CalibrationContext::FAST)) {
-			CalCtx.calibrationSpeed = CalibrationContext::FAST;
-			SaveProfile(CalCtx);
-		}
-
-		ImGui::NextColumn();
-		if (ImGui::RadioButton(" Slow          ", speed == CalibrationContext::SLOW)) {
-			CalCtx.calibrationSpeed = CalibrationContext::SLOW;
-			SaveProfile(CalCtx);
-		}
-
-		ImGui::NextColumn();
-		if (ImGui::RadioButton(" Very Slow     ", speed == CalibrationContext::VERY_SLOW)) {
-			CalCtx.calibrationSpeed = CalibrationContext::VERY_SLOW;
-			SaveProfile(CalCtx);
-		}
-
-		ImGui::Columns(1);
+		// (Chaperone Copy/Paste buttons + autoApply moved to the Settings
+		// tab as the "Chaperone bounds" group panel.)
+		// (Calibration Speed picker moved to the Settings tab as the
+		// "Calibration speed" group panel.)
+		// Both used to render inline here, stacking on top of the action
+		// buttons and pushing the tab bar off-screen on small windows.
 	}
 	else if (CalCtx.state == CalibrationState::Editing)
 	{
