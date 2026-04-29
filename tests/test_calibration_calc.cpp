@@ -633,3 +633,76 @@ TEST(CalibrationCalcTest, JitterFunctionsAreNonZeroOnNoisyBuffer) {
     EXPECT_GT(calc.ReferenceJitter(), 0.0);
     EXPECT_GT(calc.TargetJitter(), 0.0);
 }
+
+// ---------------------------------------------------------------------------
+// TranslationDiversity boundary cases: empty / single-sample buffers report
+// 0; a buffer with a 30 cm spread per axis reports 1.0 (saturating); below
+// that, the score is the smallest-axis-range divided by 30 cm.
+// ---------------------------------------------------------------------------
+TEST(CalibrationCalcTest, TranslationDiversityBoundaryCases) {
+    CalibrationCalc calc;
+
+    // Empty.
+    EXPECT_DOUBLE_EQ(calc.TranslationDiversity(), 0.0);
+
+    // Single sample (n<2): still 0.
+    Pose ref; ref.rot = Eigen::Matrix3d::Identity(); ref.trans = Eigen::Vector3d::Zero();
+    Pose tgt; tgt.rot = Eigen::Matrix3d::Identity(); tgt.trans = Eigen::Vector3d(0.10, 0.10, 0.10);
+    calc.PushSample(Sample(ref, tgt, 0.0));
+    EXPECT_DOUBLE_EQ(calc.TranslationDiversity(), 0.0);
+
+    // Two samples, exactly 30 cm spread on every axis -> score 1.0.
+    Pose tgt2; tgt2.rot = Eigen::Matrix3d::Identity();
+    tgt2.trans = Eigen::Vector3d(0.10 + 0.30, 0.10 + 0.30, 0.10 + 0.30);
+    calc.PushSample(Sample(ref, tgt2, 0.01));
+    EXPECT_NEAR(calc.TranslationDiversity(), 1.0, 1e-9);
+
+    // Reset; spread of 15 cm on every axis -> score 0.5.
+    CalibrationCalc calc2;
+    Pose tgtA; tgtA.rot = Eigen::Matrix3d::Identity(); tgtA.trans = Eigen::Vector3d::Zero();
+    Pose tgtB; tgtB.rot = Eigen::Matrix3d::Identity(); tgtB.trans = Eigen::Vector3d(0.15, 0.15, 0.15);
+    calc2.PushSample(Sample(ref, tgtA, 0.0));
+    calc2.PushSample(Sample(ref, tgtB, 0.01));
+    EXPECT_NEAR(calc2.TranslationDiversity(), 0.5, 1e-9);
+
+    // Single-axis spread (Y only): smallest axis is X / Z = 0, score 0.
+    CalibrationCalc calc3;
+    Pose tgtY1; tgtY1.rot = Eigen::Matrix3d::Identity(); tgtY1.trans = Eigen::Vector3d(0, 0, 0);
+    Pose tgtY2; tgtY2.rot = Eigen::Matrix3d::Identity(); tgtY2.trans = Eigen::Vector3d(0, 0.50, 0);
+    calc3.PushSample(Sample(ref, tgtY1, 0.0));
+    calc3.PushSample(Sample(ref, tgtY2, 0.01));
+    EXPECT_DOUBLE_EQ(calc3.TranslationDiversity(), 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// RotationDiversity boundary cases: empty buffer reports 0; one wide
+// rotation pair (90 deg from the first sample) saturates the score.
+// ---------------------------------------------------------------------------
+TEST(CalibrationCalcTest, RotationDiversityBoundaryCases) {
+    CalibrationCalc calc;
+    EXPECT_DOUBLE_EQ(calc.RotationDiversity(), 0.0);
+
+    Pose ref; ref.rot = Eigen::Matrix3d::Identity(); ref.trans = Eigen::Vector3d::Zero();
+
+    // Two samples with 0 deg separation -> score 0.
+    Pose tgt0; tgt0.rot = Eigen::Matrix3d::Identity(); tgt0.trans = Eigen::Vector3d::Zero();
+    calc.PushSample(Sample(ref, tgt0, 0.0));
+    calc.PushSample(Sample(ref, tgt0, 0.01));
+    EXPECT_DOUBLE_EQ(calc.RotationDiversity(), 0.0);
+
+    // Add a sample 90 deg yaw apart from the first -> score 1.0.
+    Eigen::Quaterniond q90 = Eigen::AngleAxisd(EIGEN_PI / 2, Eigen::Vector3d::UnitY())
+        * Eigen::Quaterniond::Identity();
+    Pose tgt90; tgt90.rot = q90.toRotationMatrix(); tgt90.trans = Eigen::Vector3d::Zero();
+    calc.PushSample(Sample(ref, tgt90, 0.02));
+    EXPECT_NEAR(calc.RotationDiversity(), 1.0, 1e-9);
+
+    // 45 deg pair -> score 0.5.
+    CalibrationCalc calc2;
+    calc2.PushSample(Sample(ref, tgt0, 0.0));
+    Eigen::Quaterniond q45 = Eigen::AngleAxisd(EIGEN_PI / 4, Eigen::Vector3d::UnitY())
+        * Eigen::Quaterniond::Identity();
+    Pose tgt45; tgt45.rot = q45.toRotationMatrix(); tgt45.trans = Eigen::Vector3d::Zero();
+    calc2.PushSample(Sample(ref, tgt45, 0.01));
+    EXPECT_NEAR(calc2.RotationDiversity(), 0.5, 1e-9);
+}

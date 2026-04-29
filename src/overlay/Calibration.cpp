@@ -2305,6 +2305,33 @@ void CalibrationTick(double time)
 	if (calibration.SampleCount() < CalCtx.SampleCount()) return;
 	while (calibration.SampleCount() > CalCtx.SampleCount()) calibration.ShiftSample();
 
+	// One-shot motion-variety gate. Continuous mode bypasses this -- it has its
+	// own incremental accept/reject loop that doesn't need a "stop here" signal.
+	// One-shot's prior behaviour was "buffer fills -> run ComputeOneshot once,
+	// pass or fail". With AUTO calibration speed picking VERY_SLOW (500 samples
+	// = ~25 s) for noisy IMU rigs, the user could wave for 25 seconds and then
+	// get rejected because their motion only covered one axis -- a frustrating
+	// outcome the program could have prevented.
+	//
+	// New flow: once the buffer is full (noise averaging satisfied), we still
+	// require both motion-coverage diversities >= 70 % before running the math.
+	// Below that threshold, drop the oldest sample and keep collecting -- the
+	// buffer rolls so fresh motion replaces stale, the bars in the popup keep
+	// climbing, and the user finishes naturally when their motion is varied
+	// enough. Both "have we waved enough" (buffer) and "varied enough" (bars)
+	// gates are visible in the popup so the user knows what's holding them up.
+	if (CalCtx.state != CalibrationState::Continuous
+		&& CalCtx.state != CalibrationState::ContinuousStandby)
+	{
+		constexpr double kAutoFinishDiversity = 0.70;
+		if (calibration.TranslationDiversity() < kAutoFinishDiversity
+			|| calibration.RotationDiversity() < kAutoFinishDiversity)
+		{
+			calibration.ShiftSample(); // drop oldest, keep buffer rolling
+			return;
+		}
+	}
+
 	if (CalCtx.state == CalibrationState::Continuous && CalCtx.requireTriggerPressToApply && CalCtx.hasAppliedCalibrationResult) {
 		bool triggerPressed = true;
 		vr::VRControllerState_t state;
