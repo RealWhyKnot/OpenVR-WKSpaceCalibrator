@@ -526,6 +526,20 @@ namespace {
 		Metrics::translationDiversity.Push(calibration.TranslationDiversity());
 		Metrics::rotationDiversity.Push(calibration.RotationDiversity());
 
+		// Push observed jitter every tick so the AUTO calibration-speed selector
+		// in ResolvedCalibrationSpeed sees a fresh value -- the previous push
+		// site lived in the Begin state branch alone, where the buffer is still
+		// empty (just-cleared) and so always pushed 0. AUTO would then read 0
+		// from Metrics::jitterRef.last() and lock on FAST forever, regardless of
+		// the user's actual tracker quality. Recomputing here is cheap (Welford
+		// over the deque); skipping early ticks before two valid samples exist
+		// keeps the reading honest -- WelfordStdMagnitude returns 0 on n<2 and
+		// we don't want to advertise that as a meaningful "jitter".
+		if (calibration.SampleCount() >= 2) {
+			Metrics::jitterRef.Push(calibration.ReferenceJitter());
+			Metrics::jitterTarget.Push(calibration.TargetJitter());
+		}
+
 		return true;
 	}
 
@@ -2235,13 +2249,13 @@ void CalibrationTick(double time)
 
 		ScanAndApplyProfile(ctx);
 
-		// Bug fixed 2026-04-28: the second push went into jitterRef instead of
-		// jitterTarget — so the log column "jitterTarget" was always stale (0 or
-		// last-tick reference jitter) and "jitterRef" actually carried the target
-		// jitter on every other read. Plot rendering elsewhere assumed the
-		// labelled split was real; fix the routing.
-		Metrics::jitterRef.Push(calibration.ReferenceJitter());
-		Metrics::jitterTarget.Push(calibration.TargetJitter());
+		// (Removed: the original code pushed jitter here, in the Begin state,
+		// before CollectSample had ever populated calibration.m_samples. The
+		// pushed value was always 0.0 from an empty buffer, which then
+		// poisoned ResolvedCalibrationSpeed's read of Metrics::jitterRef.last()
+		// and locked AUTO onto FAST regardless of real tracker quality. The
+		// authoritative push now lives at the end of CollectSample, so jitter
+		// reflects the live buffer every active-calibration tick.)
 
 		if (!CalCtx.ReferencePoseIsValidSimple())
 		{
