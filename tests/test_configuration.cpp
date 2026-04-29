@@ -13,7 +13,8 @@
 //     version leaves validProfile=false and doesn't corrupt the in-memory
 //     context.
 //   - Round-trip: every customised setting survives save->load.
-//   - silentRecalEnabled persists across save/load (added in this fork).
+//   - Round-trip covers every persisted field (calibrated transform,
+//     thresholds, lock mode, etc.).
 
 #include <gtest/gtest.h>
 
@@ -64,7 +65,6 @@ TEST(ConfigurationTest, RoundTripPreservesCustomFields) {
     src.calibratedRotation = Eigen::Vector3d(0.0, 45.0, 0.0);
     src.jitterThreshold = 5.5f;
     src.recalibrateOnMovement = false;
-    src.silentRecalEnabled = true;
     src.ignoreOutliers = true;
     src.continuousCalibrationThreshold = 2.5f;
     src.calibrationSpeed = CalibrationContext::FAST;
@@ -84,7 +84,6 @@ TEST(ConfigurationTest, RoundTripPreservesCustomFields) {
     EXPECT_DOUBLE_EQ(dst.calibratedRotation.y(), 45.0);
     EXPECT_FLOAT_EQ(dst.jitterThreshold, 5.5f);
     EXPECT_FALSE(dst.recalibrateOnMovement);
-    EXPECT_TRUE(dst.silentRecalEnabled);
     EXPECT_TRUE(dst.ignoreOutliers);
     EXPECT_FLOAT_EQ(dst.continuousCalibrationThreshold, 2.5f);
     EXPECT_EQ(dst.calibrationSpeed, CalibrationContext::FAST);
@@ -95,7 +94,7 @@ TEST(ConfigurationTest, RoundTripPreservesCustomFields) {
 // Default-only fields are not written and load as defaults. The skip-if-
 // default optimization means a brand-new context's saved JSON shouldn't
 // carry every field; missing keys reload as the in-code defaults, which
-// includes the new `silentRecalEnabled = false` default.
+// matches the in-code defaults baked into CalibrationContext.
 // ---------------------------------------------------------------------------
 TEST(ConfigurationTest, DefaultFieldsRoundTripAsDefaults) {
     CalibrationContext src; // fresh defaults
@@ -111,7 +110,6 @@ TEST(ConfigurationTest, DefaultFieldsRoundTripAsDefaults) {
 
     // The in-code defaults survive a no-customization round-trip.
     EXPECT_TRUE(dst.recalibrateOnMovement);              // default true
-    EXPECT_FALSE(dst.silentRecalEnabled);                 // default false (Phase 1+2 off)
     EXPECT_TRUE(dst.enableStaticRecalibration);          // default true (flipped this session)
     EXPECT_FLOAT_EQ(dst.jitterThreshold, 3.0f);
     EXPECT_EQ(dst.calibrationSpeed, CalibrationContext::AUTO);
@@ -204,9 +202,6 @@ TEST(ConfigurationTest, InCodeDefaultsArePinned) {
     EXPECT_TRUE(ctx.enableStaticRecalibration)
         << "enableStaticRecalibration default is ON: no-op when not locked, "
            "accelerates rigid-attachment recovery; flipped on this fork";
-    EXPECT_FALSE(ctx.silentRecalEnabled)
-        << "silentRecalEnabled default is OFF: Phase 1+2 produced worse tracking "
-           "in real-world testing, opt-in only";
     EXPECT_FALSE(ctx.requireTriggerPressToApply);
     EXPECT_FALSE(ctx.ignoreOutliers);
     EXPECT_FALSE(ctx.quashTargetInContinuous);

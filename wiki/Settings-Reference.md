@@ -56,14 +56,6 @@ When Auto is selected, the UI shows one of:
 
 **When you'd turn it off:** if you specifically want instantaneous time-based blending regardless of motion. Generally not recommended — the failure mode of "phantom body shift while motionless" is much more annoying than the rare case where you'd want instant correction during sitting still.
 
-### Silent drift correction
-
-**What it does:** master kill switch for the Phase 1+2 passive drift-correction subsystem. When on, the program watches for natural moments to silently re-fit your calibration: T-poses (perfect for VRChat), idle stillness, hand-on-HMD adjustment, HMD wake events, residual-EMA drift, floor-touch Y-anchor, and HMD-recenter compensation. See [Continuous Calibration § Silent drift correction](Continuous-Calibration#silent-drift-correction-one-shot-users-only) for the trigger details.
-
-**Default:** **off**. The subsystem produced worse tracking than no-correction in real-world testing; opt-in if you want to help debug it. The flag persists in the profile.
-
-**When you'd use it:** if you're using one-shot calibration (not continuous) and want passive corrections at natural moments. Capture debug logs first if you suspect it's misbehaving.
-
 ### Enable debug logs
 
 **What it does:** writes a per-tick CSV log of calibration state to `%LocalAppDataLow%\SpaceCalibrator\Logs\spacecal_log.<date>.txt`. The **Logs** tab lists captured sessions with quick-actions (Open folder / Copy path / Open file) for attaching them to bug reports.

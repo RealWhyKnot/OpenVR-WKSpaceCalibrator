@@ -117,13 +117,7 @@ public:
 	double TranslationDiversity() const;
 	double RotationDiversity() const;
 
-	// quiet=true suppresses the user-facing CalCtx.Log("Not updating: ...")
-	// rejection messages. Used by the passive silent-recal path so its
-	// internal "did this candidate fit?" attempts don't leak into the
-	// Calibration Progress popup. Default false preserves the original
-	// behaviour for the user-initiated one-shot path, where the messages
-	// help the user understand why a manual calibration didn't take.
-	bool ComputeOneshot(const bool ignoreOutliers, bool quiet = false);
+	bool ComputeOneshot(const bool ignoreOutliers);
 	bool ComputeIncremental(bool &lerp, double threshold, double relPoseMaxError, const bool ignoreOutliers);
 
 	size_t SampleCount() const {
