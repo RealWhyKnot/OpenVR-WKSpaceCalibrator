@@ -18,6 +18,7 @@
 #include <vector>
 #include <algorithm>
 #include <shellapi.h>
+#include <shlobj_core.h>
 #include <imgui/imgui.h>
 #include "imgui_extensions.h"
 
@@ -44,9 +45,18 @@ void BuildContinuousCalDisplay();
 void ShowVersionLine();
 static void DrawModePill();
 static void DrawUpdateBanner();
-static void CCal_DrawRecordingsPanel();
+static void CCal_DrawLogsPanel();
 static void DrawDiagnosticsPanel(ImVec2 panelSize);
 static void DrawTipPanel(ImVec2 panelSize);
+
+// Forward decls for the tab content called from both modes. CCal_BasicInfo /
+// CCal_DrawSettings / CCal_DrawPredictionSuppression were declared near the
+// continuous-mode tab bar; the non-continuous flow needs them in scope at
+// BuildMainWindow time too, so the decls live at file scope.
+void CCal_BasicInfo();
+void CCal_DrawSettings();
+void CCal_DrawPredictionSuppression();
+static void OneShot_DrawSettings();
 
 static bool runningInOverlay;
 
@@ -114,6 +124,40 @@ void BuildMainWindow(bool runningInOverlay_)
 		BuildDeviceSelections(state);
 		ImGui::EndDisabled();
 		BuildMenu(runningInOverlay);
+
+		// Non-continuous tabbed surface. Mirrors the depth of access
+		// continuous-calibration users get -- the previous version showed
+		// only the action buttons here, leaving Settings / Advanced /
+		// Prediction / Logs reachable only after the user committed to
+		// continuous mode. With this tab bar, a one-shot user can open
+		// debug logs, tweak silent-recal, etc. without ever clicking
+		// "Continuous Calibration".
+		//
+		// Hidden during the in-progress calibration popup (state != None)
+		// because the user is captured by the modal anyway and the tabs
+		// would just clutter the background.
+		if (CalCtx.state == CalibrationState::None) {
+			ImGui::Spacing();
+			if (ImGui::BeginTabBar("OneShotTabs", 0)) {
+				if (ImGui::BeginTabItem("Settings")) {
+					OneShot_DrawSettings();
+					ImGui::EndTabItem();
+				}
+				if (ImGui::BeginTabItem("Advanced")) {
+					CCal_DrawSettings();
+					ImGui::EndTabItem();
+				}
+				if (ImGui::BeginTabItem("Prediction")) {
+					CCal_DrawPredictionSuppression();
+					ImGui::EndTabItem();
+				}
+				if (ImGui::BeginTabItem("Logs")) {
+					CCal_DrawLogsPanel();
+					ImGui::EndTabItem();
+				}
+				ImGui::EndTabBar();
+			}
+		}
 	}
 
 	ShowVersionLine();
@@ -418,10 +462,6 @@ static void DrawUpdateBanner() {
 	ImGui::Spacing();
 }
 
-void CCal_BasicInfo();
-void CCal_DrawSettings();
-void CCal_DrawPredictionSuppression();
-
 void BuildContinuousCalDisplay() {
 	ImGui::SetNextWindowPos(ImVec2(0, 0));
 	ImGui::SetNextWindowSize(ImGui::GetWindowSize());
@@ -459,8 +499,9 @@ void BuildContinuousCalDisplay() {
 	//               only place where a user can override the AUTO defaults.
 	//   - Prediction: stays separate since it's its own feature surface
 	//               (external-tool detection + per-device suppression).
-	//   - Recordings: only when debug logs are on -- replay captured motion
-	//               against the live math.
+	//   - Logs:     list debug-log CSV files for sending to bug reports;
+	//               always visible (user may have old logs to attach even
+	//               with logging currently off).
 	if (ImGui::BeginTabBar("CCalTabs", 0)) {
 		if (ImGui::BeginTabItem("Basic")) {
 			CCal_BasicInfo();
@@ -482,15 +523,13 @@ void BuildContinuousCalDisplay() {
 			ImGui::EndTabItem();
 		}
 
-		// Recordings tab: only shown when debug logging is enabled, since the
-		// whole point is to load and replay debug-log files.  Always visible
-		// once logs are on -- the choice "I want to debug" is the user signalling
-		// they're ready for the more advanced surface.
-		if (Metrics::enableLogs) {
-			if (ImGui::BeginTabItem("Recordings")) {
-				CCal_DrawRecordingsPanel();
-				ImGui::EndTabItem();
-			}
+		// Logs tab: always visible. Even when debug logging is OFF right now,
+		// the user might have older log files to attach to a bug report. The
+		// panel shows the toggle's state alongside the file list, so it's
+		// obvious whether a fresh log is being captured.
+		if (ImGui::BeginTabItem("Logs")) {
+			CCal_DrawLogsPanel();
+			ImGui::EndTabItem();
 		}
 
 		ImGui::EndTabBar();
@@ -1036,32 +1075,34 @@ void CCal_DrawPredictionSuppression() {
 	}
 }
 
-// === Recordings (debug log replay) ========================================
-// State persists for the lifetime of the process. The recordings list is
-// rebuilt on demand (when the user opens the tab or hits "Refresh"); the
-// loaded recording + last replay result are kept until the user picks a
-// different file or closes the panel.
+// === Logs panel ============================================================
+// User-friendly view of the debug-log files written when "Enable debug logs"
+// is on. The previous Recordings tab was dev-tooling -- it loaded a CSV and
+// replayed it through the calibration math, which only made sense for the
+// developer iterating on a fix. Most users just want a way to find and copy
+// log files to attach to a bug report. So we surface the file list, a button
+// to open the logs folder in Explorer, and a per-row copy-path action.
+//
+// The replay machinery (spacecal::replay::LoadRecording / RunReplay) is still
+// in MotionRecording.cpp for the standalone replay CLI tool and the test
+// suite; it just isn't surfaced in the overlay UI anymore.
 namespace {
 
-struct RecordingsPanelState {
+struct LogsPanelState {
 	std::vector<spacecal::replay::LogFileEntry> files;
-	int selectedIdx = -1;
 	bool listBuilt = false;
-	std::string loadError;
-	spacecal::replay::LoadedRecording loaded;
-	bool loadedValid = false;
-	spacecal::replay::ReplayOptions replayOpts;
-	spacecal::replay::ReplayResult lastResult;
-	bool resultPresent = false;
+	int selectedIdx = -1;
+	std::string copyHint;        // "Path copied" / errors -- transient feedback
+	double copyHintExpireTime = 0.0;
 };
 
-RecordingsPanelState& RecordingsState() {
-	static RecordingsPanelState s;
+LogsPanelState& LogsState() {
+	static LogsPanelState s;
 	return s;
 }
 
-void RebuildRecordingsList() {
-	auto& s = RecordingsState();
+void RebuildLogsList() {
+	auto& s = LogsState();
 	s.files = spacecal::replay::ListRecordings();
 	s.listBuilt = true;
 	if (s.selectedIdx >= (int)s.files.size()) s.selectedIdx = -1;
@@ -1069,7 +1110,7 @@ void RebuildRecordingsList() {
 
 // Format file age relative to "now" using FILETIME math. We don't bother with
 // localized strings — "5 min ago" / "2 hours ago" / "3 days ago" is plenty
-// detail for picking the right recording out of a list.
+// detail for picking the right log out of a list.
 std::string FormatFileAge(uint64_t mtimeFt) {
 	FILETIME nowFt{};
 	GetSystemTimeAsFileTime(&nowFt);
@@ -1093,46 +1134,98 @@ std::string FormatBytesShort(uint64_t n) {
 	return buf;
 }
 
+// Resolve the logs directory. ListRecordings discovers it internally for
+// scanning; we want the parent path for the Explorer button. If the list is
+// empty, derive from the first entry's full path; if THAT's empty too, fall
+// back to the standard %LOCALAPPDATA%\Low\SpaceCalibrator\Logs path.
+std::wstring GetLogsDirectory() {
+	auto& s = LogsState();
+	if (!s.files.empty()) {
+		const auto& full = s.files.front().fullPath;
+		const size_t lastSlash = full.find_last_of(L"\\/");
+		if (lastSlash != std::wstring::npos) {
+			return full.substr(0, lastSlash);
+		}
+	}
+	// Fallback: standard Windows AppDataLow path. This matches what
+	// Metrics::enableLogs writes into. We don't take a hard dependency on
+	// shlobj here -- the path is stable and well-documented for the lifetime
+	// of this app.
+	wchar_t* appDataLow = nullptr;
+	if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppDataLow, 0, nullptr, &appDataLow)) && appDataLow) {
+		std::wstring path(appDataLow);
+		CoTaskMemFree(appDataLow);
+		path += L"\\SpaceCalibrator\\Logs";
+		return path;
+	}
+	return L"";
+}
+
+// Copy a UTF-16 string to the Windows clipboard. Returns true on success.
+bool CopyToClipboardW(const std::wstring& text) {
+	if (!OpenClipboard(nullptr)) return false;
+	EmptyClipboard();
+	const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+	HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, bytes);
+	if (!h) { CloseClipboard(); return false; }
+	if (auto* buf = (wchar_t*)GlobalLock(h)) {
+		memcpy(buf, text.c_str(), bytes);
+		GlobalUnlock(h);
+		SetClipboardData(CF_UNICODETEXT, h);
+	} else {
+		GlobalFree(h);
+		CloseClipboard();
+		return false;
+	}
+	CloseClipboard();
+	return true;
+}
+
 } // namespace
 
-static void CCal_DrawRecordingsPanel() {
-	auto& state = RecordingsState();
+static void CCal_DrawLogsPanel() {
+	auto& state = LogsState();
 
 	ImGui::TextWrapped(
-		"Record a motion sequence by leaving \"Enable debug logs\" on while you reproduce a problem. "
-		"Each session writes a CSV file at\n"
-		"  %%LocalAppDataLow%%\\SpaceCalibrator\\Logs\\spacecal_log.<date>T<time>.txt\n"
-		"Pick one below to replay the captured raw poses through a fresh calibration math instance — "
-		"useful for confirming a fix changes behaviour against the same input.");
+		"Debug logs are CSV files written one row per calibration tick. They're the "
+		"first thing to attach to a bug report -- the team can replay the captured "
+		"poses against the live math to reproduce what you saw.");
 	ImGui::Spacing();
 
-	// Recording status: just reflects the live debug-log toggle. We don't have
-	// a separate "recording" notion; the log file IS the recording.
+	// Recording status: reflects the live debug-log toggle. The log file IS
+	// the recording -- there's no separate "start/stop recording" notion.
 	if (Metrics::enableLogs) {
 		ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f),
-			"● Recording: ON  (debug logs being written)");
+			"● Logging: ON  (a fresh CSV is being written this session)");
 	} else {
 		ImGui::TextColored(ImVec4(0.85f, 0.55f, 0.45f, 1.0f),
-			"○ Recording: OFF  (enable \"Enable debug logs\" on the Settings tab to start)");
+			"○ Logging: OFF  (enable \"Enable debug logs\" in Settings to capture the next session)");
 	}
 
 	ImGui::Spacing();
 	ImGui::Separator();
-	ImGui::TextDisabled("Available recordings");
 
+	ImGui::TextDisabled("Log files");
 	ImGui::SameLine();
-	if (ImGui::SmallButton("Refresh##recordings")) {
-		RebuildRecordingsList();
+	if (ImGui::SmallButton("Refresh##logs")) {
+		RebuildLogsList();
+	}
+	ImGui::SameLine();
+	if (ImGui::SmallButton("Open folder##logs")) {
+		const std::wstring dir = GetLogsDirectory();
+		if (!dir.empty()) {
+			ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+		}
 	}
 
-	if (!state.listBuilt) RebuildRecordingsList();
+	if (!state.listBuilt) RebuildLogsList();
 
 	if (state.files.empty()) {
-		ImGui::TextDisabled("(No recordings found in the Logs directory.)");
+		ImGui::TextDisabled("(No log files found in the Logs directory.)");
 	} else {
-		// Compact selectable list. Newest at top (sorted by ListRecordings).
-		const float listHeight = ImGui::GetTextLineHeightWithSpacing() * 6.5f;
-		if (ImGui::BeginChild("##recordings_list",
+		// Selectable list of log files, newest first.
+		const float listHeight = ImGui::GetTextLineHeightWithSpacing() * 8.0f;
+		if (ImGui::BeginChild("##logs_list",
 				ImVec2(0, listHeight), ImGuiChildFlags_Border)) {
 			for (int i = 0; i < (int)state.files.size(); ++i) {
 				const auto& f = state.files[i];
@@ -1143,12 +1236,6 @@ static void CCal_DrawRecordingsPanel() {
 					FormatFileAge(f.mtimeFileTime).c_str());
 				if (ImGui::Selectable(label, state.selectedIdx == i)) {
 					state.selectedIdx = i;
-					// Reset previous load/replay state so the user sees a clean
-					// "loaded but not yet replayed" view.
-					state.loadError.clear();
-					state.loaded = {};
-					state.loadedValid = false;
-					state.resultPresent = false;
 				}
 			}
 		}
@@ -1157,98 +1244,33 @@ static void CCal_DrawRecordingsPanel() {
 
 	ImGui::Spacing();
 
-	// Action row: Load + Replay buttons, gated on a selection being present.
 	const bool haveSelection = state.selectedIdx >= 0
 		&& state.selectedIdx < (int)state.files.size();
-
 	ImGui::BeginDisabled(!haveSelection);
-	if (ImGui::Button("Load selected##recordings")) {
-		const auto& f = state.files[state.selectedIdx];
-		// Convert wide path to UTF-8 for std::ifstream below.
-		const int n = WideCharToMultiByte(CP_UTF8, 0, f.fullPath.c_str(), -1, nullptr, 0, nullptr, nullptr);
-		std::string utf8Path(n > 1 ? n - 1 : 0, '\0');
-		if (n > 1) WideCharToMultiByte(CP_UTF8, 0, f.fullPath.c_str(), -1, utf8Path.data(), n, nullptr, nullptr);
-		state.loaded = spacecal::replay::LoadRecording(utf8Path);
-		state.loadedValid = state.loaded.error.empty();
-		state.loadError = state.loaded.error;
-		state.resultPresent = false;
+	if (ImGui::Button("Open selected##logs")) {
+		ShellExecuteW(nullptr, L"open",
+			state.files[state.selectedIdx].fullPath.c_str(),
+			nullptr, nullptr, SW_SHOWNORMAL);
 	}
 	ImGui::SameLine();
-	ImGui::BeginDisabled(!state.loadedValid);
-	if (ImGui::Button("Replay##recordings")) {
-		state.lastResult = spacecal::replay::RunReplay(state.loaded, state.replayOpts);
-		state.resultPresent = true;
-	}
-	ImGui::EndDisabled();
-	ImGui::EndDisabled();
-
-	if (!state.loadError.empty()) {
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.55f, 1.0f));
-		ImGui::TextWrapped("Load error: %s", state.loadError.c_str());
-		ImGui::PopStyleColor();
-	}
-
-	if (state.loadedValid) {
-		ImGui::Spacing();
-		ImGui::Separator();
-		ImGui::TextDisabled("Loaded recording");
-		const auto& m = state.loaded.meta;
-		ImGui::Text("Rows:        %d", (int)state.loaded.rows.size());
-		if (!m.buildStamp.empty())  ImGui::Text("Captured by: build %s (%s)",
-			m.buildStamp.c_str(),
-			m.buildChannel.empty() ? "?" : m.buildChannel.c_str());
-		if (!m.hmdModel.empty())    ImGui::Text("HMD:         %s [%s]",
-			m.hmdModel.c_str(),
-			m.hmdTrackingSystem.empty() ? "?" : m.hmdTrackingSystem.c_str());
-		if (!m.windowsVersion.empty()) ImGui::Text("OS:          Windows %s", m.windowsVersion.c_str());
-
-		ImGui::Spacing();
-		ImGui::Separator();
-		ImGui::TextDisabled("Replay options");
-		// SliderFloat takes float& but ReplayOptions stores double for API symmetry with
-		// the live calibration knobs; bounce through float locals.
-		float thr = (float)state.replayOpts.threshold;
-		if (ImGui::SliderFloat("Recalibration threshold", &thr, 1.01f, 10.0f, "%1.2f")) {
-			state.replayOpts.threshold = thr;
-		}
-		float maxRel = (float)state.replayOpts.maxRelError;
-		if (ImGui::SliderFloat("Max rel-pose error (m)", &maxRel, 0.001f, 0.05f, "%1.4f")) {
-			state.replayOpts.maxRelError = maxRel;
-		}
-		ImGui::Checkbox("Continuous mode (vs. one-shot)", &state.replayOpts.continuous);
-		ImGui::Checkbox("Ignore outliers", &state.replayOpts.ignoreOutliers);
-	}
-
-	if (state.resultPresent) {
-		ImGui::Spacing();
-		ImGui::Separator();
-		ImGui::TextDisabled("Replay result");
-
-		const auto& r = state.lastResult;
-		if (!r.error.empty()) {
-			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.55f, 1.0f));
-			ImGui::TextWrapped("%s", r.error.c_str());
-			ImGui::PopStyleColor();
+	if (ImGui::Button("Copy path##logs")) {
+		if (CopyToClipboardW(state.files[state.selectedIdx].fullPath)) {
+			state.copyHint = "Path copied to clipboard";
 		} else {
-			ImGui::Text("Rows replayed:    %d", r.rowsReplayed);
-			if (state.replayOpts.continuous) {
-				ImGui::Text("Accepts:          %d", r.accepts);
-				ImGui::Text("Rejects:          %d", r.rejects);
-			}
-			ImGui::Text("Watchdog resets:  %d", r.watchdogResets);
-
-			if (r.finalTransformValid) {
-				const auto t = r.finalTransform.translation();
-				const auto eul = r.finalTransform.rotation().eulerAngles(2, 1, 0) * (180.0 / EIGEN_PI);
-				ImGui::Text("Final translation (m):   x=%.4f  y=%.4f  z=%.4f", t.x(), t.y(), t.z());
-				ImGui::Text("Final rotation ZYX (deg): yaw=%.3f  pitch=%.3f  roll=%.3f",
-					eul.x(), eul.y(), eul.z());
-				ImGui::Text("Final RMS error:  %.3f mm", r.finalErrorMm);
-			} else {
-				ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.45f, 1.0f),
-					"No valid calibration produced from this replay.");
-			}
+			state.copyHint = "Failed to copy path (clipboard busy?)";
 		}
+		state.copyHintExpireTime = ImGui::GetTime() + 2.5;
+	}
+	ImGui::EndDisabled();
+
+	// Transient feedback row -- shown for ~2.5s after a clipboard action.
+	if (!state.copyHint.empty() && ImGui::GetTime() < state.copyHintExpireTime) {
+		ImGui::SameLine();
+		ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+		ImGui::TextUnformatted(state.copyHint.c_str());
+		ImGui::PopStyleColor();
+	} else if (!state.copyHint.empty()) {
+		state.copyHint.clear();
 	}
 }
 
@@ -1381,6 +1403,189 @@ static void DrawTipPanel(ImVec2 panelSize) {
 	ImGui::BeginGroupPanel("Tip", panelSize);
 	ImGui::TextWrapped("Hover over any setting to learn more about it. Right-click any slider to reset it to its default value.");
 	ImGui::EndGroupPanel();
+}
+
+// One-shot mode's Settings tab. Mirrors the Common Settings panel from
+// CCal_BasicInfo (continuous mode) but trimmed to what a one-shot user
+// actually touches: jitter / lock / recal-on-movement / static-recal /
+// silent-recal opt-in / debug logs. Continuous-only knobs (recalibration
+// threshold, alignment thresholds, latency tuning) live in the Advanced tab,
+// which is shared verbatim with continuous mode.
+//
+// The reasoning for having both this AND CCal_BasicInfo's Common settings
+// rather than one shared function: the surrounding contexts differ -- the
+// continuous Basic tab has device-status table + Cancel/Restart/Pause action
+// buttons above, this one is just the settings. Splitting keeps each call
+// site readable; the per-row code is short enough that the duplication isn't
+// worth a parameter-explosion in a shared helper.
+static void OneShot_DrawSettings() {
+	ImVec2 panelSize{ ImGui::GetWindowContentRegionMax().x - ImGui::GetWindowContentRegionMin().x, 0 };
+	ImGui::BeginGroupPanel("Settings", panelSize);
+
+	if (ImGui::BeginTable("##oneshot_settings_grid", 2,
+			ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoBordersInBody)) {
+		ImGui::TableSetupColumn("##label", ImGuiTableColumnFlags_WidthFixed, 230.0f);
+		ImGui::TableSetupColumn("##control", ImGuiTableColumnFlags_WidthStretch);
+
+		// --- Jitter threshold ---
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted("Jitter threshold");
+		ImGui::TableSetColumnIndex(1);
+		ImGui::PushID("oneshot_jitter_threshold");
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		ImGui::SliderFloat("##oneshot_jitter_threshold_slider", &CalCtx.jitterThreshold, 0.1f, 10.0f, "%1.1f", 0);
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Maximum sample-to-sample noise (mm) the math will tolerate before refusing\n"
+				"to start a one-shot calibration. Higher values let noisier trackers calibrate\n"
+				"at the cost of a less stable result.");
+		}
+		AddResetContextMenu("oneshot_jitter_threshold_ctx", [] { CalCtx.jitterThreshold = 3.0f; });
+		ImGui::PopID();
+
+		// --- Lock relative position (tristate) ---
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted("Lock relative position");
+		ImGui::TableSetColumnIndex(1);
+		ImGui::PushID("oneshot_lock_mode");
+		const char* lockLabels[] = { "Off", "On", "Auto" };
+		const CalibrationContext::LockMode lockModes[] = {
+			CalibrationContext::LockMode::OFF,
+			CalibrationContext::LockMode::ON,
+			CalibrationContext::LockMode::AUTO
+		};
+		for (int i = 0; i < 3; ++i) {
+			if (i > 0) ImGui::SameLine();
+			if (ImGui::RadioButton(lockLabels[i], CalCtx.lockRelativePositionMode == lockModes[i])) {
+				CalCtx.lockRelativePositionMode = lockModes[i];
+				SaveProfile(CalCtx);
+			}
+		}
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip(
+				"Off:  the math is free to re-solve the relative pose every cycle. Right for\n"
+				"      independent devices (HMD on head + body tracker on hip).\n"
+				"On:   freeze the relative pose once calibrated. Right for rigid setups\n"
+				"      (tracker glued to HMD, taped to a controller).\n"
+				"Auto: detect rigid attachment from observed motion. Recommended.");
+		}
+		ImGui::PopID();
+
+		// --- Recalibrate on movement ---
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted("Recalibrate on movement");
+		ImGui::TableSetColumnIndex(1);
+		if (ImGui::Checkbox("##oneshot_recal_on_move", &CalCtx.recalibrateOnMovement)) {
+			SaveProfile(CalCtx);
+		}
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("When the calibration math updates, only blend the new offset in while you're moving.\n"
+				"Stationary users (lying down, sitting still) won't see phantom body shifts.\n"
+				"Default ON.");
+		}
+
+		// --- Static recalibration ---
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted("Static recalibration");
+		ImGui::TableSetColumnIndex(1);
+		if (ImGui::Checkbox("##oneshot_static_recal", &CalCtx.enableStaticRecalibration)) {
+			SaveProfile(CalCtx);
+		}
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Use the locked reference->target relative pose for fast snap-back when the\n"
+				"live solver diverges. No-op for independent devices; accelerates rigid recovery.\n"
+				"Default ON -- it's a no-op when there's nothing locked, so safe to leave on.");
+		}
+
+		// --- Hide tracker ---
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted("Hide tracker (during cal)");
+		ImGui::TableSetColumnIndex(1);
+		if (ImGui::Checkbox("##oneshot_hide_tracker", &CalCtx.quashTargetInContinuous)) {
+			SaveProfile(CalCtx);
+		}
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Suppress the target tracker's pose in OpenVR while calibration runs.\n"
+				"Use when the target would otherwise show as a duplicate of the reference\n"
+				"(e.g. a Vive tracker taped to a Quest controller for one-shot calibration).");
+		}
+
+		// --- Ignore outliers ---
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted("Ignore outliers");
+		ImGui::TableSetColumnIndex(1);
+		if (ImGui::Checkbox("##oneshot_ignore_outliers", &CalCtx.ignoreOutliers)) {
+			SaveProfile(CalCtx);
+		}
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Drop sample pairs whose rotation axis disagrees with the consensus before\n"
+				"the LS solve. Helps with intermittent USB glitches or brief tracking loss.");
+		}
+
+		// --- Silent drift correction ---
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted("Silent drift correction");
+		ImGui::TableSetColumnIndex(1);
+		if (ImGui::Checkbox("##oneshot_silent_recal", &CalCtx.silentRecalEnabled)) {
+			SaveProfile(CalCtx);
+		}
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Enable the passive Phase 1+2 drift-correction subsystem.\n"
+			                  "When on, the program watches for natural moments to silently re-fit your\n"
+			                  "calibration: T-poses (perfect for VRChat), idle stillness, hand-on-HMD\n"
+			                  "adjustment, HMD wake, sustained residual drift, and floor-touch Y anchor.\n"
+			                  "Also enables HMD recenter compensation (Quest Home-button presses).\n\n"
+			                  "Default OFF -- experimental; in current testing it can produce worse\n"
+			                  "tracking than no correction. Enable if you want to help debug it.");
+		}
+
+		// --- Debug logs ---
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted("Enable debug logs");
+		ImGui::TableSetColumnIndex(1);
+		ImGui::Checkbox("##oneshot_debug_logs", &Metrics::enableLogs);
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Write a per-tick CSV log of calibration state. Useful for bug reports.\n"
+			                  "The Logs tab lists captured sessions and lets you copy paths.");
+		}
+
+		ImGui::EndTable();
+	}
+
+	ImGui::EndGroupPanel(); // Settings
+
+	// Wizard / reset row at the bottom of the Settings panel.
+	ImGui::Spacing();
+	if (ImGui::Button("Run setup wizard")) {
+		spacecal::wizard::Open();
+	}
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Re-run the first-run setup wizard. Useful after changing your hardware\n"
+		                  "(adding/removing a tracking system) or if you want to start fresh.");
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Reset settings")) {
+		CalCtx.ResetConfig();
+	}
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Reset all settings (jitter / speed / lock / silent-recal / etc.) to defaults.\n"
+		                  "Does NOT clear your calibrated profile -- only the tunables.");
+	}
 }
 
 void CCal_BasicInfo() {
@@ -1630,6 +1835,28 @@ void CCal_BasicInfo() {
 				"Default ON. Turn off to get instantaneous time-based blending regardless of motion state.");
 		}
 
+		// --- Silent drift correction ---
+		// Phase 1+2 passive recal subsystem (T-pose / idle / hand-on-HMD /
+		// floor-touch / residual-EMA / HMD recenter). Defaults OFF; opt-in.
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted("Silent drift correction");
+		ImGui::TableSetColumnIndex(1);
+		if (ImGui::Checkbox("##basic_silent_recal", &CalCtx.silentRecalEnabled)) {
+			SaveProfile(CalCtx);
+		}
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Enable the passive drift-correction subsystem for one-shot users.\n"
+			                  "When on, the program watches for natural moments to silently re-fit your\n"
+			                  "calibration: T-poses (perfect for VRChat), idle stillness, hand-on-HMD\n"
+			                  "adjustment, HMD wake, sustained residual drift, and floor-touch Y anchor.\n"
+			                  "Also enables HMD recenter compensation so Quest Home-button presses\n"
+			                  "don't fling your body trackers across the room.\n\n"
+			                  "Default OFF -- experimental; in current testing it can produce worse\n"
+			                  "tracking than no correction. Enable if you want to help debug it.");
+		}
+
 		// --- Debug logs ---
 		// Lives inside the same panel so the user doesn't have a checkbox
 		// floating in white space below the panel like before. Functionally
@@ -1643,8 +1870,8 @@ void CCal_BasicInfo() {
 		if (ImGui::IsItemHovered()) {
 			ImGui::SetTooltip("Write a per-tick CSV log of calibration state to\n"
 			                  "%%LocalAppDataLow%%\\SpaceCalibrator\\Logs\\spacecal_log.<date>.txt\n"
-			                  "Useful for bug reports.  Also unlocks the Recordings tab where you can replay\n"
-			                  "a captured session against the live calibration math.");
+			                  "Useful for bug reports. The Logs tab lists all captured sessions\n"
+			                  "and lets you copy paths or open the folder for attaching files.");
 		}
 
 		ImGui::EndTable();
