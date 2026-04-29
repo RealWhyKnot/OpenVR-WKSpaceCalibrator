@@ -130,7 +130,7 @@ void BuildMainWindow(bool runningInOverlay_)
 		// only the action buttons here, leaving Settings / Advanced /
 		// Prediction / Logs reachable only after the user committed to
 		// continuous mode. With this tab bar, a one-shot user can open
-		// debug logs, tweak silent-recal, etc. without ever clicking
+		// debug logs and tweak settings without ever clicking
 		// "Continuous Calibration".
 		//
 		// Hidden during the in-progress calibration popup (state != None)
@@ -1408,9 +1408,9 @@ static void DrawTipPanel(ImVec2 panelSize) {
 // One-shot mode's Settings tab. Mirrors the Common Settings panel from
 // CCal_BasicInfo (continuous mode) but trimmed to what a one-shot user
 // actually touches: jitter / lock / recal-on-movement / static-recal /
-// silent-recal opt-in / debug logs. Continuous-only knobs (recalibration
-// threshold, alignment thresholds, latency tuning) live in the Advanced tab,
-// which is shared verbatim with continuous mode.
+// debug logs. Continuous-only knobs (recalibration threshold, alignment
+// thresholds, latency tuning) live in the Advanced tab, which is shared
+// verbatim with continuous mode.
 //
 // The reasoning for having both this AND CCal_BasicInfo's Common settings
 // rather than one shared function: the surrounding contexts differ -- the
@@ -1533,25 +1533,6 @@ static void OneShot_DrawSettings() {
 				"the LS solve. Helps with intermittent USB glitches or brief tracking loss.");
 		}
 
-		// --- Silent drift correction ---
-		ImGui::TableNextRow();
-		ImGui::TableSetColumnIndex(0);
-		ImGui::AlignTextToFramePadding();
-		ImGui::TextUnformatted("Silent drift correction");
-		ImGui::TableSetColumnIndex(1);
-		if (ImGui::Checkbox("##oneshot_silent_recal", &CalCtx.silentRecalEnabled)) {
-			SaveProfile(CalCtx);
-		}
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("Enable the passive Phase 1+2 drift-correction subsystem.\n"
-			                  "When on, the program watches for natural moments to silently re-fit your\n"
-			                  "calibration: T-poses (perfect for VRChat), idle stillness, hand-on-HMD\n"
-			                  "adjustment, HMD wake, sustained residual drift, and floor-touch Y anchor.\n"
-			                  "Also enables HMD recenter compensation (Quest Home-button presses).\n\n"
-			                  "Default OFF -- experimental; in current testing it can produce worse\n"
-			                  "tracking than no correction. Enable if you want to help debug it.");
-		}
-
 		// --- Debug logs ---
 		ImGui::TableNextRow();
 		ImGui::TableSetColumnIndex(0);
@@ -1583,7 +1564,7 @@ static void OneShot_DrawSettings() {
 		CalCtx.ResetConfig();
 	}
 	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip("Reset all settings (jitter / speed / lock / silent-recal / etc.) to defaults.\n"
+		ImGui::SetTooltip("Reset all settings (jitter / speed / lock / etc.) to defaults.\n"
 		                  "Does NOT clear your calibrated profile -- only the tunables.");
 	}
 }
@@ -1833,28 +1814,6 @@ void CCal_BasicInfo() {
 			ImGui::SetTooltip("When the calibration math updates, only blend the new offset in while you're actually moving.\n"
 				"Stationary users (e.g. lying down) won't see phantom body shifts; the catch-up happens during natural motion.\n"
 				"Default ON. Turn off to get instantaneous time-based blending regardless of motion state.");
-		}
-
-		// --- Silent drift correction ---
-		// Phase 1+2 passive recal subsystem (T-pose / idle / hand-on-HMD /
-		// floor-touch / residual-EMA / HMD recenter). Defaults OFF; opt-in.
-		ImGui::TableNextRow();
-		ImGui::TableSetColumnIndex(0);
-		ImGui::AlignTextToFramePadding();
-		ImGui::TextUnformatted("Silent drift correction");
-		ImGui::TableSetColumnIndex(1);
-		if (ImGui::Checkbox("##basic_silent_recal", &CalCtx.silentRecalEnabled)) {
-			SaveProfile(CalCtx);
-		}
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("Enable the passive drift-correction subsystem for one-shot users.\n"
-			                  "When on, the program watches for natural moments to silently re-fit your\n"
-			                  "calibration: T-poses (perfect for VRChat), idle stillness, hand-on-HMD\n"
-			                  "adjustment, HMD wake, sustained residual drift, and floor-touch Y anchor.\n"
-			                  "Also enables HMD recenter compensation so Quest Home-button presses\n"
-			                  "don't fling your body trackers across the room.\n\n"
-			                  "Default OFF -- experimental; in current testing it can produce worse\n"
-			                  "tracking than no correction. Enable if you want to help debug it.");
 		}
 
 		// --- Debug logs ---

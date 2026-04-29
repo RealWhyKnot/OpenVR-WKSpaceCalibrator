@@ -299,17 +299,6 @@ void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		ctx.recalibrateOnMovement = true;
 	}
 
-	// silentRecalEnabled: master kill switch for the Phase 1+2 silent drift-
-	// correction subsystem. Defaults OFF (the subsystem produced worse tracking
-	// in real-world testing). Persisted so a user who opts in keeps the choice
-	// across overlay restarts. Legacy profiles without this key load as off,
-	// matching the new-install default.
-	if (obj["silent_recal_enabled"].is<bool>()) {
-		ctx.silentRecalEnabled = obj["silent_recal_enabled"].get<bool>();
-	} else {
-		ctx.silentRecalEnabled = false;
-	}
-
 	if (obj["scale"].is<double>()) {
 		ctx.calibratedScale = obj["scale"].get<double>();
 	} else {
@@ -557,7 +546,6 @@ void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	WRITE_IF_CHANGED_BOOL  ("latency_auto_detect",          latencyAutoDetect);
 	WRITE_IF_CHANGED_DOUBLE("estimated_latency_offset_ms",  estimatedLatencyOffsetMs);
 	WRITE_IF_CHANGED_BOOL  ("recalibrate_on_movement",      recalibrateOnMovement);
-	WRITE_IF_CHANGED_BOOL  ("silent_recal_enabled",         silentRecalEnabled);
 	WRITE_IF_CHANGED_DOUBLE("calibration_speed",            calibrationSpeed);
 
 #undef WRITE_IF_CHANGED_BOOL

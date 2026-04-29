@@ -91,33 +91,6 @@ The fork also includes an auto-detector. Toggle **Latency auto-detect** in the C
 
 Both the toggle and the EMA value persist in the registry profile (`latency_auto_detect`, `estimated_latency_offset_ms`) so the auto-detected offset is restored on overlay restart.
 
-## Silent drift correction (one-shot users only)
-
-> **Disabled by default.** Toggle on via the **"Silent drift correction"** checkbox in the Settings panel (continuous mode's Basic tab, or the non-continuous Settings tab). The subsystem produced worse tracking than no-correction in real-world testing during the Phase 1+2 rollout, and its internal "Not updating: ..." rejection diagnostics leaked into the user-facing Calibration Progress popup. The flag is persisted in the profile, so a one-time opt-in sticks across launches.
-
-When the toggle is on AND continuous calibration is off AND a profile is loaded (the typical "I calibrated once and now I'm playing" flow), a passive subsystem watches for drift and silently corrects it. None of these triggers run while continuous calibration is active — the math there already updates every tick — and none run while a calibration session is in progress (Begin/Rotation/Translation states). They only fire when `state == None`, the toggle is on, a profile is loaded, the offset is enabled, and the HMD's activity level is `UserInteraction` or `UserInteraction_Timeout` (i.e. the user is currently in VR, not just left the headset on a desk).
-
-A single 30-second throttle is shared across every trigger so the user never sees more than one accepted recal per ~30 s. Every full-recal trigger goes through the same accept-if-better gate: a candidate must beat the current calibration's RMS by ≥10% on the silent-recal sample buffer to be applied, otherwise the existing offset is left alone.
-
-| Trigger | What it catches | Hold | Notes |
-|---|---|---|---|
-| **Floor-touch Y anchor** | Calibrated target tracker's world-Y is within ±5 cm of zero AND still | 1 s | Y-only correction; rotation and X/Z untouched. Fastest of the lot — runs first, short-circuits the others on a hit. Sub-5 mm corrections suppressed (noise floor). |
-| **Residual-EMA drift monitor** | Current calibration's RMS error against the rolling buffer climbs above ~3 cm sustained (τ = 30 s real seconds) | n/a (EMA itself encodes the sustained part) | Always-on background detector. Fires when calibration silently degrades. |
-| **HMD wake** | `vr::VRSystem()` reports `VREvent_TrackedDeviceUserInteractionStarted` for the HMD | 5 s of post-wake activity | Catches the case where the user took the headset off, the tracking system re-origined, and the calibration is now stale on put-back-on. |
-| **T-pose** | HMD upright (≤15° pitch) + both hands extended laterally (>50 cm) at HMD height (±30 cm) + all-tracker stillness | 1.5 s | The flagship trigger — VRChat users T-pose for IK calibration anyway, so this is free recalibration on every world-join. |
-| **Hand-on-HMD** | At least one hand controller within 25 cm of HMD + all relevant trackers still | 1 s | Catches the headset-fit-adjustment moment. Strictly more specific than idle-pose; checked first. |
-| **Idle-pose** | All relevant trackers (HMD + target + any controllers) stationary | 5 s | Long hold to distinguish "user paused" from "user is just between movements". Catches "user stopped to think" moments. |
-
-Each trigger also pre-flights through a tracking-quality gate: if the most recent reference or target pose is anything other than `Running_OK`, the trigger is suppressed for that tick. Avoids fitting against samples that included a wireless dropout or out-of-bounds frame.
-
-The silent-recal sample buffer is dedicated (`silentRecalCalc`, separate from the `calibration` global used by user-initiated sessions). It collects passively at ~20 Hz when a profile is loaded and idle, capped at a 30-second rolling window (~600 samples). The buffer is dropped on:
-
-- An HMD recenter compensation event (samples in the old reference frame would corrupt any new fit).
-- A change to the calibration's `referenceID` or `targetID` (different physical pair).
-- A successful accepted recal (so the next trigger collects fresh post-recal motion rather than re-fitting against samples that already produced this offset).
-
-There's also an HMD recenter compensation path that runs every tick: when the HMD's pose in the reference tracking world jumps by >30 cm or >30° between two consecutive valid frames, the same delta is applied to every stored calibrated transform (primary + every additional ecosystem). This catches Quest Home-button recenters and Oculus Link resets, where the reference-tracking-world re-origins but the body-tracker world doesn't — without this, the user's body trackers would visibly fly across the room.
-
 ## One-shot auto-completion (Rotation phase)
 
 The one-shot path (Start Calibration -> Rotation -> ComputeOneshot) used to be a fixed-duration sample collection: wave for X seconds (X = AUTO-resolved buffer size), math runs once, pass-or-fail. With AUTO picking VERY_SLOW (500 samples = ~25 s) for noisy IMU rigs, a user could wave for the full duration and then get rejected for "motion too planar" -- a frustrating outcome the program could have prevented mid-collection.

@@ -708,95 +708,23 @@ TEST(CalibrationCalcTest, RotationDiversityBoundaryCases) {
 }
 
 // ---------------------------------------------------------------------------
-// ComputeOneshot quiet=true: same numerical behaviour, no user-facing log
-// noise. Used by the silent-recal path (Phase 1+2) where rejection messages
-// would leak into the Calibration Progress popup. We compare the return value
-// + Transformation against quiet=false on identical buffers, then verify the
-// quiet path emits zero "Not updating" lines.
-// ---------------------------------------------------------------------------
-TEST(CalibrationCalcTest, ComputeOneshotQuietSuppressesLogs) {
-    // Single-axis motion -> ComputeOneshot reports a "Not updating: motion too
-    // planar" rejection in the loud path. quiet=true must suppress that
-    // message while returning the same false / Transformation result.
-    const double yawRad = 18.0 * EIGEN_PI / 180.0;
-    Eigen::AffineCompact3d expected = MakeTransform(yawRad, 0, 0, Eigen::Vector3d::Zero());
-    auto loudSamples = MakeYOnlySamples(expected, kSampleCount);
-    auto quietSamples = MakeYOnlySamples(expected, kSampleCount);
-
-    CalibrationCalc loudCalc;
-    for (auto& s : loudSamples) loudCalc.PushSample(s);
-
-    CalibrationCalc quietCalc;
-    for (auto& s : quietSamples) quietCalc.PushSample(s);
-
-    // Loud path: capture stderr, expect a "Not updating" message on rejection.
-    testing::internal::CaptureStderr();
-    bool loudOk = loudCalc.ComputeOneshot(/*ignoreOutliers=*/false, /*quiet=*/false);
-    std::string loudOut = testing::internal::GetCapturedStderr();
-
-    // Quiet path: capture stderr, expect NOTHING for rejection messages.
-    testing::internal::CaptureStderr();
-    bool quietOk = quietCalc.ComputeOneshot(/*ignoreOutliers=*/false, /*quiet=*/true);
-    std::string quietOut = testing::internal::GetCapturedStderr();
-
-    // Numerical contract: same return value and same Transformation across
-    // both modes. The flag must not change the math.
-    EXPECT_EQ(loudOk, quietOk)
-        << "quiet=true changed the return value; loud=" << loudOk
-        << " quiet=" << quietOk;
-    auto recoveredLoud = loudCalc.Transformation();
-    auto recoveredQuiet = quietCalc.Transformation();
-    EXPECT_LT((recoveredLoud.translation() - recoveredQuiet.translation()).norm(),
-              1e-9);
-    EXPECT_LT(RotationErrorDegrees(recoveredLoud, recoveredQuiet), 1e-6);
-
-    // Logging contract: quiet=true emits NO "Not updating" lines, regardless
-    // of whether the calibration was accepted or rejected.
-    EXPECT_EQ(quietOut.find("Not updating"), std::string::npos)
-        << "quiet=true leaked a 'Not updating' rejection log; captured: "
-        << quietOut;
-
-    // If the loud path also accepted, we don't get a log line either way --
-    // only the rejection branches log. The check is conditional on rejection
-    // so the test stays meaningful regardless of compiler / SVD numerics.
-    if (!loudOk) {
-        EXPECT_NE(loudOut.find("Not updating"), std::string::npos)
-            << "loud path rejected but didn't log 'Not updating'; captured: "
-            << loudOut;
-    }
-}
-
-// ---------------------------------------------------------------------------
 // ComputeOneshot too-few-samples explicit gate. With the buffer at exactly 5
 // samples (< the 6-sample minimum DetectOutliers needs), ComputeOneshot must
-// return false. Loud path emits the "too few samples" message; quiet path
-// stays silent. Catches regressions in the early-return guard added 2026-04-26
-// to stop downstream Eigen empty-matrix asserts.
+// return false and emit the "too few samples" log. Catches regressions in the
+// early-return guard that protects downstream Eigen empty-matrix asserts.
 // ---------------------------------------------------------------------------
 TEST(CalibrationCalcTest, ComputeOneshotRejectsTooFewSamples) {
     Eigen::AffineCompact3d expected = MakeTransform(0.1, 0, 0, Eigen::Vector3d(0.05, 0, 0));
     auto samples = MakeSamplePairs(expected, /*numSamples=*/5);
 
-    CalibrationCalc loudCalc;
-    for (auto& s : samples) loudCalc.PushSample(s);
+    CalibrationCalc calc;
+    for (auto& s : samples) calc.PushSample(s);
 
     testing::internal::CaptureStderr();
-    bool loudOk = loudCalc.ComputeOneshot(/*ignoreOutliers=*/false, /*quiet=*/false);
-    std::string loudOut = testing::internal::GetCapturedStderr();
+    bool ok = calc.ComputeOneshot(/*ignoreOutliers=*/false);
+    std::string out = testing::internal::GetCapturedStderr();
 
-    EXPECT_FALSE(loudOk);
-    EXPECT_NE(loudOut.find("too few samples"), std::string::npos)
-        << "Expected 'too few samples' log; got: " << loudOut;
-
-    // Quiet path: same false return, no log.
-    CalibrationCalc quietCalc;
-    for (auto& s : samples) quietCalc.PushSample(s);
-
-    testing::internal::CaptureStderr();
-    bool quietOk = quietCalc.ComputeOneshot(/*ignoreOutliers=*/false, /*quiet=*/true);
-    std::string quietOut = testing::internal::GetCapturedStderr();
-
-    EXPECT_FALSE(quietOk);
-    EXPECT_EQ(quietOut.find("too few samples"), std::string::npos)
-        << "quiet=true should suppress 'too few samples'; got: " << quietOut;
+    EXPECT_FALSE(ok);
+    EXPECT_NE(out.find("too few samples"), std::string::npos)
+        << "Expected 'too few samples' log; got: " << out;
 }
