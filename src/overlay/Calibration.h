@@ -143,6 +143,18 @@ struct CalibrationContext
 	bool wasWaitingForTriggers = false;
 	bool hasAppliedCalibrationResult = false;
 
+	// One-shot mode: detect SteamVR universe shifts (chaperone reset, seated
+	// zero pose reset, etc.) by watching the poses of TrackingReference
+	// devices (Lighthouse base stations). When a uniform rigid delta moves
+	// every base station in the same tracking system between two consecutive
+	// ticks, that's a universe re-origin -- apply the inverse to the stored
+	// calibration so body trackers stay aligned with the user's physical
+	// position. AUTO (true): runs when ≥2 TrackingReference devices are
+	// detected for the relevant system; otherwise no-ops. OFF (false): never
+	// runs. Default AUTO. No effect in continuous mode -- continuous already
+	// updates each tick and would converge through the shift anyway.
+	bool baseStationDriftCorrectionEnabled = true;
+
 	float xprev, yprev, zprev;
 	int consecutiveHmdStalls = 0;
 
@@ -350,6 +362,10 @@ struct CalibrationContext
 		// brief tracking glitches on rigid setups. The user can still flip it
 		// off in Advanced if they want pure incremental behaviour.
 		enableStaticRecalibration = true;
+
+		// Default AUTO. Failure mode is benign: with no base stations
+		// detected, the detector simply doesn't fire.
+		baseStationDriftCorrectionEnabled = true;
 	}
 
 	struct Chaperone

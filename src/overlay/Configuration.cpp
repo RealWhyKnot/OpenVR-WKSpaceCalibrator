@@ -299,6 +299,15 @@ void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		ctx.recalibrateOnMovement = true;
 	}
 
+	// AUTO/OFF for the base station drift detector. Default AUTO so users
+	// with Lighthouse setups get the universe-shift correction without
+	// having to know it exists. Persists across launches.
+	if (obj["base_station_drift_correction"].is<bool>()) {
+		ctx.baseStationDriftCorrectionEnabled = obj["base_station_drift_correction"].get<bool>();
+	} else {
+		ctx.baseStationDriftCorrectionEnabled = true;
+	}
+
 	if (obj["scale"].is<double>()) {
 		ctx.calibratedScale = obj["scale"].get<double>();
 	} else {
@@ -546,6 +555,7 @@ void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	WRITE_IF_CHANGED_BOOL  ("latency_auto_detect",          latencyAutoDetect);
 	WRITE_IF_CHANGED_DOUBLE("estimated_latency_offset_ms",  estimatedLatencyOffsetMs);
 	WRITE_IF_CHANGED_BOOL  ("recalibrate_on_movement",      recalibrateOnMovement);
+	WRITE_IF_CHANGED_BOOL  ("base_station_drift_correction", baseStationDriftCorrectionEnabled);
 	WRITE_IF_CHANGED_DOUBLE("calibration_speed",            calibrationSpeed);
 
 #undef WRITE_IF_CHANGED_BOOL

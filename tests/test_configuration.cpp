@@ -65,6 +65,7 @@ TEST(ConfigurationTest, RoundTripPreservesCustomFields) {
     src.calibratedRotation = Eigen::Vector3d(0.0, 45.0, 0.0);
     src.jitterThreshold = 5.5f;
     src.recalibrateOnMovement = false;
+    src.baseStationDriftCorrectionEnabled = false;
     src.ignoreOutliers = true;
     src.continuousCalibrationThreshold = 2.5f;
     src.calibrationSpeed = CalibrationContext::FAST;
@@ -84,6 +85,7 @@ TEST(ConfigurationTest, RoundTripPreservesCustomFields) {
     EXPECT_DOUBLE_EQ(dst.calibratedRotation.y(), 45.0);
     EXPECT_FLOAT_EQ(dst.jitterThreshold, 5.5f);
     EXPECT_FALSE(dst.recalibrateOnMovement);
+    EXPECT_FALSE(dst.baseStationDriftCorrectionEnabled);
     EXPECT_TRUE(dst.ignoreOutliers);
     EXPECT_FLOAT_EQ(dst.continuousCalibrationThreshold, 2.5f);
     EXPECT_EQ(dst.calibrationSpeed, CalibrationContext::FAST);
@@ -111,6 +113,7 @@ TEST(ConfigurationTest, DefaultFieldsRoundTripAsDefaults) {
     // The in-code defaults survive a no-customization round-trip.
     EXPECT_TRUE(dst.recalibrateOnMovement);              // default true
     EXPECT_TRUE(dst.enableStaticRecalibration);          // default true (flipped this session)
+    EXPECT_TRUE(dst.baseStationDriftCorrectionEnabled);  // default AUTO (no-op without base stations)
     EXPECT_FLOAT_EQ(dst.jitterThreshold, 3.0f);
     EXPECT_EQ(dst.calibrationSpeed, CalibrationContext::AUTO);
     EXPECT_EQ(dst.lockRelativePositionMode, CalibrationContext::LockMode::AUTO);
@@ -202,6 +205,10 @@ TEST(ConfigurationTest, InCodeDefaultsArePinned) {
     EXPECT_TRUE(ctx.enableStaticRecalibration)
         << "enableStaticRecalibration default is ON: no-op when not locked, "
            "accelerates rigid-attachment recovery; flipped on this fork";
+    EXPECT_TRUE(ctx.baseStationDriftCorrectionEnabled)
+        << "baseStationDriftCorrectionEnabled default is AUTO (true): "
+           "no-op when no base stations are detected (e.g. Quest-only "
+           "setups), corrects on detected universe shifts otherwise";
     EXPECT_FALSE(ctx.requireTriggerPressToApply);
     EXPECT_FALSE(ctx.ignoreOutliers);
     EXPECT_FALSE(ctx.quashTargetInContinuous);
