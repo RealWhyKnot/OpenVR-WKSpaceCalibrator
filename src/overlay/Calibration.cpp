@@ -189,6 +189,31 @@ namespace {
 	double silentRecalLastResidualCheckTime = -1.0;
 	bool silentRecalEMAPrimed = false;
 
+	// G: floor-touch detector. When the calibrated target tracker's world-space
+	// Y is within ±5 cm of zero AND it's been still for kFloorHoldSeconds, fire
+	// a Y-only correction (subtracting the residual Y from calibratedTranslation).
+	// Distinct from the full-recal triggers because we KNOW the target tracker
+	// is on the floor at this moment -- we don't need to refit; we know the
+	// answer for the Y axis.
+	double silentRecalFloorTouchStartTime = -1.0;
+
+	// H: idle-pose hold start time. When all tracked devices are stationary
+	// for kIdleHoldSeconds, fire a silent recal -- the prior 30 s motion
+	// in the rolling buffer provides the diversity needed to fit; the
+	// idle moment is just the trigger. -1.0 = not currently idle.
+	double silentRecalIdleHoldStartTime = -1.0;
+
+	// K: hand-on-HMD hold start time. When any controller comes within 25 cm
+	// of the HMD AND is still, fire a silent recal -- same buffer, different
+	// trigger. Catches users adjusting their headset fit.
+	double silentRecalHandOnHmdStartTime = -1.0;
+
+	// N: HMD wake. Captured at the moment vr::VRSystem() reports
+	// TrackedDeviceUserInteractionStarted for the HMD. After kWakeSettleSeconds
+	// of post-wake activity (so the buffer has fresh motion), attempt a recal.
+	// 0 = no pending wake.
+	double silentRecalHmdWakeTime = 0.0;
+
 	inline vr::HmdVector3d_t quaternionRotateVector(const vr::HmdQuaternion_t& quat, const double(&vector)[3]) {
 		vr::HmdQuaternion_t vectorQuat = { 0.0, vector[0], vector[1] , vector[2] };
 		vr::HmdQuaternion_t conjugate = { quat.w, -quat.x, -quat.y, -quat.z };
@@ -741,6 +766,150 @@ namespace {
 		return silentRecalResidualEMA;
 	}
 
+	// Forward decl: TrackingQualityOK is defined further down (it sits with
+	// the rest of the P helpers and the original TickSilentTPoseRecal flow).
+	// G/H/K/N's hold-fire paths gate on it, so we declare it up here.
+	bool TrackingQualityOK();
+
+	// Convenience: compose the live calibration from CalCtx into an Affine3d.
+	// Used by G's floor-Y projection and any other path that needs to see what
+	// world-space pose the driver is currently producing for a target tracker.
+	Eigen::Affine3d ComposeLiveCalibration() {
+		const Eigen::Vector3d eulerRad = CalCtx.calibratedRotation * EIGEN_PI / 180.0;
+		const Eigen::Quaterniond rotQ =
+			Eigen::AngleAxisd(eulerRad(0), Eigen::Vector3d::UnitZ()) *
+			Eigen::AngleAxisd(eulerRad(1), Eigen::Vector3d::UnitY()) *
+			Eigen::AngleAxisd(eulerRad(2), Eigen::Vector3d::UnitX());
+		Eigen::Affine3d cal = Eigen::Affine3d::Identity();
+		cal.linear() = rotQ.toRotationMatrix();
+		cal.translation() = CalCtx.calibratedTranslation * 0.01;
+		return cal;
+	}
+
+	// G: poll the floor-touch detector once per tick. If the calibrated target
+	// tracker's world-space Y is near zero AND it's been still for ~1 s, the
+	// tracker is most likely sitting on the floor: its true Y is 0, so the
+	// calibration's translation Y component is off by exactly the reported Y.
+	// Subtract that delta (in cm) from calibratedTranslation.y. Y-only -- we
+	// don't touch rotation or X/Z. Cheap, non-disruptive, runs every tick.
+	// Returns true if the correction fired this tick (so the caller knows to
+	// short-circuit higher-cost recal paths for this frame).
+	bool TickFloorTouchYAnchor(double now, bool throttled) {
+		WorldPose tgt;
+		if (!TryGetWorldPose(CalCtx.targetID, tgt)) {
+			silentRecalFloorTouchStartTime = -1.0;
+			return false;
+		}
+		const Eigen::Affine3d cal = ComposeLiveCalibration();
+		const Eigen::Vector3d worldPos = cal * tgt.pose.translation();
+		const double y = worldPos.y();
+
+		// Bracket: |y| <= 5 cm captures both floor-touch and "calibration
+		// dropped slightly below floor" cases. Wider would risk false-firing
+		// on hand trackers held low; narrower would miss meaningful drift.
+		constexpr double kFloorBandM = 0.05;
+		const bool nearFloor = std::abs(y) < kFloorBandM;
+		const bool still = tgt.linVel.norm() < 0.05;
+
+		if (!nearFloor || !still) {
+			silentRecalFloorTouchStartTime = -1.0;
+			return false;
+		}
+		if (silentRecalFloorTouchStartTime < 0.0) {
+			silentRecalFloorTouchStartTime = now;
+		}
+		// 1 s hold -- long enough to skip transient floor-brushes; short
+		// enough that a tracker the user really left on the floor gets a
+		// fix before the user moves on.
+		if ((now - silentRecalFloorTouchStartTime) < 1.0) return false;
+		if (throttled) return false;
+		if (!TrackingQualityOK()) return false;
+
+		// Don't apply sub-5mm corrections -- they're indistinguishable from
+		// the tracker's noise floor and would just oscillate calibration Y
+		// around the true value. Preserve the hold timer so we re-evaluate
+		// every tick rather than waiting another full hold.
+		if (std::abs(y) < 0.005) return false;
+
+		// Apply the Y-only adjustment. y > 0 means tracker reports above the
+		// floor (calibration too high), subtract. y < 0 means tracker reports
+		// below floor (impossible physically -- calibration too low), add.
+		const double oldYcm = CalCtx.calibratedTranslation.y();
+		CalCtx.calibratedTranslation.y() = oldYcm - y * 100.0;
+
+		// Reset the hold so we don't re-fire next tick; the user has to lift
+		// the tracker and put it down again. Same throttle stamp as full recals
+		// so an unrelated full recal doesn't immediately fire afterward.
+		silentRecalFloorTouchStartTime = -1.0;
+		silentRecalLastAcceptedTime = now;
+
+		char logbuf[256];
+		snprintf(logbuf, sizeof logbuf,
+			"Floor-touch Y anchor: shifted calibration Y by %.1f cm (was %.1f, now %.1f)\n",
+			-y * 100.0, oldYcm, CalCtx.calibratedTranslation.y());
+		CalCtx.Log(logbuf);
+		Metrics::WriteLogAnnotation("silent_recal: accepted via floor-touch");
+		InvalidateAllTransformCaches();
+		return true;
+	}
+
+	// H/K stillness helper. Returns true when HMD + target + (if present) both
+	// hand controllers are reporting linear velocities below 5 cm/s. Used as
+	// the trigger condition for both the idle-pose recal (H) and the hand-on-
+	// HMD recal (K, plus a hand-near-HMD geometry check). The two share their
+	// stillness check so the implementation tracks one well-defined notion of
+	// "user is not moving."
+	bool AllRelevantTrackersStill(const HandIDs& hands) {
+		WorldPose hmd;
+		if (!TryGetWorldPose(0, hmd)) return false;
+		if (hmd.linVel.norm() >= 0.05) return false;
+
+		WorldPose tgt;
+		if (TryGetWorldPose(CalCtx.targetID, tgt)) {
+			if (tgt.linVel.norm() >= 0.05) return false;
+		}
+		WorldPose lh, rh;
+		if (hands.left >= 0 && TryGetWorldPose(hands.left, lh)) {
+			if (lh.linVel.norm() >= 0.05) return false;
+		}
+		if (hands.right >= 0 && TryGetWorldPose(hands.right, rh)) {
+			if (rh.linVel.norm() >= 0.05) return false;
+		}
+		return true;
+	}
+
+	// K geometry: at least one hand controller within 25 cm of the HMD. Used
+	// alongside AllRelevantTrackersStill to identify the "user is touching/
+	// adjusting their headset" moment.
+	bool AnyHandNearHmd(const HandIDs& hands) {
+		WorldPose hmd;
+		if (!TryGetWorldPose(0, hmd)) return false;
+		auto check = [&hmd](int32_t handId) {
+			if (handId < 0) return false;
+			WorldPose h;
+			if (!TryGetWorldPose(handId, h)) return false;
+			return (h.pose.translation() - hmd.pose.translation()).norm() < 0.25;
+		};
+		return check(hands.left) || check(hands.right);
+	}
+
+	// N: drain vr::VRSystem()'s event queue and watch for a wake event (HMD
+	// proximity sensor reports the user just put the headset back on). The
+	// wake timestamp is consumed downstream after a settle period. Called from
+	// TickSilentTPoseRecal so we only consume events when in idle state --
+	// during continuous, the math doesn't need wake-triggered recal.
+	void PollSystemEventsForWake(double now) {
+		if (!vr::VRSystem()) return;
+		vr::VREvent_t ev;
+		while (vr::VRSystem()->PollNextEvent(&ev, sizeof ev)) {
+			if (ev.eventType == vr::VREvent_TrackedDeviceUserInteractionStarted
+				&& ev.trackedDeviceIndex == vr::k_unTrackedDeviceIndex_Hmd)
+			{
+				silentRecalHmdWakeTime = now;
+			}
+		}
+	}
+
 	// P: gate auto-recal triggers behind tracking-quality. If either ref or
 	// target's most recent pose is anything other than Running_OK, suppress.
 	// Avoids fitting against samples that included a wireless dropout or
@@ -771,20 +940,53 @@ namespace {
 
 		// Drop the buffer if the user re-targeted (different tracker selected,
 		// or HMD index changed). Old samples are in the previous device's
-		// reference frame and would corrupt any fit.
+		// reference frame and would corrupt any fit. Reset every per-trigger
+		// hold timer along with it so we don't carry partial holds across
+		// the discontinuity.
 		static int32_t s_lastRefID = -2;
 		static int32_t s_lastTgtID = -2;
 		if (CalCtx.referenceID != s_lastRefID || CalCtx.targetID != s_lastTgtID) {
 			silentRecalCalc.Clear();
 			silentRecalTPoseHoldStartTime = -1.0;
+			silentRecalIdleHoldStartTime = -1.0;
+			silentRecalHandOnHmdStartTime = -1.0;
+			silentRecalFloorTouchStartTime = -1.0;
+			silentRecalHmdWakeTime = 0.0;
+			silentRecalEMAPrimed = false;
 			s_lastRefID = CalCtx.referenceID;
 			s_lastTgtID = CalCtx.targetID;
 		}
+
+		// N: drain system events first, regardless of activity level, so the
+		// wake transition gets captured the instant it fires -- the activity-
+		// level gate below would race against it otherwise.
+		PollSystemEventsForWake(now);
+
+		// HMD-activity gate. When the user has the headset off (Idle / Standby /
+		// timeout states), passive sample collection and the trigger logic
+		// produce nonsense -- the user isn't actually doing VR. Skip everything
+		// downstream. The wake event itself was captured above, so when the
+		// user puts the headset back on, the level transitions to
+		// UserInteraction and N's settle timer can run.
+		const auto activity = vr::VRSystem()
+			? vr::VRSystem()->GetTrackedDeviceActivityLevel(vr::k_unTrackedDeviceIndex_Hmd)
+			: vr::k_EDeviceActivityLevel_Unknown;
+		const bool hmdActive =
+			activity == vr::k_EDeviceActivityLevel_UserInteraction ||
+			activity == vr::k_EDeviceActivityLevel_UserInteraction_Timeout;
+		if (!hmdActive) return;
 
 		// Throttle: at most one accepted recal per 30 s.
 		const bool throttled = (now - silentRecalLastAcceptedTime) < 30.0;
 
 		PassiveCollectSilentSample();
+
+		// G: floor-touch Y anchor. Cheapest of the lot -- one pose lookup,
+		// one transform, no math beyond a subtraction. Run first so we don't
+		// burn buffer on a full recal when a free Y fix is available.
+		if (TickFloorTouchYAnchor(now, throttled)) {
+			return;
+		}
 
 		// E: residual EMA. Updated at ~1 Hz to keep cost negligible. The EMA
 		// itself decays in real seconds, not tick count.
@@ -804,37 +1006,80 @@ namespace {
 				&& !throttled && TrackingQualityOK())
 			{
 				if (TryAcceptSilentRecal(now, "residual-EMA")) {
-					// Reset the EMA primer so the next cycle's first sample
-					// re-anchors at the post-recal residual rather than
-					// inheriting the now-stale pre-recal value.
 					silentRecalEMAPrimed = false;
 					return;
 				}
 			}
 		}
 
-		// F: T-pose detection.
 		const HandIDs hands = FindHandControllerIDs();
+
+		// N: HMD wake. After ~5 s of post-wake activity (so the buffer has
+		// fresh post-wake motion, not stale samples from before the headset
+		// came off), fire one silent recal. The wake timestamp itself is
+		// captured by PollSystemEventsForWake above.
+		if (silentRecalHmdWakeTime > 0.0
+			&& (now - silentRecalHmdWakeTime) > 5.0
+			&& !throttled && TrackingQualityOK())
+		{
+			const double pendingWake = silentRecalHmdWakeTime;
+			silentRecalHmdWakeTime = 0.0; // consume regardless of accept
+			if (TryAcceptSilentRecal(now, "HMD-wake")) return;
+			(void)pendingWake;
+		}
+
+		// F: T-pose detection.
 		const bool tpose = DetectTPose(hands);
-
-		if (!tpose) {
+		if (tpose) {
+			if (silentRecalTPoseHoldStartTime < 0.0) silentRecalTPoseHoldStartTime = now;
+			// Plan calls for "1-2 sustained seconds". Pick 1.5 s.
+			constexpr double kTPoseHoldSeconds = 1.5;
+			if ((now - silentRecalTPoseHoldStartTime) >= kTPoseHoldSeconds
+				&& !throttled && TrackingQualityOK())
+			{
+				silentRecalTPoseHoldStartTime = -1.0;
+				if (TryAcceptSilentRecal(now, "T-pose")) return;
+			}
+		} else {
 			silentRecalTPoseHoldStartTime = -1.0;
-			return;
 		}
-		if (silentRecalTPoseHoldStartTime < 0.0) {
-			silentRecalTPoseHoldStartTime = now;
-		}
-		// Plan calls for "1-2 sustained seconds". Pick 1.5 s.
-		constexpr double kTPoseHoldSeconds = 1.5;
-		if ((now - silentRecalTPoseHoldStartTime) < kTPoseHoldSeconds) return;
-		if (throttled) return;
-		if (!TrackingQualityOK()) return; // P-gate
 
-		// Hold completed; attempt the recal. Reset hold so we don't re-fire
-		// every tick the user keeps standing in T-pose; require them to break
-		// the pose and re-enter to retry.
-		silentRecalTPoseHoldStartTime = -1.0;
-		(void)TryAcceptSilentRecal(now, "T-pose");
+		// K: hand-on-HMD. Strictly more specific than H -- requires both
+		// stillness AND a hand within 25 cm of the HMD. Checked before H so
+		// that the more meaningful trigger gets priority on the log /
+		// diagnostics side.
+		const bool handsStillNearHmd =
+			AllRelevantTrackersStill(hands) && AnyHandNearHmd(hands);
+		if (handsStillNearHmd) {
+			if (silentRecalHandOnHmdStartTime < 0.0) silentRecalHandOnHmdStartTime = now;
+			// 1 s hold -- shorter than T-pose because the user is actively
+			// touching their head; this is a deliberate moment, not a held
+			// posture.
+			if ((now - silentRecalHandOnHmdStartTime) >= 1.0
+				&& !throttled && TrackingQualityOK())
+			{
+				silentRecalHandOnHmdStartTime = -1.0;
+				if (TryAcceptSilentRecal(now, "hand-on-HMD")) return;
+			}
+		} else {
+			silentRecalHandOnHmdStartTime = -1.0;
+		}
+
+		// H: idle-pose. Plain stillness without the hand-on-HMD geometry.
+		// Longer hold (5 s) to distinguish "user paused" from "user is just
+		// between movements" -- a brief pause shouldn't trigger a recal.
+		const bool allStill = AllRelevantTrackersStill(hands);
+		if (allStill) {
+			if (silentRecalIdleHoldStartTime < 0.0) silentRecalIdleHoldStartTime = now;
+			if ((now - silentRecalIdleHoldStartTime) >= 5.0
+				&& !throttled && TrackingQualityOK())
+			{
+				silentRecalIdleHoldStartTime = -1.0;
+				if (TryAcceptSilentRecal(now, "idle-pose")) return;
+			}
+		} else {
+			silentRecalIdleHoldStartTime = -1.0;
+		}
 	}
 
 	bool AssignTargets() {
@@ -1887,9 +2132,16 @@ void CalibrationTick(double time)
 					// those with post-recenter samples produces a corrupted
 					// fit that mostly captures the recenter delta itself.
 					// Drop the buffer + EMA and let it re-fill from scratch.
+					// Reset every per-trigger hold timer too: a hold that
+					// was in progress was being timed against the old frame
+					// and shouldn't carry over.
 					silentRecalCalc.Clear();
 					silentRecalEMAPrimed = false;
 					silentRecalTPoseHoldStartTime = -1.0;
+					silentRecalIdleHoldStartTime = -1.0;
+					silentRecalHandOnHmdStartTime = -1.0;
+					silentRecalFloorTouchStartTime = -1.0;
+					silentRecalHmdWakeTime = 0.0;
 				}
 			}
 
