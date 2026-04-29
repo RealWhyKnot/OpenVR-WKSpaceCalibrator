@@ -765,3 +765,38 @@ TEST(CalibrationCalcTest, ComputeOneshotQuietSuppressesLogs) {
             << loudOut;
     }
 }
+
+// ---------------------------------------------------------------------------
+// ComputeOneshot too-few-samples explicit gate. With the buffer at exactly 5
+// samples (< the 6-sample minimum DetectOutliers needs), ComputeOneshot must
+// return false. Loud path emits the "too few samples" message; quiet path
+// stays silent. Catches regressions in the early-return guard added 2026-04-26
+// to stop downstream Eigen empty-matrix asserts.
+// ---------------------------------------------------------------------------
+TEST(CalibrationCalcTest, ComputeOneshotRejectsTooFewSamples) {
+    Eigen::AffineCompact3d expected = MakeTransform(0.1, 0, 0, Eigen::Vector3d(0.05, 0, 0));
+    auto samples = MakeSamplePairs(expected, /*numSamples=*/5);
+
+    CalibrationCalc loudCalc;
+    for (auto& s : samples) loudCalc.PushSample(s);
+
+    testing::internal::CaptureStderr();
+    bool loudOk = loudCalc.ComputeOneshot(/*ignoreOutliers=*/false, /*quiet=*/false);
+    std::string loudOut = testing::internal::GetCapturedStderr();
+
+    EXPECT_FALSE(loudOk);
+    EXPECT_NE(loudOut.find("too few samples"), std::string::npos)
+        << "Expected 'too few samples' log; got: " << loudOut;
+
+    // Quiet path: same false return, no log.
+    CalibrationCalc quietCalc;
+    for (auto& s : samples) quietCalc.PushSample(s);
+
+    testing::internal::CaptureStderr();
+    bool quietOk = quietCalc.ComputeOneshot(/*ignoreOutliers=*/false, /*quiet=*/true);
+    std::string quietOut = testing::internal::GetCapturedStderr();
+
+    EXPECT_FALSE(quietOk);
+    EXPECT_EQ(quietOut.find("too few samples"), std::string::npos)
+        << "quiet=true should suppress 'too few samples'; got: " << quietOut;
+}
