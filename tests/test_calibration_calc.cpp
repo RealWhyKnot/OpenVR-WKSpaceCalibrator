@@ -553,3 +553,83 @@ TEST(CalibrationCalcTest, BranchedFailureLogReplacesLowQuality) {
                "reason; got: " << captured;
     }
 }
+
+// ---------------------------------------------------------------------------
+// ReferenceJitter / TargetJitter on a stationary buffer: std-dev of the
+// reference / target translations across all samples. With perfectly
+// identical poses, jitter is 0. With deliberately injected ~5mm noise, jitter
+// reports something close to that.
+// ---------------------------------------------------------------------------
+TEST(CalibrationCalcTest, JitterReflectsBufferNoise) {
+    CalibrationCalc calc;
+
+    // Empty: 0.
+    EXPECT_DOUBLE_EQ(calc.ReferenceJitter(), 0.0);
+    EXPECT_DOUBLE_EQ(calc.TargetJitter(), 0.0);
+
+    // 100 perfectly stationary samples: jitter still ~0.
+    Pose stationaryRef;
+    stationaryRef.rot = Eigen::Matrix3d::Identity();
+    stationaryRef.trans = Eigen::Vector3d(1.0, 2.0, 3.0);
+    Pose stationaryTgt;
+    stationaryTgt.rot = Eigen::Matrix3d::Identity();
+    stationaryTgt.trans = Eigen::Vector3d(0.0, 0.0, 0.0);
+    for (int i = 0; i < 100; i++) {
+        calc.PushSample(Sample(stationaryRef, stationaryTgt, i * 0.01));
+    }
+    EXPECT_LT(calc.ReferenceJitter(), 1e-9);
+    EXPECT_LT(calc.TargetJitter(), 1e-9);
+
+    // Inject 5mm-magnitude noise on the target across 100 samples: jitter
+    // should land in roughly the 3-7mm range. Welford's std-dev of an N(0,5mm)
+    // signal with 100 samples has stddev ~5mm with finite-sample variance; we
+    // assert the order of magnitude is right rather than a tight tolerance.
+    CalibrationCalc calc2;
+    std::mt19937 rng(123);
+    std::normal_distribution<double> noise(0.0, 0.005); // 5mm
+    for (int i = 0; i < 100; i++) {
+        Pose noisy = stationaryTgt;
+        noisy.trans = stationaryTgt.trans + Eigen::Vector3d(noise(rng), noise(rng), noise(rng));
+        calc2.PushSample(Sample(stationaryRef, noisy, i * 0.01));
+    }
+    const double j = calc2.TargetJitter();
+    EXPECT_GT(j, 0.003);   // > 3mm
+    EXPECT_LT(j, 0.020);   // < 20mm
+}
+
+// ---------------------------------------------------------------------------
+// Regression test for the AUTO calibration-speed jitter staleness bug.
+// The bug: jitter was pushed once during the Begin state with an empty buffer
+// (jitter = 0), then never updated again. Metrics::jitterRef.last() therefore
+// stayed at 0 forever, ResolvedCalibrationSpeed always picked FAST.
+//
+// Fix lives in Calibration.cpp's CollectSample: after every accepted sample,
+// push the live ReferenceJitter / TargetJitter so AUTO has fresh values.
+//
+// We can't drive CollectSample from the test (it's deep inside the live
+// calibration flow), but we can verify the underlying API: a CalibrationCalc
+// with samples in its buffer reports non-zero jitter if those samples have
+// any noise, which is the property the production push depends on.
+// ---------------------------------------------------------------------------
+TEST(CalibrationCalcTest, JitterFunctionsAreNonZeroOnNoisyBuffer) {
+    CalibrationCalc calc;
+    Pose stationaryRef;
+    stationaryRef.rot = Eigen::Matrix3d::Identity();
+    stationaryRef.trans = Eigen::Vector3d::Zero();
+
+    std::mt19937 rng(0xBEEF);
+    std::normal_distribution<double> noise(0.0, 0.003); // 3mm noise
+    for (int i = 0; i < 60; i++) {
+        Pose noisyRef = stationaryRef;
+        noisyRef.trans = Eigen::Vector3d(noise(rng), noise(rng), noise(rng));
+        Pose noisyTgt = stationaryRef;
+        noisyTgt.trans = Eigen::Vector3d(noise(rng), noise(rng), noise(rng));
+        calc.PushSample(Sample(noisyRef, noisyTgt, i * 0.01));
+    }
+    // The bug-fix's critical property: ReferenceJitter and TargetJitter
+    // report non-zero values when the buffer has noise. If either reports 0
+    // for a noisy buffer, the AUTO speed selector would silently lock on
+    // FAST forever (the staleness bug).
+    EXPECT_GT(calc.ReferenceJitter(), 0.0);
+    EXPECT_GT(calc.TargetJitter(), 0.0);
+}
