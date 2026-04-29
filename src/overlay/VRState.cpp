@@ -4,6 +4,13 @@
 VRState VRState::Load()
 {
 	VRState state;
+
+	// VRSystem() returns nullptr until vr::VR_Init succeeds. The overlay can
+	// be running with SteamVR not yet up (deferred VR connection) or with
+	// SteamVR having shut down between ticks; in both cases the right thing
+	// is an empty device list, not a crash.
+	if (!vr::VRSystem()) return state;
+
 	auto& trackingSystems = state.trackingSystems;
 
 	char buffer[vr::k_unMaxPropertyStringSize] = {};
