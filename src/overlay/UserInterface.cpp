@@ -45,6 +45,7 @@ void BuildContinuousCalDisplay();
 void ShowVersionLine();
 static void DrawModePill();
 static void DrawUpdateBanner();
+static void DrawVRWaitingBanner();
 static void CCal_DrawLogsPanel();
 static void DrawDiagnosticsPanel(ImVec2 panelSize);
 static void DrawTipPanel(ImVec2 panelSize);
@@ -93,12 +94,22 @@ void BuildMainWindow(bool runningInOverlay_)
 	// startup) and an update is actually available.
 	DrawUpdateBanner();
 
-	// First-run auto-open of the setup wizard. Once the user finishes or
-	// dismisses it, wizardCompleted is persisted to the profile and we
-	// never auto-show again. The user can re-open it from the Advanced tab.
+	// "Waiting for SteamVR" banner -- visible whenever the program is up
+	// without a connected VR stack (e.g. user launched us before starting
+	// SteamVR). Disappears the moment the connection lands. Renders after
+	// the update banner because update checks work without VR; the VR
+	// banner is the more transient state.
+	DrawVRWaitingBanner();
+
+	// First-run auto-open of the setup wizard. Defer until VR is ready --
+	// the wizard's first step depends on enumerating tracking systems via
+	// VRState::Load, which is empty without a live OpenVR connection. If
+	// it auto-opened on a no-VR launch, the user would see an empty wizard
+	// and have to dismiss it. With this gate, the wizard pops up the moment
+	// VR comes online, which is what a first-time user would expect.
 	{
 		static bool s_firstRunChecked = false;
-		if (!s_firstRunChecked) {
+		if (!s_firstRunChecked && IsVRReady()) {
 			s_firstRunChecked = true;
 			if (!CalCtx.wizardCompleted && !spacecal::wizard::IsActive()) {
 				spacecal::wizard::Open();
@@ -191,17 +202,32 @@ void ShowVersionLine() {
 		return;
 	}
 
-	// Driver-connection dot. Green when the IPC pipe is alive; red otherwise.
-	// Text after the dot reflects the same state. The version we show is the
-	// build-time client protocol version — IPCClient::Connect() throws unless
-	// the driver reports the same number, so when IsConnected() is true that
-	// number is also the live driver version.
+	// Driver-connection dot. Three states:
+	//   green  - connected, everything's working.
+	//   amber  - VR stack hasn't connected yet (SteamVR not running, or the
+	//            program was launched standalone). Not an error; the main
+	//            loop is retrying and will flip to green automatically.
+	//   red    - established connection has dropped (IPC pipe broke after
+	//            initial handshake). This is the case where reinstalling the
+	//            driver is genuinely the right advice.
+	// The version we show is the build-time client protocol version --
+	// IPCClient::Connect() throws unless the driver reports the same number,
+	// so when IsConnected() is true that number is also the live driver
+	// version.
 	const bool driverConnected = Driver.IsConnected();
 	if (driverConnected) {
 		DrawStatusDot(IM_COL32(80, 200, 120, 255));
 		ImGui::TextColored(ImVec4(0.5f, 0.85f, 0.55f, 1.0f),
 			"Driver: connected (v%u)", (unsigned)protocol::Version);
+	} else if (!IsVRReady()) {
+		// Pre-connection. Not an error; SteamVR just isn't up yet.
+		DrawStatusDot(IM_COL32(220, 170, 60, 255));
+		ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.40f, 1.0f),
+			"Driver: waiting for SteamVR");
 	} else {
+		// We did successfully connect to OpenVR (so IsVRReady is true), but the
+		// IPC pipe is down. That means SteamVR is running without our driver
+		// loaded -- typically a missing or broken driver install.
 		DrawStatusDot(IM_COL32(220, 80, 80, 255));
 		ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.45f, 1.0f),
 			"Driver: disconnected — reinstall the SteamVR driver");
@@ -329,6 +355,37 @@ static std::string FormatBytes(uint64_t n) {
 //
 // On first call we kick the GitHub check; the rest of the banner is
 // driven by polling UpdateChecker / Updater state every frame.
+// One-line banner that announces the VR stack isn't connected yet. Clears
+// automatically the moment SteamVR starts (the main loop retries the
+// connection once per second). Kept compact because the user already
+// knows what state they're in -- they launched the calibrator before
+// starting SteamVR. No need to dump verbose error strings.
+static void DrawVRWaitingBanner() {
+	if (IsVRReady()) return;
+
+	// Yellow-orange shade so it's distinct from the blue update banner --
+	// "attention needed" rather than "FYI." Single-line height to stay
+	// out of the way.
+	ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.45f, 0.34f, 0.10f, 1.0f));
+	ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.95f, 0.78f, 0.30f, 1.0f));
+	ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 6.0f));
+
+	const float bannerHeight = ImGui::GetFrameHeightWithSpacing() * 1.2f;
+	if (ImGui::BeginChild("VRWaitingBanner",
+			ImVec2(ImGui::GetContentRegionAvail().x, bannerHeight),
+			ImGuiChildFlags_Border)) {
+		ImGui::TextColored(ImVec4(1.0f, 0.95f, 0.80f, 1.0f),
+			"Waiting for SteamVR — calibration controls enable when tracking is live.");
+	}
+	ImGui::EndChild();
+
+	ImGui::PopStyleVar(2);
+	ImGui::PopStyleColor(2);
+
+	ImGui::Spacing();
+}
+
 static void DrawUpdateBanner() {
 	using namespace spacecal::updates;
 
@@ -1916,9 +1973,14 @@ void BuildMenu(bool runningInOverlay)
 				SaveProfile(CalCtx);
 			}
 			ImGui::SameLine();
+			ImGui::BeginDisabled(!IsVRReady());
 			if (ImGui::Button("Recalibrate")) {
 				ImGui::OpenPopup("Calibration Progress");
 				StartCalibration();
+			}
+			ImGui::EndDisabled();
+			if (!IsVRReady() && ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("Waiting for SteamVR.");
 			}
 			ImGui::Text("");
 		}
@@ -1930,15 +1992,28 @@ void BuildMenu(bool runningInOverlay)
 			scale = 1.0f / 4.0f;
 		}
 
+		// Start / Continuous Calibration both need a live VR stack to enumerate
+		// devices and collect samples. Edit / Clear are pure-memory operations
+		// on the saved profile and stay enabled even without SteamVR running.
+		ImGui::BeginDisabled(!IsVRReady());
 		if (ImGui::Button("Start Calibration", ImVec2(width * scale, ImGui::GetTextLineHeight() * 2)))
 		{
 			ImGui::OpenPopup("Calibration Progress");
 			StartCalibration();
 		}
+		ImGui::EndDisabled();
+		if (!IsVRReady() && ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Waiting for SteamVR. Start it and the button will enable automatically.");
+		}
 
 		ImGui::SameLine();
+		ImGui::BeginDisabled(!IsVRReady());
 		if (ImGui::Button("Continuous Calibration", ImVec2(width * scale, ImGui::GetTextLineHeight() * 2))) {
 			StartContinuousCalibration();
+		}
+		ImGui::EndDisabled();
+		if (!IsVRReady() && ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Waiting for SteamVR. Start it and the button will enable automatically.");
 		}
 
 		if (CalCtx.validProfile)
@@ -1966,18 +2041,28 @@ void BuildMenu(bool runningInOverlay)
 		}
 
 		ImGui::Text("");
+		ImGui::BeginDisabled(!IsVRReady());
 		if (ImGui::Button("Copy Chaperone Bounds to profile", ImVec2(width * scale, ImGui::GetTextLineHeight() * 2)))
 		{
 			LoadChaperoneBounds();
 			SaveProfile(CalCtx);
 		}
+		ImGui::EndDisabled();
+		if (!IsVRReady() && ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Waiting for SteamVR.");
+		}
 
 		if (CalCtx.chaperone.valid)
 		{
 			ImGui::SameLine();
+			ImGui::BeginDisabled(!IsVRReady());
 			if (ImGui::Button("Paste Chaperone Bounds", ImVec2(width * scale, ImGui::GetTextLineHeight() * 2)))
 			{
 				ApplyChaperoneBounds();
+			}
+			ImGui::EndDisabled();
+			if (!IsVRReady() && ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("Waiting for SteamVR.");
 			}
 
 			if (ImGui::Checkbox(" Paste Chaperone Bounds automatically when geometry resets", &CalCtx.chaperone.autoApply))

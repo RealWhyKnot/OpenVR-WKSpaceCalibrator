@@ -270,6 +270,135 @@ void InitVR()
 	ActivateMultipleDrivers();
 }
 
+// Forward decls for the deferred-VR connection helpers (full definitions
+// live further down: VerifySetupCorrect at the manifest-handling block,
+// InitCalibrator over in Calibration.cpp).
+void VerifySetupCorrect();
+
+// === Deferred VR connection ================================================
+// The original wWinMain called InitVR() up front and threw a runtime_error if
+// SteamVR wasn't running, which terminated the process before the user could
+// see anything. The new flow: bring up the GLFW window + ImGui + load the
+// profile FIRST, then attempt the VR connection in a retry loop driven by
+// RunLoop. The user can browse the Settings / Logs / Advanced / Prediction
+// tabs while waiting for SteamVR; calibration actions and device dropdowns
+// are disabled until g_vrReady flips true.
+//
+// Flow:
+//   - g_vrReady = false at startup.
+//   - RunLoop calls TryInitVRStack() once per second when !g_vrReady.
+//   - TryInitVRStack does the same work the old InitVR + InitCalibrator +
+//     VerifySetupCorrect chain did, but non-throwing: any failure leaves
+//     g_vrReady false and stashes a human-readable error for the banner.
+//   - Once successful, sets g_vrReady = true. CalibrationTick (which already
+//     short-circuits on !vr::VRSystem()) starts producing useful output and
+//     the UI gates flip on.
+static bool g_vrReady = false;
+static std::string g_lastVRError;     // "Waiting for SteamVR..." style message.
+static double g_lastVRRetryTime = -1e9;
+static bool g_vrManifestSetupDone = false;  // VerifySetupCorrect runs once per VR session.
+
+bool IsVRReady() { return g_vrReady; }
+const std::string& LastVRConnectError() { return g_lastVRError; }
+
+// Attempt the full connection sequence. Returns true if the stack is fully up.
+// Does not throw; on partial failure cleans up VR_Shutdown so the next retry
+// starts from a clean state.
+//
+// **Crucial**: we probe with VRApplication_Background first, NOT
+// VRApplication_Overlay. Overlay-type init auto-launches SteamVR if it's not
+// running; Background-type fails cleanly with VRInitError_Init_NoServerFor-
+// BackgroundApp instead. We only upgrade to Overlay once the probe confirms
+// SteamVR is already running, so the user can launch the calibrator without
+// inadvertently spinning up the entire VR runtime.
+static bool TryInitVRStack()
+{
+	if (g_vrReady) return true;
+
+	// Phase 1: probe with Background. If SteamVR isn't up, this fails fast
+	// without launching anything. Common errors:
+	//   VRInitError_Init_NoServerForBackgroundApp -- vrserver isn't running.
+	//   VRInitError_Init_VRClientDLLNotFound      -- SteamVR isn't installed.
+	auto initError = vr::VRInitError_None;
+	vr::VR_Init(&initError, vr::VRApplication_Background);
+	if (initError != vr::VRInitError_None) {
+		g_lastVRError = std::string("Waiting for SteamVR: ")
+			+ vr::VR_GetVRInitErrorAsEnglishDescription(initError);
+		return false;
+	}
+
+	// Phase 2: SteamVR confirmed up. Tear down the probe and re-init as
+	// Overlay so we can create dashboard overlays. Doing it this way (probe
+	// + shutdown + overlay-init) is the standard pattern for overlay apps
+	// that want to be launched independently of SteamVR.
+	vr::VR_Shutdown();
+
+	vr::VR_Init(&initError, vr::VRApplication_Overlay);
+	if (initError != vr::VRInitError_None) {
+		// Race: SteamVR was up a moment ago but the overlay init failed.
+		// Could be a momentary state during SteamVR shutdown, or a permission
+		// issue. Retry on the next tick.
+		g_lastVRError = std::string("Waiting for SteamVR: ")
+			+ vr::VR_GetVRInitErrorAsEnglishDescription(initError);
+		return false;
+	}
+
+	// Catastrophic version-mismatch errors: openvr.dll on disk doesn't match
+	// the headers we built against. Retrying won't fix it. Show the error and
+	// keep VR shut down so we don't fight a broken runtime.
+	if (!vr::VR_IsInterfaceVersionValid(vr::IVRSystem_Version)
+		|| !vr::VR_IsInterfaceVersionValid(vr::IVRSettings_Version)
+		|| !vr::VR_IsInterfaceVersionValid(vr::IVROverlay_Version))
+	{
+		g_lastVRError = "OpenVR interface version mismatch (runtime DLL out of date).";
+		vr::VR_Shutdown();
+		return false;
+	}
+
+	// Settings tweak (one-time per session, but we run it every successful
+	// init -- it's idempotent and small). Failures here are non-fatal: log
+	// and continue.
+	try {
+		ActivateMultipleDrivers();
+	}
+	catch (const std::exception& e) {
+		fprintf(stderr, "[VR connect] ActivateMultipleDrivers warning: %s\n", e.what());
+	}
+
+	// Manifest registration: only do once per process lifetime. If we already
+	// did it earlier in this process (or a previous successful init), don't
+	// rerun -- it touches application registry state and we don't want to
+	// reapply on every reconnect.
+	if (!g_vrManifestSetupDone) {
+		try {
+			VerifySetupCorrect();
+			g_vrManifestSetupDone = true;
+		}
+		catch (const std::exception& e) {
+			fprintf(stderr, "[VR connect] VerifySetupCorrect warning: %s\n", e.what());
+			// Don't gate VR readiness on manifest registration -- the calibration
+			// stack works without the app being in the SteamVR overlay menu.
+		}
+	}
+
+	// Driver IPC + shmem. THIS is the gate: if our driver isn't running (or
+	// SteamVR's vrserver hasn't loaded it yet), Driver.Connect throws and we
+	// can't do anything useful. Tear down VR and retry.
+	try {
+		InitCalibrator();
+	}
+	catch (const std::exception& e) {
+		g_lastVRError = std::string("Waiting for Space Calibrator driver: ") + e.what();
+		vr::VR_Shutdown();
+		return false;
+	}
+
+	// All up.
+	g_lastVRError.clear();
+	g_vrReady = true;
+	return true;
+}
+
 static char textBuf[0x400] = {};
 
 static bool immediateRedraw;
@@ -351,8 +480,18 @@ double lastFrameStartTime = glfwGetTime();
 void RunLoop() {
 	while (!glfwWindowShouldClose(glfwWindow))
 	{
-		TryCreateVROverlay();
 		double time = glfwGetTime();
+
+		// Retry the VR connection once per second when it's not up. Costs
+		// nothing when SteamVR is already connected (TryInitVRStack short-
+		// circuits on g_vrReady) and lands the user in a fully-working state
+		// the moment SteamVR finishes booting.
+		if (!g_vrReady && (time - g_lastVRRetryTime) > 1.0) {
+			g_lastVRRetryTime = time;
+			TryInitVRStack();
+		}
+
+		TryCreateVROverlay();
 		CalibrationTick(time);
 
 		bool dashboardVisible = false;
@@ -777,7 +916,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 	}
 
 	try {
-		InitVR();
 		printf("isSteam: %d\n", isRunningViaSteam);
 
 		// Always check for a Steam-store version, regardless of how this fork
@@ -790,10 +928,20 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 			s_isSteamVersionInstalled,
 			s_steamVersionPath.c_str());
 
-		VerifySetupCorrect();
+		// Bring up the window + ImGui + the user's saved profile FIRST, before
+		// touching the VR stack. With this ordering, launching the program
+		// while SteamVR is closed shows the calibration UI immediately --
+		// settings tabs / logs / advanced are all browsable while we retry the
+		// VR connection in the background. The retry happens inside RunLoop.
 		CreateGLFWWindow();
-		InitCalibrator();
 		LoadProfile(CalCtx);
+
+		// First connection attempt at startup. If it succeeds, we go straight
+		// into a fully-working state. If not (SteamVR isn't running yet, etc.),
+		// RunLoop will retry once per second until it lands -- the user sees
+		// the "Waiting for SteamVR" banner in the meantime.
+		TryInitVRStack();
+
 		RunLoop();
 
 		vr::VR_Shutdown();
