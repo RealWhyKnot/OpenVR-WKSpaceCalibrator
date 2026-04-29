@@ -876,8 +876,33 @@ bool CheckSteamVersionInstalled(std::string& outManifestPath) {
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nCmdShow)
 {
-	if (_getcwd(cwd, MAX_PATH) == nullptr) {
-		// @TODO: Handle Invalid working dir case. Should never happen but you never know 
+	// Anchor cwd to the EXE's directory rather than wherever the user
+	// launched us from. The manifest path, taskbar icon, and overlay
+	// thumbnail are loaded relative to cwd; if the user double-clicks the
+	// exe from File Explorer cwd is right, but if they launch it from a
+	// different working directory (a shortcut with no Start In, an IDE run,
+	// `dist/SpaceCalibrator.exe` from a parent shell, etc.) the icon
+	// silently fails to load and the registered manifest path is wrong.
+	// GetModuleFileName + strrchr to the last separator is the canonical
+	// "directory containing this exe" pattern on Windows.
+	{
+		char modulePath[MAX_PATH] = { 0 };
+		DWORD modLen = GetModuleFileNameA(nullptr, modulePath, MAX_PATH);
+		if (modLen > 0 && modLen < MAX_PATH) {
+			char* lastSep = strrchr(modulePath, '\\');
+			if (lastSep) {
+				*lastSep = '\0';
+				strncpy_s(cwd, modulePath, MAX_PATH);
+				SetCurrentDirectoryA(cwd);
+			}
+		}
+		// If GetModuleFileName failed (extremely rare), fall back to the
+		// shell's idea of cwd so we at least try _something_.
+		if (cwd[0] == '\0') {
+			if (_getcwd(cwd, MAX_PATH) == nullptr) {
+				// @TODO: Handle Invalid working dir case. Should never happen.
+			}
+		}
 	}
 	HandleCommandLine(lpCmdLine);
 
