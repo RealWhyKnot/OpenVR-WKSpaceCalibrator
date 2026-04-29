@@ -845,6 +845,257 @@ namespace {
 		g_alignmentSpeedSent = false;
 		g_lastFallbackSent = false;
 	}
+
+	// === Base station drift correction (one-shot mode) =======================
+	//
+	// Watches TrackingReference (Lighthouse base station) poses for runtime
+	// universe shifts. Base stations are physically static -- their poses in
+	// the runtime's tracking universe only change when the runtime re-origins
+	// (chaperone reset, SetSeatedZeroPose, etc.). When ALL base stations in a
+	// tracking system shift by the same rigid delta D between two consecutive
+	// ticks, that's a re-origin -- we apply D (or D⁻¹, depending on which
+	// system shifted) to the stored calibration so body trackers stay aligned
+	// with the user's physical position.
+	//
+	// Why this works where the deleted "HMD pose jumped" heuristic (D in the
+	// old plan) didn't: HMD pose changes during natural user motion. Base
+	// stations don't. The signal-to-noise ratio is dramatically higher.
+	//
+	// Failure mode is benign: if OpenVR doesn't update base station poses on
+	// some recenter event, the detector simply doesn't fire. Worst case it
+	// catches nothing; never makes tracking worse.
+	struct BaseStationCacheEntry {
+		std::string trackingSystem;
+		Eigen::Affine3d pose;
+	};
+	std::map<std::string, BaseStationCacheEntry> baseStationCache; // serial -> entry
+	double lastBaseStationShiftAcceptedTime = -1e9;
+
+	// Tolerance for "this delta is significant (above pose noise)": 1 mm,
+	// 0.05 deg. Static base station poses are byte-stable in the OpenVR
+	// runtime under normal operation, so any motion above this is signal.
+	constexpr double kBsDeltaSignificanceTransM = 0.001;
+	constexpr double kBsDeltaSignificanceRotRad = 0.05 * EIGEN_PI / 180.0;
+
+	// Tolerance for "all base stations moved by the same delta" (consensus):
+	// 5 mm, 0.5 deg. Slightly looser than the significance threshold to
+	// allow for sub-tick interpolation differences across base stations.
+	constexpr double kBsConsensusTransM = 0.005;
+	constexpr double kBsConsensusRotRad = 0.5 * EIGEN_PI / 180.0;
+
+	double RigidDeltaAngleRad(const Eigen::Affine3d& delta) {
+		const Eigen::Quaterniond q(delta.linear());
+		return 2.0 * std::acos(std::min(1.0, std::abs(q.w())));
+	}
+
+	// Apply a universe shift D to every calibration whose ref or target
+	// tracking system matches `system`. The math:
+	//   reference world shifted by D => R_new = D * R_old
+	//   target    world shifted by D => R_new = R_old * D⁻¹
+	// Primary calibration uses CalCtx.referenceTrackingSystem and
+	// CalCtx.targetTrackingSystem. Each AdditionalCalibration only stores
+	// targetTrackingSystem; its reference is implicitly the same as the
+	// primary's (always HMD-side).
+	void ApplyUniverseShiftToCalibrations(const Eigen::Affine3d& D, const std::string& system) {
+		auto applyDelta = [&D](Eigen::Vector3d& transCm, Eigen::Vector3d& rotDeg, bool refSide) {
+			const Eigen::Vector3d eulerRad = rotDeg * EIGEN_PI / 180.0;
+			const Eigen::Quaterniond rotQ =
+				Eigen::AngleAxisd(eulerRad(0), Eigen::Vector3d::UnitZ()) *
+				Eigen::AngleAxisd(eulerRad(1), Eigen::Vector3d::UnitY()) *
+				Eigen::AngleAxisd(eulerRad(2), Eigen::Vector3d::UnitX());
+			const Eigen::Affine3d cal = Eigen::Translation3d(transCm * 0.01) * rotQ;
+			const Eigen::Affine3d newCal = refSide ? (D * cal) : (cal * D.inverse());
+			transCm = newCal.translation() * 100.0;
+			rotDeg = newCal.linear().eulerAngles(2, 1, 0) * 180.0 / EIGEN_PI;
+		};
+
+		const bool primaryRefShift   = (system == CalCtx.referenceTrackingSystem);
+		const bool primaryTargetShift = (system == CalCtx.targetTrackingSystem);
+		if (primaryRefShift) {
+			applyDelta(CalCtx.calibratedTranslation, CalCtx.calibratedRotation, /*refSide=*/true);
+		} else if (primaryTargetShift) {
+			applyDelta(CalCtx.calibratedTranslation, CalCtx.calibratedRotation, /*refSide=*/false);
+		}
+
+		// Additional calibrations: their reference IS the primary's reference,
+		// so a reference-side shift hits all of them. Their target is per-entry.
+		for (auto& extra : CalCtx.additionalCalibrations) {
+			if (!extra.valid) continue;
+			if (primaryRefShift) {
+				applyDelta(extra.calibratedTranslation, extra.calibratedRotation, /*refSide=*/true);
+			} else if (extra.targetTrackingSystem == system) {
+				applyDelta(extra.calibratedTranslation, extra.calibratedRotation, /*refSide=*/false);
+			}
+		}
+
+		char logbuf[256];
+		const double angDeg = RigidDeltaAngleRad(D) * 180.0 / EIGEN_PI;
+		snprintf(logbuf, sizeof logbuf,
+			"Universe shift detected in %s system (%.1f cm, %.1f deg) - "
+			"calibration delta-corrected from base stations\n",
+			system.c_str(), D.translation().norm() * 100.0, angDeg);
+		CalCtx.Log(logbuf);
+		Metrics::WriteLogAnnotation("base_station_shift: calibration delta-corrected");
+
+		InvalidateAllTransformCaches();
+	}
+
+	// Per-tick detector. Cheap: a few property reads + matrix arithmetic per
+	// base station. Skipped entirely when the toggle is off or no base stations
+	// are present.
+	void TickBaseStationDrift(double now) {
+		if (!CalCtx.baseStationDriftCorrectionEnabled) return;
+		if (!vr::VRSystem()) return;
+		if (!CalCtx.validProfile || !CalCtx.enabled) return;
+
+		// Throttle: at most one accepted shift per 5 seconds. A second shift
+		// arriving rapidly after the first usually means the first applied
+		// delta was wrong (we've already cached the post-shift poses, so a
+		// follow-up shift would be a brand-new event). Throttling avoids
+		// thrashing the calibration on a runtime that's still settling.
+		const bool throttled = (now - lastBaseStationShiftAcceptedTime) < 5.0;
+
+		struct Observation {
+			std::string serial;
+			std::string system;
+			Eigen::Affine3d pose;
+		};
+		std::vector<Observation> current;
+		current.reserve(8);
+
+		char buf[vr::k_unMaxPropertyStringSize] = {};
+		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id) {
+			if (vr::VRSystem()->GetTrackedDeviceClass(id) != vr::TrackedDeviceClass_TrackingReference)
+				continue;
+			const auto& dp = CalCtx.devicePoses[id];
+			if (!dp.poseIsValid || !dp.deviceIsConnected) continue;
+			if (dp.result != vr::ETrackingResult::TrackingResult_Running_OK) continue;
+
+			vr::ETrackedPropertyError err = vr::TrackedProp_Success;
+			vr::VRSystem()->GetStringTrackedDeviceProperty(id, vr::Prop_SerialNumber_String,
+				buf, sizeof buf, &err);
+			if (err != vr::TrackedProp_Success) continue;
+			std::string serial = buf;
+
+			vr::VRSystem()->GetStringTrackedDeviceProperty(id, vr::Prop_TrackingSystemName_String,
+				buf, sizeof buf, &err);
+			if (err != vr::TrackedProp_Success) continue;
+			std::string system = buf;
+
+			Pose p = ConvertPose(dp);
+			Eigen::Affine3d pose = Eigen::Affine3d::Identity();
+			pose.linear() = p.rot;
+			pose.translation() = p.trans;
+
+			current.push_back({serial, system, pose});
+		}
+
+		// No base stations -> AUTO mode self-disables, leaving the cache empty.
+		if (current.empty()) {
+			baseStationCache.clear();
+			return;
+		}
+
+		// Group observations by tracking system. A user with multiple
+		// Lighthouse setups (rare) might have base stations from different
+		// systems; each system's universe is independent so they're checked
+		// separately.
+		std::map<std::string, std::vector<const Observation*>> bySystem;
+		for (const auto& obs : current) bySystem[obs.system].push_back(&obs);
+
+		for (const auto& [system, obsPtrs] : bySystem) {
+			// Only base stations belonging to a system that's actually part
+			// of the active calibration are useful for drift correction.
+			// Stations from an unrelated third system can't tell us anything
+			// about our calibration's coordinate frames.
+			const bool refSystem = (system == CalCtx.referenceTrackingSystem);
+			bool targetSystem = (system == CalCtx.targetTrackingSystem);
+			if (!targetSystem) {
+				for (const auto& extra : CalCtx.additionalCalibrations) {
+					if (extra.valid && extra.targetTrackingSystem == system) {
+						targetSystem = true;
+						break;
+					}
+				}
+			}
+			if (!refSystem && !targetSystem) continue;
+
+			// Compute deltas vs. previous tick. Only base stations we've
+			// previously seen can produce a delta; first-sighting entries
+			// just populate the cache.
+			std::vector<Eigen::Affine3d> deltas;
+			deltas.reserve(obsPtrs.size());
+			for (const auto* obs : obsPtrs) {
+				auto it = baseStationCache.find(obs->serial);
+				if (it == baseStationCache.end()) continue;
+				if (it->second.trackingSystem != system) continue;
+				deltas.push_back(obs->pose * it->second.pose.inverse());
+			}
+
+			if (!throttled && !deltas.empty()) {
+				// Significance: at least one delta meaningfully bigger than
+				// pose noise. Otherwise everything's stationary -- nothing
+				// to do.
+				bool anySignificant = false;
+				for (const auto& d : deltas) {
+					if (d.translation().norm() > kBsDeltaSignificanceTransM
+						|| RigidDeltaAngleRad(d) > kBsDeltaSignificanceRotRad)
+					{
+						anySignificant = true;
+						break;
+					}
+				}
+
+				// Consensus: all deltas approximately equal (= same rigid
+				// universe shift). For multi-base-station setups this is
+				// the principled disambiguator between "universe shifted"
+				// and "one base station's pose was internally refined".
+				//
+				// Single-base-station setups can't cross-validate, so we
+				// require a substantial shift (>= 10 cm or >= 5 deg) to
+				// reduce false positives from runtime base-station
+				// refinement.
+				bool consensus = true;
+				if (anySignificant) {
+					if (deltas.size() >= 2) {
+						const Eigen::Affine3d& ref = deltas[0];
+						for (size_t i = 1; i < deltas.size(); ++i) {
+							const Eigen::Affine3d diff = deltas[i] * ref.inverse();
+							if (diff.translation().norm() > kBsConsensusTransM
+								|| RigidDeltaAngleRad(diff) > kBsConsensusRotRad)
+							{
+								consensus = false;
+								break;
+							}
+						}
+					} else {
+						const Eigen::Affine3d& only = deltas[0];
+						const double angRad = RigidDeltaAngleRad(only);
+						if (only.translation().norm() < 0.10
+							&& angRad < 5.0 * EIGEN_PI / 180.0)
+						{
+							consensus = false;
+						}
+					}
+				}
+
+				if (anySignificant && consensus) {
+					ApplyUniverseShiftToCalibrations(deltas[0], system);
+					lastBaseStationShiftAcceptedTime = now;
+					// Cache update happens unconditionally below, picking
+					// up the post-shift poses as the new baseline.
+				}
+			}
+		}
+
+		// Refresh cache for the next tick. We always update -- even when
+		// throttled, so that when the throttle releases we're comparing
+		// against the most recent poses, not pre-shift ones.
+		baseStationCache.clear();
+		for (const auto& obs : current) {
+			baseStationCache[obs.serial] = {obs.system, obs.pose};
+		}
+	}
 }
 
 void ResetAndDisableOffsets(uint32_t id, const std::string& trackingSystem = "")
@@ -1477,6 +1728,13 @@ void CalibrationTick(double time)
 	}
 
 	if (ctx.state == CalibrationState::None) {
+		// Base station drift correction (one-shot mode only): catch SteamVR
+		// universe shifts so body trackers stay aligned with the user's
+		// physical position. No-op when no base stations are detected.
+		// Continuous mode is intentionally skipped -- the live solver would
+		// converge through the shift on its own within a few seconds.
+		TickBaseStationDrift(time);
+
 		ctx.wantedUpdateInterval = 1.0;
 		return;
 	}

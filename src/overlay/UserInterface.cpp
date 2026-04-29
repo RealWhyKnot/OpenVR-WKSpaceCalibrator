@@ -1533,6 +1533,26 @@ static void OneShot_DrawSettings() {
 				"the LS solve. Helps with intermittent USB glitches or brief tracking loss.");
 		}
 
+		// --- Base station drift correction (AUTO/OFF) ---
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted("Auto-correct universe shifts");
+		ImGui::TableSetColumnIndex(1);
+		if (ImGui::Checkbox("##oneshot_base_station_drift", &CalCtx.baseStationDriftCorrectionEnabled)) {
+			SaveProfile(CalCtx);
+		}
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("AUTO (on): when Lighthouse base stations are detected, watch for\n"
+			                  "uniform pose shifts across all of them between ticks -- a SteamVR\n"
+			                  "universe re-origin (chaperone reset, seated zero pose reset, etc.) --\n"
+			                  "and apply the inverse to the stored calibration so body trackers stay\n"
+			                  "aligned with your physical position. No-op if no base stations are\n"
+			                  "present (Quest-only setups, etc.). Math is honest: requires actual\n"
+			                  "evidence of a universe shift, not a heuristic guess.\n\n"
+			                  "OFF: never adjust the calibration based on base station poses.");
+		}
+
 		// --- Debug logs ---
 		ImGui::TableNextRow();
 		ImGui::TableSetColumnIndex(0);
