@@ -706,3 +706,62 @@ TEST(CalibrationCalcTest, RotationDiversityBoundaryCases) {
     calc2.PushSample(Sample(ref, tgt45, 0.01));
     EXPECT_NEAR(calc2.RotationDiversity(), 0.5, 1e-9);
 }
+
+// ---------------------------------------------------------------------------
+// ComputeOneshot quiet=true: same numerical behaviour, no user-facing log
+// noise. Used by the silent-recal path (Phase 1+2) where rejection messages
+// would leak into the Calibration Progress popup. We compare the return value
+// + Transformation against quiet=false on identical buffers, then verify the
+// quiet path emits zero "Not updating" lines.
+// ---------------------------------------------------------------------------
+TEST(CalibrationCalcTest, ComputeOneshotQuietSuppressesLogs) {
+    // Single-axis motion -> ComputeOneshot reports a "Not updating: motion too
+    // planar" rejection in the loud path. quiet=true must suppress that
+    // message while returning the same false / Transformation result.
+    const double yawRad = 18.0 * EIGEN_PI / 180.0;
+    Eigen::AffineCompact3d expected = MakeTransform(yawRad, 0, 0, Eigen::Vector3d::Zero());
+    auto loudSamples = MakeYOnlySamples(expected, kSampleCount);
+    auto quietSamples = MakeYOnlySamples(expected, kSampleCount);
+
+    CalibrationCalc loudCalc;
+    for (auto& s : loudSamples) loudCalc.PushSample(s);
+
+    CalibrationCalc quietCalc;
+    for (auto& s : quietSamples) quietCalc.PushSample(s);
+
+    // Loud path: capture stderr, expect a "Not updating" message on rejection.
+    testing::internal::CaptureStderr();
+    bool loudOk = loudCalc.ComputeOneshot(/*ignoreOutliers=*/false, /*quiet=*/false);
+    std::string loudOut = testing::internal::GetCapturedStderr();
+
+    // Quiet path: capture stderr, expect NOTHING for rejection messages.
+    testing::internal::CaptureStderr();
+    bool quietOk = quietCalc.ComputeOneshot(/*ignoreOutliers=*/false, /*quiet=*/true);
+    std::string quietOut = testing::internal::GetCapturedStderr();
+
+    // Numerical contract: same return value and same Transformation across
+    // both modes. The flag must not change the math.
+    EXPECT_EQ(loudOk, quietOk)
+        << "quiet=true changed the return value; loud=" << loudOk
+        << " quiet=" << quietOk;
+    auto recoveredLoud = loudCalc.Transformation();
+    auto recoveredQuiet = quietCalc.Transformation();
+    EXPECT_LT((recoveredLoud.translation() - recoveredQuiet.translation()).norm(),
+              1e-9);
+    EXPECT_LT(RotationErrorDegrees(recoveredLoud, recoveredQuiet), 1e-6);
+
+    // Logging contract: quiet=true emits NO "Not updating" lines, regardless
+    // of whether the calibration was accepted or rejected.
+    EXPECT_EQ(quietOut.find("Not updating"), std::string::npos)
+        << "quiet=true leaked a 'Not updating' rejection log; captured: "
+        << quietOut;
+
+    // If the loud path also accepted, we don't get a log line either way --
+    // only the rejection branches log. The check is conditional on rejection
+    // so the test stays meaningful regardless of compiler / SVD numerics.
+    if (!loudOk) {
+        EXPECT_NE(loudOut.find("Not updating"), std::string::npos)
+            << "loud path rejected but didn't log 'Not updating'; captured: "
+            << loudOut;
+    }
+}
