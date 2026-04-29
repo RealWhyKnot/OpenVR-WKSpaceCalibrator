@@ -460,8 +460,9 @@ void ShowCalibrationDebug(int rows, int cols) {
 	
 	ImGui::EndTable();
 
-	// Session-level diagnostics that don't make sense as a TimeSeries.
-	ImGui::TextDisabled("Watchdog resets this session: %d", GetWatchdogResetCount());
+	// (Watchdog reset count moved to the Advanced tab's Diagnostics panel --
+	// it's a session counter, not a per-tick time series, and was sitting
+	// alone at the bottom of the graphs page.)
 
 	ImGui::EndChild();
 
