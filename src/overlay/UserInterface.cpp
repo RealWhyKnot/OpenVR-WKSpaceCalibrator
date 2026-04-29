@@ -122,11 +122,8 @@ void BuildMainWindow(bool runningInOverlay_)
 		BuildContinuousCalDisplay();
 	}
 	else {
-		// Persistent status pill at the top of the non-continuous main window
-		// too, so a user with a fixed-offset profile sees the live state
-		// without first opening continuous calibration.
-		DrawModePill();
-		ImGui::Spacing();
+		// (Mode pill moved to the global footer; no longer takes a row at
+		// the top of the main page.)
 
 		auto state = LoadVRState();
 
@@ -196,11 +193,26 @@ static void DrawStatusDot(ImU32 color, float radiusScale = 0.32f) {
 }
 
 void ShowVersionLine() {
-	ImGui::SetNextWindowPos(ImVec2(10.0f, ImGui::GetWindowHeight() - ImGui::GetFrameHeightWithSpacing()));
-	if (!ImGui::BeginChild("bottom line", ImVec2(ImGui::GetWindowWidth() - 20.0f, ImGui::GetFrameHeightWithSpacing() * 2), ImGuiChildFlags_None)) {
+	// Footer is two short rows:
+	//   row 1: [MODE PILL]   Driver: ...   |   Space Calibrator vX
+	//   row 2: Hover for tooltips. Right-click sliders to reset.
+	// The mode pill and the hover-tip used to live at the top of every tab,
+	// stacking up vertical real estate above the actually-actionable
+	// content. Pinning them in the footer means the user always knows the
+	// session state + the tooltip hint without those panels eating space
+	// inside each tab.
+	const float pillHeight = ImGui::GetTextLineHeight() + 8.0f; // padding from DrawModePill
+	const float tipHeight  = ImGui::GetTextLineHeight() + 4.0f;
+	const float footerH = pillHeight + tipHeight + 6.0f;
+	ImGui::SetNextWindowPos(ImVec2(10.0f, ImGui::GetWindowHeight() - footerH));
+	if (!ImGui::BeginChild("bottom line", ImVec2(ImGui::GetWindowWidth() - 20.0f, footerH), ImGuiChildFlags_None)) {
 		ImGui::EndChild();
 		return;
 	}
+
+	// --- Row 1: mode pill + driver status + version ---
+	DrawModePill();
+	ImGui::SameLine();
 
 	// Driver-connection dot. Three states:
 	//   green  - connected, everything's working.
@@ -240,6 +252,10 @@ void ShowVersionLine() {
 		ImGui::SameLine();
 		ImGui::Text("- close VR overlay to use mouse");
 	}
+
+	// --- Row 2: hover-for-tooltip hint ---
+	ImGui::TextDisabled("Hover any setting for help. Right-click a slider to reset it.");
+
 	ImGui::EndChild();
 }
 
@@ -540,11 +556,8 @@ void BuildContinuousCalDisplay() {
 		return;
 	}
 
-	// Persistent mode pill above the tab bar -- surfaces the high-level state
-	// (LIVE updating, searching, standby, fixed-offset) at a glance regardless
-	// of which tab the user is looking at.
-	DrawModePill();
-	ImGui::Spacing();
+	// (Mode pill moved to the global footer alongside the driver-status dot;
+	// no longer takes a row above the tab bar.)
 
 	// Tab bar layout.  The user-facing categories are:
 	//   - Basic:    everything a casual user touches.  No graphs, no jargon.
@@ -642,10 +655,8 @@ void CCal_DrawSettings() {
 	// panel size for boxes
 	ImVec2 panel_size { ImGui::GetWindowContentRegionMax().x - ImGui::GetWindowContentRegionMin().x, 0 };
 
-	// Tip first (consistent with Basic). Tells the user about hover tooltips
-	// and right-click reset, which is even more relevant in Advanced where
-	// almost every row has a slider.
-	DrawTipPanel(panel_size);
+	// (The "hover for tooltips" hint moved to the global footer so it
+	// doesn't take a row at the top of every tab.)
 
 	// Diagnostics panel: stuck-loop watchdog + HMD-stall purge counters.
 	// Lives in Advanced because it's bug-report breadcrumbs, not something
@@ -654,10 +665,12 @@ void CCal_DrawSettings() {
 	// the numbers into a bug report without spelunking.
 	DrawDiagnosticsPanel(panel_size);
 
-	// === Advanced toggles =================================================
-	// Power-user checkboxes that aren't worth Basic real estate.  Kept at the
-	// top of the Advanced tab because they're settings, and Advanced users
-	// expect to find them quickly without scrolling past the speed matrix.
+	// === Toggles panel ====================================================
+	// Power-user checkboxes that aren't worth Basic real estate. Static
+	// recalibration removed -- it's now always-on, gated implicitly by
+	// whether Lock relative position has identified a rigid attachment, so
+	// the separate toggle was redundant.
+	ImGui::BeginGroupPanel("Toggles", panel_size);
 	if (ImGui::Checkbox("Hide tracker", &CalCtx.quashTargetInContinuous)) {
 		SaveProfile(CalCtx);
 	}
@@ -667,21 +680,13 @@ void CCal_DrawSettings() {
 		                  "(e.g. taping a Vive tracker to a Quest controller for calibration).");
 	}
 	ImGui::SameLine();
-	if (ImGui::Checkbox("Static recalibration", &CalCtx.enableStaticRecalibration)) {
-		SaveProfile(CalCtx);
-	}
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip("Use the locked reference->target relative pose for fast \"snap-back\" corrections.\n"
-		                  "When the live solver's estimate diverges noticeably from the locked relative pose,\n"
-		                  "we snap to the locked solution instead of waiting for incremental convergence.");
-	}
-	ImGui::SameLine();
 	ImGui::Checkbox("Ignore outliers", &CalCtx.ignoreOutliers);
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip("Drop sample pairs whose rotation axis disagrees with the consensus before the LS solve.\n"
 		                  "Default on.  Turn off only if you suspect the outlier rejector is throwing out good samples\n"
 		                  "(e.g. genuinely jittery motion the cosine-similarity test mistakes for outliers).");
 	}
+	ImGui::EndGroupPanel();
 	ImGui::Spacing();
 
 	// === ADVANCED SETTINGS ==================================================
@@ -831,18 +836,69 @@ void CCal_DrawSettings() {
 
 		// Other advanced sliders
 		{
-			ImGui::BeginGroupPanel("Continuous calibration (advanced)", panel_size);
+			ImGui::BeginGroupPanel("Thresholds", panel_size);
 
-			// Max relative error threshold
-			ImGui::Text("Max relative error threshold");
-			ImGui::SameLine();
-			ImGui::PushID("max_relative_error_threshold");
-			ImGui::SliderFloat("##max_relative_error_threshold_slider", &CalCtx.maxRelativeErrorThreshold, 0.01f, 1.0f, "%1.1f", 0);
-			if (ImGui::IsItemHovered(0)) {
-				ImGui::SetTooltip("Controls the maximum acceptable relative error. If the error from the relative calibration is too poor, the calibration will be discarded.");
+			// Jitter threshold (moved from Basic / one-shot Settings -- these
+			// are rarely touched and were padding the Basic surfaces). Sized
+			// label/control via a 2-col table so they line up cleanly with
+			// the other thresholds.
+			if (ImGui::BeginTable("##advanced_thresholds_grid", 2,
+					ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoBordersInBody)) {
+				ImGui::TableSetupColumn("##label", ImGuiTableColumnFlags_WidthFixed, 230.0f);
+				ImGui::TableSetupColumn("##control", ImGuiTableColumnFlags_WidthStretch);
+
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::AlignTextToFramePadding();
+				ImGui::TextUnformatted("Jitter threshold");
+				ImGui::TableSetColumnIndex(1);
+				ImGui::PushID("adv_jitter_threshold");
+				ImGui::SetNextItemWidth(-FLT_MIN);
+				ImGui::SliderFloat("##adv_jitter_threshold_slider", &CalCtx.jitterThreshold, 0.1f, 10.0f, "%1.1f", 0);
+				if (ImGui::IsItemHovered()) {
+					ImGui::SetTooltip("Controls how much jitter will be allowed for calibration.\n"
+						"Higher values allow worse tracking to calibrate, but may result in poorer tracking.");
+				}
+				AddResetContextMenu("adv_jitter_threshold_ctx", [] { CalCtx.jitterThreshold = 3.0f; });
+				ImGui::PopID();
+
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::AlignTextToFramePadding();
+				ImGui::TextUnformatted("Recalibration threshold");
+				ImGui::TableSetColumnIndex(1);
+				ImGui::PushID("adv_recalibration_threshold");
+				ImGui::SetNextItemWidth(-FLT_MIN);
+				ImGui::SliderFloat("##adv_recalibration_threshold_slider", &CalCtx.continuousCalibrationThreshold, 1.01f, 10.0f, "%1.1f", 0);
+				if (ImGui::IsItemHovered()) {
+					ImGui::SetTooltip("Controls how good the calibration must be before realigning the trackers.\n"
+						"Higher values cause calibration to happen less often, and may be useful for systems with lots of tracking drift.");
+				}
+				AddResetContextMenu("adv_recalibration_threshold_ctx", [] { CalCtx.continuousCalibrationThreshold = 1.5f; });
+				ImGui::PopID();
+
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::AlignTextToFramePadding();
+				ImGui::TextUnformatted("Max relative error threshold");
+				ImGui::TableSetColumnIndex(1);
+				ImGui::PushID("adv_max_relative_error_threshold");
+				ImGui::SetNextItemWidth(-FLT_MIN);
+				ImGui::SliderFloat("##adv_max_relative_error_threshold_slider", &CalCtx.maxRelativeErrorThreshold, 0.01f, 1.0f, "%1.1f", 0);
+				if (ImGui::IsItemHovered()) {
+					ImGui::SetTooltip("Controls the maximum acceptable relative error. If the error from the relative calibration is too poor, the calibration will be discarded.");
+				}
+				AddResetContextMenu("adv_max_rel_err_ctx", [] { CalCtx.maxRelativeErrorThreshold = 0.005f; });
+				ImGui::PopID();
+
+				ImGui::EndTable();
 			}
-			AddResetContextMenu("max_rel_err_ctx", [] { CalCtx.maxRelativeErrorThreshold = 0.005f; });
-			ImGui::PopID();
+			ImGui::EndGroupPanel();
+		}
+
+		// Latency tuning (one knob, less of a "Thresholds" grouping)
+		{
+			ImGui::BeginGroupPanel("Continuous calibration (advanced)", panel_size);
 
 			// Target latency offset (manual)
 			ImGui::Text("Target latency offset (ms)");
@@ -886,10 +942,16 @@ void CCal_DrawSettings() {
 		}
 	}
 
-	ImGui::NewLine();
-	ImGui::Indent();
+	// Maintenance buttons grouped in their own panel so they don't read as
+	// floating buttons under the speed/threshold matrix.
+	ImGui::Spacing();
+	ImGui::BeginGroupPanel("Maintenance", panel_size);
 	if (ImGui::Button("Reset settings")) {
 		CalCtx.ResetConfig();
+	}
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Reset all settings (jitter / speed / lock / etc.) to defaults.\n"
+		                  "Does NOT clear your calibrated profile -- only the tunables.");
 	}
 	ImGui::SameLine();
 	if (ImGui::Button("Run setup wizard")) {
@@ -900,8 +962,7 @@ void CCal_DrawSettings() {
 			"Re-run the first-run setup wizard. Useful after changing your hardware\n"
 			"(adding/removing a tracking system) or if you want to start fresh.");
 	}
-	ImGui::Unindent();
-	ImGui::NewLine();
+	ImGui::EndGroupPanel();
 
 	// Section: Contributors credits
 	{
@@ -1249,14 +1310,21 @@ static void CCal_DrawLogsPanel() {
 		"poses against the live math to reproduce what you saw.");
 	ImGui::Spacing();
 
-	// Recording status: reflects the live debug-log toggle. The log file IS
-	// the recording -- there's no separate "start/stop recording" notion.
+	// Recording status + toggle. The log file IS the recording -- there's no
+	// separate "start/stop recording" notion. Putting the toggle here means
+	// the user can flip logging on right where they're managing the log
+	// files, instead of having to dig into Settings.
+	ImGui::Checkbox("Enable debug logging", &Metrics::enableLogs);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Write a per-tick CSV of calibration state to %%LocalAppDataLow%%\\SpaceCalibrator\\Logs\\\n"
+		                  "while this is on. The new log shows up in the list below as soon as the next calibration tick fires.");
+	}
+	ImGui::SameLine();
 	if (Metrics::enableLogs) {
 		ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f),
-			"● Logging: ON  (a fresh CSV is being written this session)");
+			" ● a fresh CSV is being written this session");
 	} else {
-		ImGui::TextColored(ImVec4(0.85f, 0.55f, 0.45f, 1.0f),
-			"○ Logging: OFF  (enable \"Enable debug logs\" in Settings to capture the next session)");
+		ImGui::TextDisabled(" (off)");
 	}
 
 	ImGui::Spacing();
@@ -1484,22 +1552,8 @@ static void OneShot_DrawSettings() {
 		ImGui::TableSetupColumn("##label", ImGuiTableColumnFlags_WidthFixed, 230.0f);
 		ImGui::TableSetupColumn("##control", ImGuiTableColumnFlags_WidthStretch);
 
-		// --- Jitter threshold ---
-		ImGui::TableNextRow();
-		ImGui::TableSetColumnIndex(0);
-		ImGui::AlignTextToFramePadding();
-		ImGui::TextUnformatted("Jitter threshold");
-		ImGui::TableSetColumnIndex(1);
-		ImGui::PushID("oneshot_jitter_threshold");
-		ImGui::SetNextItemWidth(-FLT_MIN);
-		ImGui::SliderFloat("##oneshot_jitter_threshold_slider", &CalCtx.jitterThreshold, 0.1f, 10.0f, "%1.1f", 0);
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("Maximum sample-to-sample noise (mm) the math will tolerate before refusing\n"
-				"to start a one-shot calibration. Higher values let noisier trackers calibrate\n"
-				"at the cost of a less stable result.");
-		}
-		AddResetContextMenu("oneshot_jitter_threshold_ctx", [] { CalCtx.jitterThreshold = 3.0f; });
-		ImGui::PopID();
+		// (Jitter threshold moved to the Advanced tab -- it's a rarely-touched
+		// knob, surfaced there alongside the rest of the deeper math settings.)
 
 		// --- Lock relative position (tristate) ---
 		ImGui::TableNextRow();
@@ -1546,20 +1600,10 @@ static void OneShot_DrawSettings() {
 				"Default ON.");
 		}
 
-		// --- Static recalibration ---
-		ImGui::TableNextRow();
-		ImGui::TableSetColumnIndex(0);
-		ImGui::AlignTextToFramePadding();
-		ImGui::TextUnformatted("Static recalibration");
-		ImGui::TableSetColumnIndex(1);
-		if (ImGui::Checkbox("##oneshot_static_recal", &CalCtx.enableStaticRecalibration)) {
-			SaveProfile(CalCtx);
-		}
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("Use the locked reference->target relative pose for fast snap-back when the\n"
-				"live solver diverges. No-op for independent devices; accelerates rigid recovery.\n"
-				"Default ON -- it's a no-op when there's nothing locked, so safe to leave on.");
-		}
+		// (Static recalibration toggle removed -- it's now always-on, gated
+		// implicitly by Lock relative position. Independent devices have
+		// nothing locked to snap to, so the feature is a no-op for them;
+		// rigid setups get the snap-back automatically.)
 
 		// --- Hide tracker ---
 		ImGui::TableNextRow();
@@ -1627,8 +1671,10 @@ static void OneShot_DrawSettings() {
 
 	ImGui::EndGroupPanel(); // Settings
 
-	// Wizard / reset row at the bottom of the Settings panel.
+	// Wizard / reset actions, grouped in their own panel so they don't read
+	// as floating buttons under the Settings table.
 	ImGui::Spacing();
+	ImGui::BeginGroupPanel("Maintenance", panelSize);
 	if (ImGui::Button("Run setup wizard")) {
 		spacecal::wizard::Open();
 	}
@@ -1644,16 +1690,15 @@ static void OneShot_DrawSettings() {
 		ImGui::SetTooltip("Reset all settings (jitter / speed / lock / etc.) to defaults.\n"
 		                  "Does NOT clear your calibrated profile -- only the tunables.");
 	}
+	ImGui::EndGroupPanel();
 }
 
 void CCal_BasicInfo() {
-	// Mirror the profile-mismatch banner from BuildMenu so it's visible while
-	// the user is in continuous mode.
-	DrawProfileMismatchBanner();
-
 	ImVec2 panelSize{ ImGui::GetWindowContentRegionMax().x - ImGui::GetWindowContentRegionMin().x, 0 };
 
-	DrawTipPanel(panelSize);
+	// (Tip moved to global footer; mismatch banner moved below the Actions
+	// panel per the user request -- placement preserves visibility but stops
+	// pushing the device readout off-screen on small windows.)
 
 	// --- Devices panel -----------------------------------------------------
 	// The same reference + target table as before, but wrapped in a group
@@ -1771,6 +1816,13 @@ void CCal_BasicInfo() {
 	}
 	ImGui::EndGroupPanel(); // Actions
 
+	// Profile-mismatch banner -- moved here so the Devices panel (the more
+	// useful "where does my hardware stand right now" readout) can sit at
+	// the very top of the tab. The banner only renders when the active
+	// HMD's tracking system disagrees with the saved profile, so users
+	// without a mismatch never see it.
+	DrawProfileMismatchBanner();
+
 	// === Common settings ===================================================
 	// The handful of settings most users actually touch.  Two-column table
 	// inside the panel so labels and sliders/checkboxes line up cleanly --
@@ -1786,37 +1838,9 @@ void CCal_BasicInfo() {
 		ImGui::TableSetupColumn("##label", ImGuiTableColumnFlags_WidthFixed, 230.0f);
 		ImGui::TableSetupColumn("##control", ImGuiTableColumnFlags_WidthStretch);
 
-		// --- Jitter threshold ---
-		ImGui::TableNextRow();
-		ImGui::TableSetColumnIndex(0);
-		ImGui::AlignTextToFramePadding();
-		ImGui::TextUnformatted("Jitter threshold");
-		ImGui::TableSetColumnIndex(1);
-		ImGui::PushID("basic_jitter_threshold");
-		ImGui::SetNextItemWidth(-FLT_MIN);
-		ImGui::SliderFloat("##basic_jitter_threshold_slider", &CalCtx.jitterThreshold, 0.1f, 10.0f, "%1.1f", 0);
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("Controls how much jitter will be allowed for calibration.\n"
-				"Higher values allow worse tracking to calibrate, but may result in poorer tracking.");
-		}
-		AddResetContextMenu("basic_jitter_threshold_ctx", [] { CalCtx.jitterThreshold = 3.0f; });
-		ImGui::PopID();
-
-		// --- Recalibration threshold ---
-		ImGui::TableNextRow();
-		ImGui::TableSetColumnIndex(0);
-		ImGui::AlignTextToFramePadding();
-		ImGui::TextUnformatted("Recalibration threshold");
-		ImGui::TableSetColumnIndex(1);
-		ImGui::PushID("basic_recalibration_threshold");
-		ImGui::SetNextItemWidth(-FLT_MIN);
-		ImGui::SliderFloat("##basic_recalibration_threshold_slider", &CalCtx.continuousCalibrationThreshold, 1.01f, 10.0f, "%1.1f", 0);
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("Controls how good the calibration must be before realigning the trackers.\n"
-				"Higher values cause calibration to happen less often, and may be useful for systems with lots of tracking drift.");
-		}
-		AddResetContextMenu("basic_recalibration_threshold_ctx", [] { CalCtx.continuousCalibrationThreshold = 1.5f; });
-		ImGui::PopID();
+		// (Jitter threshold and Recalibration threshold moved to the Advanced
+		// tab -- they're rarely-touched knobs and were padding the Basic
+		// settings table without justifying their space here.)
 
 		// --- Lock relative position (tristate) ---
 		ImGui::TableNextRow();
@@ -1937,53 +1961,10 @@ void BuildMenu(bool runningInOverlay)
 
 	if (CalCtx.state == CalibrationState::None)
 	{
-		if (CalCtx.validProfile && !CalCtx.enabled)
-		{
-			// New wording: tell the user which system the profile expects vs
-			// which one their current HMD is on. Pull the actual tracking
-			// system name from the current HMD when we can; fall back to a
-			// generic phrasing otherwise so the line still makes sense if the
-			// HMD isn't reachable.
-			const char* refSystem = GetPrettyTrackingSystemName(CalCtx.referenceTrackingSystem);
-			std::string actualSystem;
-			if (auto vrSystem = vr::VRSystem()) {
-				char buffer[vr::k_unMaxPropertyStringSize] = { 0 };
-				vr::ETrackedPropertyError err = vr::TrackedProp_Success;
-				vrSystem->GetStringTrackedDeviceProperty(
-					vr::k_unTrackedDeviceIndex_Hmd,
-					vr::Prop_TrackingSystemName_String,
-					buffer, sizeof buffer, &err);
-				if (err == vr::TrackedProp_Success && buffer[0] != 0) {
-					actualSystem = GetPrettyTrackingSystemName(buffer);
-				}
-			}
-			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.55f, 0.45f, 1.0f));
-			if (!actualSystem.empty()) {
-				ImGui::TextWrapped(
-					"Profile expects %s HMD but current HMD is on %s. Calibration not applied.",
-					refSystem, actualSystem.c_str());
-			} else {
-				ImGui::TextWrapped(
-					"Profile expects %s HMD but current HMD is unavailable or on a different tracking system. Calibration not applied.",
-					refSystem);
-			}
-			ImGui::PopStyleColor();
-			if (ImGui::Button("Clear profile")) {
-				CalCtx.Clear();
-				SaveProfile(CalCtx);
-			}
-			ImGui::SameLine();
-			ImGui::BeginDisabled(!IsVRReady());
-			if (ImGui::Button("Recalibrate")) {
-				ImGui::OpenPopup("Calibration Progress");
-				StartCalibration();
-			}
-			ImGui::EndDisabled();
-			if (!IsVRReady() && ImGui::IsItemHovered()) {
-				ImGui::SetTooltip("Waiting for SteamVR.");
-			}
-			ImGui::Text("");
-		}
+		// (Profile-mismatch banner moved below the action buttons -- it used
+		// to push the Start / Continuous / Edit / Clear row down with a
+		// multi-line warning. The buttons are what the user is actually
+		// reaching for; surface them first.)
 
 		float width = ImGui::GetWindowContentRegionWidth(), scale = 1.0f;
 		if (CalCtx.validProfile)
@@ -2029,6 +2010,54 @@ void BuildMenu(bool runningInOverlay)
 			{
 				CalCtx.Clear();
 				SaveProfile(CalCtx);
+			}
+		}
+
+		// Profile-mismatch banner (relocated): renders only when the saved
+		// profile expects a different HMD tracking system than the current
+		// HMD reports. Sits below the action buttons so the buttons stay
+		// at the top -- the banner is informative + recovery actions
+		// (Clear profile / Recalibrate), not a blocking modal.
+		if (CalCtx.validProfile && !CalCtx.enabled)
+		{
+			const char* refSystem = GetPrettyTrackingSystemName(CalCtx.referenceTrackingSystem);
+			std::string actualSystem;
+			if (auto vrSystem = vr::VRSystem()) {
+				char buffer[vr::k_unMaxPropertyStringSize] = { 0 };
+				vr::ETrackedPropertyError err = vr::TrackedProp_Success;
+				vrSystem->GetStringTrackedDeviceProperty(
+					vr::k_unTrackedDeviceIndex_Hmd,
+					vr::Prop_TrackingSystemName_String,
+					buffer, sizeof buffer, &err);
+				if (err == vr::TrackedProp_Success && buffer[0] != 0) {
+					actualSystem = GetPrettyTrackingSystemName(buffer);
+				}
+			}
+			ImGui::Spacing();
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.55f, 0.45f, 1.0f));
+			if (!actualSystem.empty()) {
+				ImGui::TextWrapped(
+					"Profile expects %s HMD but current HMD is on %s. Calibration not applied.",
+					refSystem, actualSystem.c_str());
+			} else {
+				ImGui::TextWrapped(
+					"Profile expects %s HMD but current HMD is unavailable or on a different tracking system. Calibration not applied.",
+					refSystem);
+			}
+			ImGui::PopStyleColor();
+			if (ImGui::Button("Clear profile")) {
+				CalCtx.Clear();
+				SaveProfile(CalCtx);
+			}
+			ImGui::SameLine();
+			ImGui::BeginDisabled(!IsVRReady());
+			if (ImGui::Button("Recalibrate")) {
+				ImGui::OpenPopup("Calibration Progress");
+				StartCalibration();
+			}
+			ImGui::EndDisabled();
+			if (!IsVRReady() && ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("Waiting for SteamVR.");
 			}
 		}
 
