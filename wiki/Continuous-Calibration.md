@@ -101,9 +101,26 @@ The current behaviour gates the math on **both** conditions:
 
 Below the variety threshold, the buffer rolls forward (oldest sample dropped each tick) and CollectSample keeps going. The motion-coverage progress bars in the Calibration Progress popup show both diversities in real time, so the user can see whether they're missing a translation axis or a rotation direction. Above the variety threshold, ComputeOneshot runs and -- if RMS-valid -- the calibration is saved and the popup advances.
 
-## AUTO calibration speed (jitter staleness fix)
+## AUTO calibration speed
 
-The AUTO calibration speed selector (FAST / SLOW / VERY_SLOW based on observed jitter) reads `Metrics::jitterRef.last()` and `Metrics::jitterTarget.last()` to bucket the right speed. Originally those metrics were pushed exactly once -- in the Begin state, when the sample buffer was still empty -- so jitter always read 0 and AUTO was permanently stuck on FAST. Fixed by pushing jitter from inside `CollectSample` after every accepted sample; the buckets now reflect live tracker quality. If you see the resolved-speed caption show "(jitter ref 0.00 mm, target 0.00 mm)" you're on a build older than this fix.
+The AUTO calibration speed selector picks FAST / SLOW / VERY_SLOW based on observed tracking noise (`Metrics::jitterRef` / `jitterTarget`):
+
+| `max(jitterRef, jitterTarget)` | Speed |
+|---|---|
+| < 1 mm   | FAST       |
+| < 5 mm   | SLOW       |
+| ≥ 5 mm   | VERY_SLOW  |
+
+Selection is sticky across a few samples to avoid flapping when jitter sits near a threshold.
+
+The "jitter" metric is the **per-sample tracking-noise magnitude**, computed from the second difference of consecutive sample positions. For each triple (p[i-1], p[i], p[i+1]), Δ²p = p[i+1] − 2 p[i] + p[i-1] reflects how much p[i] deviates from a straight-line interpolation between its neighbours. Two important properties:
+
+1. **Linear motion contributes zero**, regardless of speed. Constant-velocity travel has Δ²p = 0.
+2. **Bounded human acceleration contributes sub-millimetre.** With typical motion (a ≤ 10 m/s²) at typical sample rates (dt ≤ 20 ms), the second difference from motion alone is well under 1 mm. Tracking noise dominates the signal for any plausible motion.
+
+For independent zero-mean Gaussian per-axis noise σ, this returns √3 · σ -- the magnitude form (matching the old metric's units), so the threshold constants didn't need to change.
+
+**History (kept for diagnosis of older builds):** the original metric was raw position std-dev across the entire sample buffer, which conflated tracking noise with user motion. A buffer spanning 1 m of head-waving reported 30+ cm of "jitter" and permanently pinned AUTO to VERY_SLOW. An earlier "staleness fix" before that pushed jitter once per session with an empty buffer (always reading 0, locking AUTO to FAST). The current second-difference metric is the third iteration.
 
 ## Diagnostics
 
