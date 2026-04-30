@@ -666,37 +666,54 @@ double CalibrationCalc::RetargetingErrorRMS(
 // (Welford's k). Off-by-one in the mean update inflated the variance by a
 // factor of ~2x at small N and asymptotically less. Symptom: jitter values in
 // the debug log were reading ~2 km instead of a few cm.
-static double WelfordStdMagnitude(const std::deque<Sample>& samples,
-                                  bool useTarget) {
-	Eigen::Vector3d mean = Eigen::Vector3d::Zero();
-	Eigen::Vector3d M2 = Eigen::Vector3d::Zero();
+// Per-sample tracking-noise magnitude via second-difference variance.
+//
+// Why second differences and not raw position std-dev: the original metric
+// computed Welford std-dev of every sample's position across the buffer,
+// which conflated tracking noise with user motion. A buffer spanning 1 m
+// of head-waving has 30+ cm "jitter" -- enough to permanently pin the
+// AUTO calibration-speed selector at VERY_SLOW, regardless of how clean
+// the actual tracking is. The user reported tracking that "isn't that
+// bad" stuck on VERY_SLOW; the metric, not their hardware, was at fault.
+//
+// The fix: for each consecutive triple p[i-1], p[i], p[i+1], compute the
+// second difference Δ²p = p[i+1] - 2 p[i] + p[i-1]. This is zero for
+// any linear motion (constant velocity) and small for any bounded human
+// acceleration; tracking noise dominates the signal at typical sample
+// rates because acceleration * dt² is sub-millimetre while tracking
+// noise is order-of-magnitude bigger on most rigs.
+//
+// For independent zero-mean Gaussian noise with per-axis std σ, the
+// second difference has per-axis variance (1²+2²+1²)σ² = 6σ². The
+// magnitude squared expected value is therefore 3·6σ² = 18σ², so
+// √(mean|Δ²p|² / 6) recovers the magnitude form √3·σ (matching the
+// old return shape -- per-axis-std sum-of-squares root). Threshold
+// constants in ResolvedCalibrationSpeed (1 mm / 5 mm) didn't have to
+// change; they were always written for noise, just paired with the
+// wrong metric.
+static double SampleNoiseStdMagnitude(const std::deque<Sample>& samples,
+                                      bool useTarget) {
+	double sumSq = 0;
 	int n = 0;
-
-	for (const auto& sample : samples) {
-		if (!sample.valid) continue;
-		const Eigen::Vector3d& x = useTarget ? sample.target.trans : sample.ref.trans;
+	for (size_t i = 1; i + 1 < samples.size(); ++i) {
+		if (!samples[i-1].valid || !samples[i].valid || !samples[i+1].valid) continue;
+		const Eigen::Vector3d& p0 = useTarget ? samples[i-1].target.trans : samples[i-1].ref.trans;
+		const Eigen::Vector3d& p1 = useTarget ? samples[i].target.trans   : samples[i].ref.trans;
+		const Eigen::Vector3d& p2 = useTarget ? samples[i+1].target.trans : samples[i+1].ref.trans;
+		const Eigen::Vector3d a = p2 - 2.0 * p1 + p0;
+		sumSq += a.squaredNorm();
 		++n;
-		// Welford's recurrence: divide by k (the new count, including this sample).
-		const Eigen::Vector3d delta = x - mean;
-		mean += delta / static_cast<double>(n);
-		const Eigen::Vector3d delta2 = x - mean;
-		M2 += delta.cwiseProduct(delta2);
 	}
-
-	if (n < 2) return 0.0;
-	const Eigen::Vector3d var = M2 / static_cast<double>(n - 1);
-	const double sx = std::sqrt(std::abs(var.x()));
-	const double sy = std::sqrt(std::abs(var.y()));
-	const double sz = std::sqrt(std::abs(var.z()));
-	return std::sqrt(sx * sx + sy * sy + sz * sz);
+	if (n < 1) return 0.0;
+	return std::sqrt(sumSq / static_cast<double>(n) / 6.0);
 }
 
 double CalibrationCalc::ReferenceJitter() const {
-	return WelfordStdMagnitude(m_samples, /*useTarget=*/false);
+	return SampleNoiseStdMagnitude(m_samples, /*useTarget=*/false);
 }
 
 double CalibrationCalc::TargetJitter() const {
-	return WelfordStdMagnitude(m_samples, /*useTarget=*/true);
+	return SampleNoiseStdMagnitude(m_samples, /*useTarget=*/true);
 }
 
 double CalibrationCalc::TranslationDiversity() const {

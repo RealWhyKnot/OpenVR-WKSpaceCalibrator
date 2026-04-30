@@ -635,6 +635,76 @@ TEST(CalibrationCalcTest, JitterFunctionsAreNonZeroOnNoisyBuffer) {
 }
 
 // ---------------------------------------------------------------------------
+// Constant-velocity motion must NOT register as jitter.
+//
+// The previous metric (raw position std-dev across the buffer) treated user
+// motion as jitter: a buffer spanning 1 m of head-waving reported 30+ cm of
+// "jitter" and permanently pinned AUTO calibration speed to VERY_SLOW. The
+// new second-difference metric is zero for any linear motion -- only
+// acceleration / tracking noise produces a signal. This regression test
+// pins that property: a buffer of perfectly linear motion (no noise) must
+// report ~0 jitter regardless of how far the trackers have travelled.
+// ---------------------------------------------------------------------------
+TEST(CalibrationCalcTest, JitterIgnoresConstantVelocityMotion) {
+    CalibrationCalc calc;
+    Pose ref;  ref.rot = Eigen::Matrix3d::Identity();
+    Pose tgt;  tgt.rot = Eigen::Matrix3d::Identity();
+
+    const Eigen::Vector3d velocityRef(1.0, 0.0, 0.0);  // 1 m/s in X
+    const Eigen::Vector3d velocityTgt(0.5, 0.3, 0.0);  // arbitrary direction
+
+    for (int i = 0; i < 100; i++) {
+        const double t = i * 0.01; // 100 Hz, 1 s of motion
+        ref.trans = velocityRef * t;
+        tgt.trans = velocityTgt * t;
+        calc.PushSample(Sample(ref, tgt, t));
+    }
+
+    // Pure constant-velocity motion has zero second derivative. The old
+    // metric would have returned ~0.5 m here (the range of motion); the
+    // new metric returns essentially zero.
+    EXPECT_LT(calc.ReferenceJitter(), 1e-9)
+        << "Constant-velocity motion should not register as jitter; "
+           "the old position-std-dev metric returned ~0.5 m for a buffer like this.";
+    EXPECT_LT(calc.TargetJitter(), 1e-9);
+}
+
+// ---------------------------------------------------------------------------
+// Realistic continuous-mode case: user is moving AND tracking has noise.
+// The metric should report the noise component, not the motion span. Prior
+// to the second-difference fix, AUTO calibration speed read jitter as
+// ~0.7 m on a real Quest Pro session and locked VERY_SLOW; this test pins
+// the corrected behaviour.
+// ---------------------------------------------------------------------------
+TEST(CalibrationCalcTest, JitterMeasuresNoiseDuringMotion) {
+    CalibrationCalc calc;
+    Pose ref;  ref.rot = Eigen::Matrix3d::Identity();
+    Pose tgt;  tgt.rot = Eigen::Matrix3d::Identity();
+
+    std::mt19937 rng(0xCAFE);
+    std::normal_distribution<double> noise(0.0, 0.001); // 1 mm per-axis std
+    const Eigen::Vector3d velocity(0.5, 0.0, 0.0);       // 0.5 m/s steady walk
+
+    for (int i = 0; i < 100; i++) {
+        const double t = i * 0.01;
+        const Eigen::Vector3d truth = velocity * t;
+        ref.trans = truth + Eigen::Vector3d(noise(rng), noise(rng), noise(rng));
+        tgt.trans = truth + Eigen::Vector3d(noise(rng), noise(rng), noise(rng));
+        calc.PushSample(Sample(ref, tgt, t));
+    }
+
+    // 1 mm per-axis Gaussian noise -> magnitude form ~ sqrt(3) * 1 mm ~ 1.7 mm.
+    // The motion span across the buffer is 50 cm but does not appear in this
+    // metric. Bounds well outside finite-sample-variance noise either way.
+    const double jRef = calc.ReferenceJitter();
+    const double jTgt = calc.TargetJitter();
+    EXPECT_GT(jRef, 0.0005);   // > 0.5 mm
+    EXPECT_LT(jRef, 0.005);    // < 5 mm
+    EXPECT_GT(jTgt, 0.0005);
+    EXPECT_LT(jTgt, 0.005);
+}
+
+// ---------------------------------------------------------------------------
 // TranslationDiversity boundary cases: empty / single-sample buffers report
 // 0; a buffer with a 30 cm spread per axis reports 1.0 (saturating); below
 // that, the score is the smallest-axis-range divided by 30 cm.
