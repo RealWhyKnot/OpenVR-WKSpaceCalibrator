@@ -1096,6 +1096,194 @@ namespace {
 			baseStationCache[obs.serial] = {obs.system, obs.pose};
 		}
 	}
+
+	// === Hybrid HMD-relocalization detector (logging-only) ===================
+	//
+	// Triple-AND signal that the HMD's tracking system (e.g. Quest SLAM)
+	// re-localized -- its reported pose in the OpenVR universe jumps even
+	// though physically the user didn't move:
+	//
+	//   1. HMD pose changed by >5 cm (translation) since the previous tick.
+	//   2. Base stations are stable (max delta <1 mm). Rules out a SteamVR
+	//      universe re-origin -- that's the other detector's domain.
+	//   3. Body trackers in a DIFFERENT tracking system from the HMD didn't
+	//      follow the HMD jump (their per-tick deltas are all <5 cm). Rules
+	//      out natural fast user motion -- when the user moves their head,
+	//      the body trackers (worn on the body) move along with it.
+	//
+	// The conjunction can't false-fire on natural motion: real motion has
+	// the HMD and body trackers moving together, so condition 3 fails. Only
+	// a re-localization (HMD jumps independently of body) trips all three.
+	//
+	// This is the LOGGING-ONLY first cut. When the trigger fires we emit a
+	// `# [time] hmd_relocalization_detected: dx=<m> dy=<m> dz=<m> dt=<rad>`
+	// annotation to the debug log and update the cache. We do NOT modify R
+	// or touch the chaperone -- the user wants to gather real-world data
+	// confirming the trigger fires only on actual events before we take
+	// corrective action.
+	//
+	// Requires >=2 base stations to even consider firing -- on Quest-only
+	// setups (no Lighthouse) the second condition can't be cross-checked
+	// and the detector is silent.
+	//
+	// Runs in continuous AND one-shot None mode. Skipped during active
+	// calibration sub-states (Begin / Rotation / Translation) where the
+	// HMD is being deliberately moved.
+
+	struct RelocalizationDetectorState {
+		bool havePrevHmd = false;
+		Eigen::Affine3d prevHmd = Eigen::Affine3d::Identity();
+		std::string hmdTrackingSystem;
+		// Per-device previous poses, keyed by OpenVR ID. ID is the right
+		// key here (not serial) because we re-read every tick and the OpenVR
+		// IDs are stable within a session for the duration of our use.
+		std::map<int32_t, Eigen::Vector3d> prevBodyTrans;
+		double lastFireTime = -1e9;
+	};
+	RelocalizationDetectorState g_relocDetector;
+
+	constexpr double kRelocHmdJumpM       = 0.05;   // 5 cm
+	constexpr double kRelocBodyMaxDeltaM  = 0.05;   // 5 cm (any body tracker moving more = rule out)
+	constexpr double kRelocBaseStableM    = 0.001;  // 1 mm
+	constexpr double kRelocThrottleSec    = 5.0;
+	constexpr int    kRelocMinBaseStations = 2;
+
+	void TickHmdRelocalizationDetector(double now) {
+		if (!vr::VRSystem()) return;
+
+		// Skip during active one-shot calibration sub-states (the HMD is
+		// being deliberately swung around). Continuous, ContinuousStandby,
+		// None, Editing all OK.
+		if (CalCtx.state == CalibrationState::Begin
+		 || CalCtx.state == CalibrationState::Rotation
+		 || CalCtx.state == CalibrationState::Translation) {
+			// Reset cache so the post-calibration baseline is fresh.
+			g_relocDetector.havePrevHmd = false;
+			g_relocDetector.prevBodyTrans.clear();
+			return;
+		}
+
+		auto& s = g_relocDetector;
+
+		// HMD pose. Index 0 by the static_assert above.
+		const auto& hmdRaw = CalCtx.devicePoses[vr::k_unTrackedDeviceIndex_Hmd];
+		const bool hmdValid = hmdRaw.poseIsValid && hmdRaw.deviceIsConnected
+			&& hmdRaw.result == vr::ETrackingResult::TrackingResult_Running_OK;
+		if (!hmdValid) {
+			// Tracking dropout. Drop the cache so we don't compare across
+			// the dropout (which would produce a spurious jump).
+			s.havePrevHmd = false;
+			s.prevBodyTrans.clear();
+			return;
+		}
+
+		// HMD's tracking system, cached once. Used to identify "body trackers
+		// in a DIFFERENT system" below.
+		if (s.hmdTrackingSystem.empty()) {
+			char buf[vr::k_unMaxPropertyStringSize] = {};
+			vr::ETrackedPropertyError err = vr::TrackedProp_Success;
+			vr::VRSystem()->GetStringTrackedDeviceProperty(
+				vr::k_unTrackedDeviceIndex_Hmd,
+				vr::Prop_TrackingSystemName_String,
+				buf, sizeof buf, &err);
+			if (err != vr::TrackedProp_Success) return;
+			s.hmdTrackingSystem = buf;
+		}
+
+		Pose hmdPoseWorld = ConvertPose(hmdRaw);
+		Eigen::Affine3d hmdPose = Eigen::Affine3d::Identity();
+		hmdPose.linear() = hmdPoseWorld.rot;
+		hmdPose.translation() = hmdPoseWorld.trans;
+
+		// Base stations: count + max delta vs last tick. Reuse the same
+		// cache the existing universe-shift detector populates -- but we
+		// can't read its state directly without coupling to it, so do a
+		// fresh scan here (cheap; ~4 base stations max).
+		double bsMaxDelta = 0.0;
+		int bsCount = 0;
+		char propBuf[vr::k_unMaxPropertyStringSize] = {};
+		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id) {
+			if (vr::VRSystem()->GetTrackedDeviceClass(id) != vr::TrackedDeviceClass_TrackingReference) continue;
+			const auto& dp = CalCtx.devicePoses[id];
+			if (!dp.poseIsValid || !dp.deviceIsConnected) continue;
+			if (dp.result != vr::ETrackingResult::TrackingResult_Running_OK) continue;
+			++bsCount;
+			vr::ETrackedPropertyError err = vr::TrackedProp_Success;
+			vr::VRSystem()->GetStringTrackedDeviceProperty(id, vr::Prop_SerialNumber_String,
+				propBuf, sizeof propBuf, &err);
+			if (err != vr::TrackedProp_Success) continue;
+			std::string serial = propBuf;
+			Pose p = ConvertPose(dp);
+			auto it = baseStationCache.find(serial); // populated by TickBaseStationDrift
+			if (it == baseStationCache.end()) continue;
+			double d = (p.trans - it->second.pose.translation()).norm();
+			if (d > bsMaxDelta) bsMaxDelta = d;
+		}
+
+		// Body trackers in OTHER tracking system(s). For Quest HMD + Lighthouse
+		// trackers, this picks up the Lighthouse trackers; for Lighthouse HMD +
+		// Quest trackers, it picks up the Quest trackers. Either way, the trackers
+		// we care about are the ones that DIDN'T re-localize when the HMD did.
+		double bodyMaxDelta = 0.0;
+		std::map<int32_t, Eigen::Vector3d> currentBodyTrans;
+		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id) {
+			const auto cls = vr::VRSystem()->GetTrackedDeviceClass(id);
+			if (cls != vr::TrackedDeviceClass_GenericTracker
+				&& cls != vr::TrackedDeviceClass_Controller) continue;
+			const auto& dp = CalCtx.devicePoses[id];
+			if (!dp.poseIsValid || !dp.deviceIsConnected) continue;
+			if (dp.result != vr::ETrackingResult::TrackingResult_Running_OK) continue;
+			vr::ETrackedPropertyError err = vr::TrackedProp_Success;
+			vr::VRSystem()->GetStringTrackedDeviceProperty(id, vr::Prop_TrackingSystemName_String,
+				propBuf, sizeof propBuf, &err);
+			if (err != vr::TrackedProp_Success) continue;
+			if (std::string(propBuf) == s.hmdTrackingSystem) continue; // skip same-system devices
+			Pose p = ConvertPose(dp);
+			currentBodyTrans[(int32_t)id] = p.trans;
+			auto it = s.prevBodyTrans.find((int32_t)id);
+			if (it == s.prevBodyTrans.end()) continue;
+			double d = (p.trans - it->second).norm();
+			if (d > bodyMaxDelta) bodyMaxDelta = d;
+		}
+
+		// Trigger evaluation. Need a previous HMD pose and >=2 base stations
+		// (so condition 2 isn't trivially passing). Note we still update the
+		// cache even when no trigger fires -- always tracking the latest
+		// values so the next tick's delta is over a one-tick interval.
+		bool fired = false;
+		if (s.havePrevHmd && bsCount >= kRelocMinBaseStations) {
+			const double hmdDelta = (hmdPose.translation() - s.prevHmd.translation()).norm();
+			const Eigen::Quaterniond qNew(hmdPose.linear());
+			const Eigen::Quaterniond qOld(s.prevHmd.linear());
+			Eigen::Quaterniond rotDelta = qNew * qOld.conjugate();
+			rotDelta.normalize();
+			const double angRad = 2.0 * std::acos(std::min(1.0, std::abs(rotDelta.w())));
+
+			const bool throttled = (now - s.lastFireTime) < kRelocThrottleSec;
+			if (!throttled
+				&& hmdDelta > kRelocHmdJumpM
+				&& bodyMaxDelta < kRelocBodyMaxDeltaM
+				&& bsMaxDelta < kRelocBaseStableM)
+			{
+				const Eigen::Vector3d dpos = hmdPose.translation() - s.prevHmd.translation();
+				char logbuf[256];
+				snprintf(logbuf, sizeof logbuf,
+					"hmd_relocalization_detected: dx=%.4f dy=%.4f dz=%.4f dt=%.4f"
+					" (hmdDelta=%.3f bodyMax=%.3f bsMax=%.4f bsCount=%d)",
+					dpos.x(), dpos.y(), dpos.z(), angRad,
+					hmdDelta, bodyMaxDelta, bsMaxDelta, bsCount);
+				Metrics::WriteLogAnnotation(logbuf);
+				s.lastFireTime = now;
+				fired = true;
+			}
+		}
+		(void)fired; // future: trigger correction action(s)
+
+		// Update cache for next tick.
+		s.prevHmd = hmdPose;
+		s.havePrevHmd = true;
+		s.prevBodyTrans = std::move(currentBodyTrans);
+	}
 }
 
 void ResetAndDisableOffsets(uint32_t id, const std::string& trackingSystem = "")
@@ -1499,6 +1687,17 @@ void CalibrationTick(double time)
 		// reseat the IDs cleanly.
 		return;
 	}
+
+	// Hybrid HMD-relocalization detector. Runs in every state where a tick
+	// proceeds; the function itself skips active calibration sub-states
+	// where the HMD is being deliberately moved. Logging-only -- emits a
+	// `# [time] hmd_relocalization_detected: ...` annotation when the
+	// triple-AND trigger fires, but doesn't modify R or the chaperone yet.
+	// We run this BEFORE TickBaseStationDrift so the base-station cache it
+	// shares is populated with the previous tick's poses (the relocalization
+	// detector compares against THIS tick's poses; the universe-shift
+	// detector cares about pose changes between consecutive ticks).
+	TickHmdRelocalizationDetector(time);
 
 	if (ctx.state == CalibrationState::Continuous || ctx.state == CalibrationState::ContinuousStandby) {
 		ctx.ClearLogOnMessage();

@@ -81,6 +81,14 @@ $copyCmds = $RuntimeFiles | ForEach-Object {
     "Copy-Item -Force -Path '$ArtifactsDir\$_' -Destination '$InstallPath\$_'"
 }
 
+# If an instance is already running, remember that so we can re-launch it
+# after the swap. The user's typical workflow is "leave the program open
+# while iterating," so silently killing it without a relaunch is a worse
+# experience than a brief flicker. We check from the unelevated side to
+# avoid having the elevation path lose this state.
+$wasRunning = @(Get-Process -Name SpaceCalibrator -ErrorAction SilentlyContinue).Count -gt 0
+$installedExe = Join-Path $InstallPath "SpaceCalibrator.exe"
+
 # Icon-cache refresh runs after the copy. ie4uinit's -show command tells
 # Windows to re-read icon resources for known shortcuts; combined with the
 # fresh EXE's last-write-time, the taskbar's pinned-shortcut icon updates
@@ -97,8 +105,20 @@ Start-Sleep -Seconds 2
 
 Write-Host ""
 Write-Host "Hot-swapping into: $InstallPath" -ForegroundColor Green
+if ($wasRunning) {
+    Write-Host "Detected running instance -- will re-launch after install." -ForegroundColor DarkGray
+}
 Write-Host "Approve the UAC prompt when it appears." -ForegroundColor DarkGray
 Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile","-Command",$elevatedScript -Wait
+
+# Re-launch the freshly-installed copy if one was running before the swap.
+# Launched unelevated so it inherits the user's normal token (matches what
+# Start-menu / pinned-shortcut launches do). Working directory is the install
+# dir so the manifest path / icon load resolve relative to the install.
+if ($wasRunning -and (Test-Path $installedExe)) {
+    Write-Host "Re-launching $installedExe ..." -ForegroundColor DarkGray
+    Start-Process -FilePath $installedExe -WorkingDirectory $InstallPath
+}
 
 # Sanity-check from the unelevated side: do the install-dir timestamps now
 # match the build timestamps? If not, the elevated copy probably failed
