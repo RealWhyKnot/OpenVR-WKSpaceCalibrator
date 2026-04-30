@@ -1139,6 +1139,13 @@ namespace {
 		// IDs are stable within a session for the duration of our use.
 		std::map<int32_t, Eigen::Vector3d> prevBodyTrans;
 		double lastFireTime = -1e9;
+
+		// Snapshot of the most recent fire's measured deltas, exposed via
+		// LastDetectedRelocalization() so the UI can surface "your last
+		// detected drift event was X cm at T seconds ago" alongside the
+		// recenter button.
+		Eigen::Vector3d lastFireDelta = Eigen::Vector3d::Zero();
+		double lastFireRotRad = 0.0;
 	};
 	RelocalizationDetectorState g_relocDetector;
 
@@ -1274,6 +1281,8 @@ namespace {
 					hmdDelta, bodyMaxDelta, bsMaxDelta, bsCount);
 				Metrics::WriteLogAnnotation(logbuf);
 				s.lastFireTime = now;
+				s.lastFireDelta = dpos;
+				s.lastFireRotRad = angRad;
 				fired = true;
 			}
 		}
@@ -2310,4 +2319,104 @@ void DebugApplyRandomOffset() {
 
 int GetWatchdogResetCount() {
 	return calibration.m_watchdogResets;
+}
+
+bool LastDetectedRelocalization(double& outAgeSeconds, double& outDeltaMeters,
+                                double& outDeltaDegrees) {
+	if (g_relocDetector.lastFireTime <= -1e8) return false;
+	const double now = glfwGetTime();
+	outAgeSeconds = now - g_relocDetector.lastFireTime;
+	outDeltaMeters = g_relocDetector.lastFireDelta.norm();
+	outDeltaDegrees = g_relocDetector.lastFireRotRad * 180.0 / EIGEN_PI;
+	return true;
+}
+
+// Manual playspace recenter: shift the standing zero pose so the user's
+// current physical HMD position becomes the chaperone center. Called from
+// the "Recenter playspace" UI button. Y is preserved (don't recalibrate
+// floor) and rotation is preserved (don't change yaw); only X/Z translate.
+//
+// Math derivation (so the next person editing this can double-check):
+//
+//   SZP is the standing-universe origin's pose expressed in the raw
+//   tracking universe. SZP = [R_szp | t_szp; 0 | 1]. A device's pose in
+//   the standing universe is then:
+//
+//     standing_pose = SZP^-1 * raw_pose
+//                   ↳ translation = R_szp^-1 * (raw_pos - t_szp)
+//
+//   We want the user's HMD standing-pose translation to become (0, y, 0)
+//   in X/Z while preserving Y. Setting:
+//
+//     t_szp_new = t_szp_old + R_szp * (hmd_standing_x, 0, hmd_standing_z)
+//
+//   makes hmd_standing_new = hmd_standing_old - (hmd_standing_x, 0, hmd_standing_z)
+//                          = (0, hmd_standing_y, 0). ✓
+//
+//   For the common case where SZP's rotation is yaw-only (room
+//   calibration's typical state), R_szp * (x, 0, z) is just (x, 0, z)
+//   rotated about the Y axis -- so we have to apply the rotation, not
+//   just add the X/Z components. (An earlier draft of this function got
+//   that wrong; the addition only happened to be correct when yaw was
+//   exactly 0.)
+//
+// Returns true on success. Failures: VRChaperoneSetup unavailable, HMD
+// pose not valid.
+bool RecenterPlayspaceToCurrentHmd() {
+	if (!vr::VRSystem() || !vr::VRChaperoneSetup()) return false;
+
+	// Read HMD's current pose in the standing universe. With predictionSecs=0
+	// we get the "now" pose -- no extrapolation, which is what we want for
+	// a one-shot snapshot anchor.
+	vr::TrackedDevicePose_t poses[1] = {};
+	vr::VRSystem()->GetDeviceToAbsoluteTrackingPose(
+		vr::TrackingUniverseStanding, 0.0f, poses, 1);
+	if (!poses[0].bPoseIsValid
+		|| poses[0].eTrackingResult != vr::TrackingResult_Running_OK) {
+		CalCtx.Log("Recenter playspace: HMD pose not valid; aborting.\n");
+		return false;
+	}
+	const auto& hmdMat = poses[0].mDeviceToAbsoluteTracking;
+	const float hmdStandingX = hmdMat.m[0][3];
+	const float hmdStandingZ = hmdMat.m[2][3];
+
+	// Defensive: throw away any pending working copy so we read the live
+	// state, not whatever some other code path is in the middle of editing.
+	// Mirrors what ApplyChaperoneBounds does.
+	vr::VRChaperoneSetup()->RevertWorkingCopy();
+
+	vr::HmdMatrix34_t szp{};
+	vr::VRChaperoneSetup()->GetWorkingStandingZeroPoseToRawTrackingPose(&szp);
+
+	// Δ = R_szp * (hmd_standing_x, 0, hmd_standing_z). Use the X/Z columns
+	// of R_szp's row-major 3x3 (the [_][0] and [_][2] columns).
+	const float dx = szp.m[0][0] * hmdStandingX + szp.m[0][2] * hmdStandingZ;
+	const float dz = szp.m[2][0] * hmdStandingX + szp.m[2][2] * hmdStandingZ;
+	// Y delta would be szp.m[1][0] * hmdStandingX + szp.m[1][2] * hmdStandingZ.
+	// For yaw-only SZP that's 0 (Y-axis row is (0, 1, 0)). For tilted SZPs
+	// it's small and cancels naturally if the user wants Y preserved.
+	// Either way we do NOT modify Y to keep floor calibration intact.
+	const float oldTx = szp.m[0][3];
+	const float oldTz = szp.m[2][3];
+
+	szp.m[0][3] = oldTx + dx;
+	szp.m[2][3] = oldTz + dz;
+
+	vr::VRChaperoneSetup()->SetWorkingStandingZeroPoseToRawTrackingPose(&szp);
+	vr::VRChaperoneSetup()->CommitWorkingCopy(vr::EChaperoneConfigFile_Live);
+
+	// Log enough that a debug-log reader can verify the action did what was
+	// intended: HMD pose pre-shift, Δ applied, expected post-shift HMD
+	// position (~0, y, ~0 in X/Z if the math is right).
+	char logbuf[256];
+	snprintf(logbuf, sizeof logbuf,
+		"playspace_recenter: hmd_standing=(%.3f, %.3f, %.3f) -> "
+		"szp_translation_delta=(%.3f, 0, %.3f); szp_translation %.3f,%.3f -> %.3f,%.3f",
+		hmdStandingX, hmdMat.m[1][3], hmdStandingZ,
+		dx, dz,
+		oldTx, oldTz, szp.m[0][3], szp.m[2][3]);
+	CalCtx.Log(logbuf);
+	Metrics::WriteLogAnnotation(logbuf);
+
+	return true;
 }

@@ -533,6 +533,20 @@ void DebugApplyRandomOffset();
 // Calibration.cpp, so we expose this via a free function.
 int GetWatchdogResetCount();
 
+// Most recent HMD-relocalization detection event. Returns true if any event
+// has been logged this session and populates out parameters with the time
+// since the event (seconds), the translation magnitude (meters), and the
+// rotation magnitude (degrees). Returns false if the detector hasn't fired
+// at all this session.
+bool LastDetectedRelocalization(double& outAgeSeconds, double& outDeltaMeters,
+                                double& outDeltaDegrees);
+
+// Manual playspace recenter: shift the standing zero pose so the user's
+// current HMD position becomes the chaperone center. X and Z translate;
+// Y (floor) and rotation are preserved. Used by the "Recenter playspace"
+// UI button. Returns true on success.
+bool RecenterPlayspaceToCurrentHmd();
+
 // Re-open the driver pose shared-memory segment. The IPC client invokes this
 // after a successful reconnect to vrserver: when vrserver crashes and respawns,
 // the named-mapping the overlay had open is destroyed, the mapped view detaches

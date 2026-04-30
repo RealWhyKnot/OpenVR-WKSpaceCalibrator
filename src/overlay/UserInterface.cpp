@@ -1734,6 +1734,93 @@ static void OneShot_DrawSettings() {
 	}
 	ImGui::EndGroupPanel();
 
+	// Recenter playspace -- manual chaperone shift for "the headset
+	// re-localized and now the chaperone is in the wrong place around me."
+	// User-triggered (not automatic) because they can see the misalignment
+	// directly. We don't claim to detect "when" they should click; we just
+	// surface the most recent detected event below as a nudge so they know
+	// roughly when their tracking last shifted.
+	//
+	// Two-step interaction: button opens a confirm popup that tells the
+	// user where to stand FIRST, since the recenter snapshot uses their
+	// current position as the new chaperone centre. Without the prompt the
+	// user might click before getting into position and end up with the
+	// chaperone offset from where they actually meant.
+	ImGui::Spacing();
+	ImGui::BeginGroupPanel("Recenter playspace", panelSize);
+	{
+		ImGui::TextWrapped(
+			"If your headset has re-localized and the chaperone bounds are now "
+			"in the wrong place relative to where you actually are, click the "
+			"button below. Floor height and yaw are preserved -- only the "
+			"chaperone's X/Z origin shifts.");
+		ImGui::Spacing();
+
+		ImGui::BeginDisabled(!IsVRReady());
+		if (ImGui::Button("Recenter playspace to my current position")) {
+			ImGui::OpenPopup("Recenter playspace?");
+		}
+		ImGui::EndDisabled();
+		if (!IsVRReady() && ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Waiting for SteamVR.");
+		}
+
+		// Confirm modal. Keeps the click intentional: the user has to
+		// physically position themselves before the snapshot, which is the
+		// part the modal copy is for.
+		if (ImGui::BeginPopupModal("Recenter playspace?", nullptr,
+				ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
+			ImGui::TextWrapped(
+				"Stand at the centre of your play area, facing forward, then "
+				"click Confirm. Your headset's current position will become "
+				"the new chaperone centre.");
+			ImGui::Spacing();
+			ImGui::TextDisabled(
+				"Floor height and yaw are preserved. Only X/Z (where you "
+				"are in the room) shifts. Reversible: click again later if "
+				"you over-shoot.");
+			ImGui::Spacing();
+			if (ImGui::Button("Confirm##recenter_confirm",
+					ImVec2(180, 0))) {
+				const bool ok = RecenterPlayspaceToCurrentHmd();
+				if (!ok) {
+					CalCtx.Log("Recenter playspace failed -- check the log for details.\n");
+				}
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Cancel##recenter_cancel",
+					ImVec2(120, 0))) {
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::EndPopup();
+		}
+
+		// Surface the detector's most recent event. The detector is
+		// logging-only; this is the user-visible side of the same data.
+		double age = 0, deltaM = 0, deltaDeg = 0;
+		if (LastDetectedRelocalization(age, deltaM, deltaDeg)) {
+			ImGui::TextDisabled(
+				"Last detected re-localization: %.0f s ago (%.1f cm, %.1f deg).",
+				age, deltaM * 100.0, deltaDeg);
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("The drift detector logs HMD re-localization events when it sees the\n"
+				                  "HMD's reported pose jump while base stations and body trackers stayed put.\n"
+				                  "If this number is small (< 60 s) and you're noticing chaperone drift,\n"
+				                  "clicking the button above is probably the right fix.");
+			}
+		} else {
+			ImGui::TextDisabled(
+				"No re-localization detected this session.");
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("Detector requires at least 2 Lighthouse base stations to fire.\n"
+				                  "If you don't have base stations, the detector is silent and the\n"
+				                  "button above is your only signal.");
+			}
+		}
+	}
+	ImGui::EndGroupPanel();
+
 	// Wizard / reset actions, grouped in their own panel so they don't read
 	// as floating buttons under the Settings table.
 	ImGui::Spacing();
