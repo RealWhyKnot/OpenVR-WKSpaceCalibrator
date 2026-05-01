@@ -48,6 +48,10 @@ namespace Metrics {
     TimeSeries<double> watchdogResetCount;
     TimeSeries<double> translationDiversity;
     TimeSeries<double> rotationDiversity;
+    TimeSeries<Eigen::Vector3d> translationAxisRangesCm;
+    TimeSeries<double> watchdogHealthySkip;
+    TimeSeries<double> effectivePriorMm;
+    TimeSeries<double> validateRmsThresholdMm;
     std::string lastRejectReason;
 
     TimeSeries<bool> calibrationApplied;

@@ -432,6 +432,13 @@ struct CalibrationContext
 		// believed-good and caused StartContinuousCalibration to pass `true` to
 		// setRelativeTransformation downstream.
 		relativePosCalibrated = false;
+		// Continuous-mode runtime offset. ResetConfig() at construction zeroes
+		// this; without resetting on Clear() too, a leftover offset from a
+		// previous session biased every reference pose in the next continuous
+		// calibration ("everything looks consistently 5–10mm off and won't
+		// converge" symptom). The offset is a runtime adjustment, not a
+		// persistent profile setting — it has no business surviving a Clear().
+		continuousCalibrationOffset = Eigen::Vector3d::Zero();
 	}
 
 	// Resolve the user's selected speed to a concrete FAST/SLOW/VERY_SLOW. When

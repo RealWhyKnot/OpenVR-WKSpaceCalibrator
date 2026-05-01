@@ -25,6 +25,10 @@ namespace Metrics {
 	TimeSeries<double> watchdogResetCount;
 	TimeSeries<double> translationDiversity;
 	TimeSeries<double> rotationDiversity;
+	TimeSeries<Eigen::Vector3d> translationAxisRangesCm;
+	TimeSeries<double> watchdogHealthySkip;
+	TimeSeries<double> effectivePriorMm;
+	TimeSeries<double> validateRmsThresholdMm;
 	std::string lastRejectReason;
 
 	TimeSeries<double> fallbackApplyRate;
@@ -181,6 +185,22 @@ namespace Metrics {
 		TS_FIELD(rotationConditionRatio),
 		TS_FIELD(consecutiveRejections),
 		TS_FIELD(samplesInBuffer),
+		// Motion-coverage scores for the live sample buffer (0..1 each). Pushed by
+		// CollectSample. The Calibration Progress popup reads these for the live
+		// "Translation %" / "Rotation %" bars; logging them here lets post-hoc
+		// triage see exactly what the bars showed when a one-shot calibration
+		// got stuck below the auto-finish threshold.
+		TS_FIELD(translationDiversity),
+		TS_FIELD(rotationDiversity),
+		TS_VECTOR_FIELD(translationAxisRangesCm),
+		// Wedge-detection diagnostics. watchdogHealthySkip flags ticks where the
+		// watchdog wanted to clear but couldn't (prior in healthy band).
+		// effectivePriorMm is the actual prior the 1.5× gate compared against.
+		// validateRmsThresholdMm is the dynamic noise-floor threshold the
+		// validate gate used this tick.
+		TS_FIELD(watchdogHealthySkip),
+		TS_FIELD(effectivePriorMm),
+		TS_FIELD(validateRmsThresholdMm),
 		TS_FIELD(watchdogResetCount),
 		TS_FIELD(computationTime),
 		TS_FIELD(jitterRef),
@@ -309,7 +329,8 @@ namespace Metrics {
 		// harness in tools/replay/ rejects logs that don't begin with this banner so
 		// older v1 captures (which lacked raw poses) fail loud rather than silently
 		// being interpreted with the wrong column layout. New columns added later
-		// (samplesInBuffer, watchdogResetCount, reject_reason) are still v2 because
+		// (samplesInBuffer, watchdogResetCount, reject_reason, translationDiversity,
+		// rotationDiversity, translationAxisRangesCm.{x,y,z}) are still v2 because
 		// the replay harness looks columns up by name, not position.
 		logFile << "# spacecal_log_v2\n";
 

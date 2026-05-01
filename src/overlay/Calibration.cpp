@@ -279,7 +279,17 @@ namespace {
 			driverPose.qRotation.y,
 			driverPose.qRotation.z
 		);
-		
+		// Normalise the composed quaternion. Eigen's quaternion multiplication
+		// does not auto-normalise, so over a multi-minute session the cumulative
+		// scale drift from non-unit-norm input quaternions (some drivers emit
+		// quaternions slightly off the unit sphere — Quest Pro's IMU fusion
+		// occasionally produces ~10⁻⁵ scale errors per frame) compounds into a
+		// non-orthonormal rotation matrix at xform.linear(), which the Kabsch /
+		// SVD downstream silently treats as a mild shear. The metrics-side
+		// composer at the bottom of CalibrationTick already does this; the
+		// calibration-side now matches.
+		driverRot.normalize();
+
 		Eigen::Vector3d driverPos = driverToWorldV + driverToWorldQ * Eigen::Vector3d(
 			driverPose.vecPosition[0],
 			driverPose.vecPosition[1],
@@ -357,14 +367,40 @@ namespace {
 		reference = ctx.devicePoses[ctx.referenceID];
 		target = ctx.devicePoses[ctx.targetID];
 
+		// Validity gate. Previously this was `if (!poseIsValid && result != Running_OK)`,
+		// i.e. "fail only when BOTH signals say bad" — permissive. The case the
+		// permissive form silently accepts is the one we care about: Quest Pro
+		// (and other inside-out drivers) regularly report `poseIsValid == false`
+		// for one tick during a relocalization while still claiming
+		// `result == Running_OK`. The pose for that single tick is genuinely
+		// invalid — using it injects a phantom translation that the calibration
+		// math sees as legitimate motion and tries to fit. Tighten to `||`:
+		// reject if EITHER signal says bad.
+		//
+		// To watch the impact: every time this gate now rejects a sample that
+		// the old gate would have accepted, we annotate. If those annotations
+		// show up only in known-bad sessions, the change is a net win; if they
+		// show up at every tick of a healthy session, the gate is too tight and
+		// we revisit.
 		bool ok = true;
-		if (!reference.poseIsValid && reference.result != vr::ETrackingResult::TrackingResult_Running_OK)
+		const bool refSilentInvalid = !reference.poseIsValid &&
+			reference.result == vr::ETrackingResult::TrackingResult_Running_OK;
+		const bool tgtSilentInvalid = !target.poseIsValid &&
+			target.result == vr::ETrackingResult::TrackingResult_Running_OK;
+		if (!reference.poseIsValid || reference.result != vr::ETrackingResult::TrackingResult_Running_OK)
 		{
 			CalCtx.Log("Reference device is not tracking\n"); ok = false;
 		}
-		if (!target.poseIsValid && target.result != vr::ETrackingResult::TrackingResult_Running_OK)
+		if (!target.poseIsValid || target.result != vr::ETrackingResult::TrackingResult_Running_OK)
 		{
 			CalCtx.Log("Target device is not tracking\n"); ok = false;
+		}
+		if (refSilentInvalid || tgtSilentInvalid) {
+			Metrics::WriteLogAnnotation(refSilentInvalid && tgtSilentInvalid
+				? "silent_invalid_pose_rejected: ref+tgt"
+				: refSilentInvalid
+					? "silent_invalid_pose_rejected: ref"
+					: "silent_invalid_pose_rejected: tgt");
 		}
 		if (!ok)
 		{
@@ -473,6 +509,7 @@ namespace {
 		// calibration. Computed every CollectSample tick; cheap (linear scan).
 		Metrics::translationDiversity.Push(calibration.TranslationDiversity());
 		Metrics::rotationDiversity.Push(calibration.RotationDiversity());
+		Metrics::translationAxisRangesCm.Push(calibration.TranslationAxisRangesCm());
 
 		// Push observed jitter every tick so the AUTO calibration-speed selector
 		// in ResolvedCalibrationSpeed sees a fresh value -- the previous push
@@ -2043,31 +2080,57 @@ void CalibrationTick(double time)
 	if (calibration.SampleCount() < CalCtx.SampleCount()) return;
 	while (calibration.SampleCount() > CalCtx.SampleCount()) calibration.ShiftSample();
 
-	// One-shot motion-variety gate. Continuous mode bypasses this -- it has its
-	// own incremental accept/reject loop that doesn't need a "stop here" signal.
-	// One-shot's prior behaviour was "buffer fills -> run ComputeOneshot once,
-	// pass or fail". With AUTO calibration speed picking VERY_SLOW (500 samples
-	// = ~25 s) for noisy IMU rigs, the user could wave for 25 seconds and then
-	// get rejected because their motion only covered one axis -- a frustrating
-	// outcome the program could have prevented.
+	// Two-phase one-shot motion-variety gate. Continuous mode bypasses this --
+	// it has its own incremental accept/reject loop that doesn't need a "stop
+	// here" signal.
 	//
-	// New flow: once the buffer is full (noise averaging satisfied), we still
-	// require both motion-coverage diversities >= 70 % before running the math.
-	// Below that threshold, drop the oldest sample and keep collecting -- the
-	// buffer rolls so fresh motion replaces stale, the bars in the popup keep
-	// climbing, and the user finishes naturally when their motion is varied
-	// enough. Both "have we waved enough" (buffer) and "varied enough" (bars)
-	// gates are visible in the popup so the user knows what's holding them up.
-	if (CalCtx.state != CalibrationState::Continuous
-		&& CalCtx.state != CalibrationState::ContinuousStandby)
-	{
-		constexpr double kAutoFinishDiversity = 0.70;
-		if (calibration.TranslationDiversity() < kAutoFinishDiversity
-			|| calibration.RotationDiversity() < kAutoFinishDiversity)
-		{
-			calibration.ShiftSample(); // drop oldest, keep buffer rolling
+	// Earlier this was a single combined gate ("both diversities >= 70 % or
+	// keep rolling"). That trapped users in an unwinnable game with the
+	// rolling 250-sample buffer: rotate first → rotation samples age out
+	// before translation samples accumulate; translate first → vice versa.
+	// The user-visible symptom was the "Translation %" bar that "never
+	// reaches 100" because the buffer recycled rotation-rich content out
+	// before the user could fill the translation half.
+	//
+	// Two-phase flow:
+	//   Rotation phase: gate on rotationDiversity only. Buffer rolls until
+	//   the user has rotated through ≥ 90° between some pair of samples.
+	//   When the gate passes, freeze the buffer (FreezeRotationPhaseSamples)
+	//   and transition to Translation. The freeze preserves the rotation
+	//   samples for the final solve regardless of how slowly the user fills
+	//   the translation half.
+	//
+	//   Translation phase: gate on translationDiversity only, computed on a
+	//   fresh live buffer. Buffer rolls until the user has waved ≥ 30 cm on
+	//   every axis. When the gate passes, fall through to ComputeOneshot,
+	//   which splices the frozen rotation samples back in for the math.
+	if (CalCtx.state == CalibrationState::Rotation) {
+		constexpr double kPhaseDiversity = 0.70;
+		if (calibration.RotationDiversity() < kPhaseDiversity) {
+			calibration.ShiftSample();
 			return;
 		}
+		// Rotation phase complete. Freeze the buffer, transition state, and
+		// return so the next CollectSample tick starts populating a fresh
+		// translation-phase buffer. The popup's Rotation% bar will visually
+		// drop to 0 (the new buffer is empty) but the UI latches it at 100%
+		// while CalCtx.state == Translation so the user sees the achievement
+		// preserved.
+		calibration.FreezeRotationPhaseSamples();
+		CalCtx.state = CalibrationState::Translation;
+		CalCtx.Log("Rotation phase complete. Now wave the tracker through ~30 cm on every axis.\n");
+		Metrics::WriteLogAnnotation("RotationPhaseFrozen");
+		return;
+	}
+	if (CalCtx.state == CalibrationState::Translation) {
+		constexpr double kPhaseDiversity = 0.70;
+		if (calibration.TranslationDiversity() < kPhaseDiversity) {
+			calibration.ShiftSample();
+			return;
+		}
+		// Translation diversity satisfied -- fall through to ComputeOneshot
+		// below. ComputeOneshot's RotationFreezeSplice will prepend the
+		// frozen rotation samples for the duration of the solve.
 	}
 
 	if (CalCtx.state == CalibrationState::Continuous && CalCtx.requireTriggerPressToApply && CalCtx.hasAppliedCalibrationResult) {

@@ -80,6 +80,36 @@ namespace Metrics {
 	extern TimeSeries<double> translationDiversity;
 	extern TimeSeries<double> rotationDiversity;
 
+	// Per-axis bounding-box ranges (centimetres) of the target tracker across
+	// the live sample buffer. The "Translation coverage" tooltip uses this to
+	// tell the user which axis (X / Y / Z) is the bottleneck when the bar is
+	// stuck below 100 %. Whichever component is smallest IS what's pinning
+	// translationDiversity (= min component / 30 cm). Pushed each tick from
+	// CollectSample alongside the scalar diversity metrics.
+	extern TimeSeries<Eigen::Vector3d> translationAxisRangesCm;
+
+	// 1 when the watchdog WANTED to fire (consecutive rejections >= cap and
+	// m_isValid) but skipped because the prior calibration error is in the
+	// "healthy" band — i.e. the wedged-at-noise-floor symptom that the
+	// kHealthyPriorErrorMax constant lets through. Push every tick the
+	// watchdog evaluates, so a CSV reader can see at a glance whether the
+	// session is wedged.
+	extern TimeSeries<double> watchdogHealthySkip;
+
+	// The effectivePrior the 1.5× improvement gate compared against this tick
+	// (millimetres). Equals max(priorCalibrationError*1000, kRejectionFloor*1000)
+	// — i.e. the value the gate actually used, which can differ from
+	// error_currentCal by the rejection-floor clamp. Helps explain rejections
+	// that look puzzling against the raw prior error.
+	extern TimeSeries<double> effectivePriorMm;
+
+	// Adaptive RMS threshold (millimetres) computed by ValidateCalibration each
+	// tick: max(5 mm, 3 * sqrt(jitterRef² + jitterTarget²)). Without logging
+	// this, "validate_failed" rejections look opaque — was the candidate's RMS
+	// honestly above the noise floor or did the floor jitter up this tick and
+	// trip an otherwise-good candidate?
+	extern TimeSeries<double> validateRmsThresholdMm;
+
 	// Cumulative count of stuck-loop watchdog firings. Logged as a per-row
 	// number so you can grep the CSV for the row index where a fire happened
 	// even after the # annotation lines are stripped.
