@@ -38,7 +38,17 @@ inline IsoTransform operator*(const IsoTransform& a, const IsoTransform& b) {
 	// `Eigen::Quaterniond * Vector3d` rotates the vector directly without
 	// materialising a 4x4 isometry; equivalent result, fewer allocations and
 	// arithmetic ops on the pose-update hot path.
-	auto rot = a.rotation * b.rotation;
+	//
+	// Renormalise the composed rotation. Eigen's quaternion multiplication
+	// does not auto-normalise. On the driver's pose-update hot path this
+	// composes 1+ kHz across all tracked devices, with one of the operands
+	// (device.transform.rotation, populated by interpolateAround's slerp)
+	// itself the product of millions of prior compositions over a multi-hour
+	// session. ULP-level scale drift compounds into a shear that downstream
+	// SteamVR consumers — which don't always re-normalise either — render
+	// as a subtle skew/wobble. Cost: one rsqrt + 4 multiplies per call, sub-
+	// microsecond, lost in the noise of the hot path.
+	auto rot = (a.rotation * b.rotation).normalized();
 	Eigen::Vector3d trans = a.translation + a.rotation * b.translation;
 
 	return IsoTransform(rot, trans);
@@ -52,7 +62,12 @@ inline IsoTransform IsoTransform::interpolateAround(double lerp, const IsoTransf
 	auto initialPos = (*this) * localPoint;
 	Eigen::Vector3d finalPos = initialPos * (1 - lerp) + (target * localPoint) * lerp;
 
-	auto newRotation = rotation.slerp(lerp, target.rotation);
+	// slerp on unit quaternions returns a unit quaternion to within ULP, but
+	// our inputs (this->rotation and target.rotation) accumulate error over
+	// thousands of prior interpolateAround calls because we feed the result
+	// back into the same field. Defensive normalise on the slerp output keeps
+	// the running rotation pinned to the unit sphere indefinitely.
+	auto newRotation = rotation.slerp(lerp, target.rotation).normalized();
 	Eigen::Vector3d newTranslation = finalPos - newRotation * localPoint;
 
 	return IsoTransform(newRotation, newTranslation);
