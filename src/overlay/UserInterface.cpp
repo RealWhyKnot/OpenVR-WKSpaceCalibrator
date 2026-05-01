@@ -2256,11 +2256,31 @@ void BuildMenu(bool runningInOverlay)
 		if (isCollecting) {
 			ImGui::Spacing();
 			ImGui::Separator();
-			ImGui::TextDisabled("Motion coverage");
+			// Phase banner. The two-phase one-shot flow (Rotation → Translation)
+			// is invisible to the user otherwise; surfacing the active phase and
+			// what motion to do removes the "I waved but the bar didn't move"
+			// confusion that the old combined-gate flow created.
+			if (CalCtx.state == CalibrationState::Rotation) {
+				ImGui::TextDisabled("Phase 1 of 2: Rotation");
+				ImGui::TextWrapped("Rotate the tracker through different orientations (≥ 90° between some pair).");
+			} else if (CalCtx.state == CalibrationState::Translation) {
+				ImGui::TextDisabled("Phase 2 of 2: Translation");
+				ImGui::TextWrapped("Wave the tracker through ~30 cm on each of left/right, up/down, and forward/back.");
+			} else {
+				ImGui::TextDisabled("Motion coverage");
+			}
 			ImGui::Spacing();
 
 			const float trDiv = (float)Metrics::translationDiversity.last();
-			const float rotDiv = (float)Metrics::rotationDiversity.last();
+			// Latch the rotation bar at 100 % once we've moved into Translation
+			// phase: the rotation samples are frozen on CalibrationCalc and the
+			// live Metrics::rotationDiversity now reflects only fresh translation
+			// samples (which initially drops to 0 and stays low). Showing the
+			// raw metric here would make the just-achieved rotation appear to
+			// regress -- correct from the metric's POV but wrong UX.
+			const float rotDiv = (CalCtx.state == CalibrationState::Translation)
+				? 1.0f
+				: (float)Metrics::rotationDiversity.last();
 
 			char trLabel[64], rotLabel[64];
 			snprintf(trLabel, sizeof trLabel, "Translation %d%%", (int)(trDiv * 100.0f));
@@ -2278,9 +2298,26 @@ void BuildMenu(bool runningInOverlay)
 			ImGui::ProgressBar(trDiv, ImVec2(-1.0f, 0.0f), trLabel);
 			ImGui::PopStyleColor();
 			if (ImGui::IsItemHovered()) {
-				ImGui::SetTooltip("Translation coverage: how much you've moved the tracker along all three axes.\n"
-				                  "Wave it ~30 cm in each of left/right, up/down, and forward/back to fill this bar.\n"
-				                  "Green = enough variety for a clean calibration.");
+				// Per-axis ranges of the target tracker across the live sample
+				// buffer. Whichever axis is smallest is what's pinning the
+				// Translation% score (= min / 30 cm). Naming axes in user
+				// terms (left/right, up/down, fwd/back) is more useful than
+				// raw X/Y/Z because the user is moving a hand, not thinking
+				// in tracker-space coordinates.
+				const Eigen::Vector3d r = Metrics::translationAxisRangesCm.last();
+				int minIdx = 0; double minR = r(0);
+				for (int i = 1; i < 3; ++i) if (r(i) < minR) { minR = r(i); minIdx = i; }
+				static const char* kAxisName[] = {
+					"X (left/right)", "Y (up/down)", "Z (forward/back)"
+				};
+				ImGui::SetTooltip(
+					"Translation coverage: how much you've moved the tracker along all three axes.\n"
+					"Wave it ~30 cm in each of left/right, up/down, and forward/back to fill this bar.\n"
+					"Green = enough variety for a clean calibration.\n"
+					"\n"
+					"Current ranges: X=%.0f cm, Y=%.0f cm, Z=%.0f cm\n"
+					"Weakest axis: %s",
+					r(0), r(1), r(2), kAxisName[minIdx]);
 			}
 			ImGui::PushStyleColor(ImGuiCol_PlotHistogram, rotColor);
 			ImGui::ProgressBar(rotDiv, ImVec2(-1.0f, 0.0f), rotLabel);

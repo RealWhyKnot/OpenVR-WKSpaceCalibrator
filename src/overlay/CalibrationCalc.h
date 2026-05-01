@@ -117,6 +117,14 @@ public:
 	double TranslationDiversity() const;
 	double RotationDiversity() const;
 
+	// Per-axis (X, Y, Z) bounding-box ranges of the target tracker across the
+	// live sample buffer, in centimetres. UI uses this to point the user at
+	// the limiting axis when TranslationDiversity() is below 1.0; whichever
+	// component is smallest is the bottleneck (the diversity score is
+	// component-min / 30 cm). Returns zero vector when fewer than two valid
+	// samples are available.
+	Eigen::Vector3d TranslationAxisRangesCm() const;
+
 	bool ComputeOneshot(const bool ignoreOutliers);
 	bool ComputeIncremental(bool &lerp, double threshold, double relPoseMaxError, const bool ignoreOutliers);
 
@@ -127,6 +135,18 @@ public:
 	void ShiftSample() {
 		if (!m_samples.empty()) m_samples.pop_front();
 	}
+
+	// Two-phase one-shot calibration support. The Calibration.cpp state machine
+	// runs Begin → Rotation → Translation; at the Rotation→Translation
+	// transition we move the rotation-phase samples into m_rotationFrozen so
+	// the live buffer can refill with translation-phase samples without aging
+	// the rotation samples out. ComputeOneshot then prepends the frozen samples
+	// onto m_samples for the duration of the solve, so all internal helpers
+	// (DetectOutliers, CalibrateRotation, ComputeAxisVariance, etc.) see the
+	// unified buffer without modification. Cleared by Clear().
+	void FreezeRotationPhaseSamples();
+	bool HasFrozenRotationSamples() const { return !m_rotationFrozen.empty(); }
+	size_t FrozenRotationSampleCount() const { return m_rotationFrozen.size(); }
 
 	CalibrationCalc() : m_isValid(false), m_calcCycle(0), enableStaticRecalibration(true) {}
 
@@ -228,6 +248,12 @@ private:
 	Eigen::AffineCompact3d m_refToTargetPose = Eigen::AffineCompact3d::Identity();
 
 	std::deque<Sample> m_samples;
+
+	// Frozen rotation-phase samples (see FreezeRotationPhaseSamples comment in
+	// the public section). Empty during continuous calibration and during the
+	// one-shot Rotation phase; populated only between the Rotation→Translation
+	// transition and the final ComputeOneshot. Cleared by Clear().
+	std::deque<Sample> m_rotationFrozen;
 
 	std::vector<bool> DetectOutliers() const;
 	Eigen::Vector3d CalibrateRotation(const bool ignoreOutliers) const;

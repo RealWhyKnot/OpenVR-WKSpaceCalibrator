@@ -119,6 +119,7 @@ void CalibrationCalc::Clear() {
 	m_estimatedTransformation.setIdentity();
 	m_isValid = false;
 	m_samples.clear();
+	m_rotationFrozen.clear();
 	m_axisVariance = 0.0;
 	m_refToTargetPose = Eigen::AffineCompact3d::Identity();
 	m_relativePosCalibrated = false;
@@ -127,6 +128,15 @@ void CalibrationCalc::Clear() {
 	// `m_lastSampleTime` and `m_lastSuccessfulIncrementalTime` deliberately retained
 	// across Clear() so the watchdog can still see the gap if continuous calibration
 	// is restarted faster than fresh samples can be collected.
+}
+
+void CalibrationCalc::FreezeRotationPhaseSamples() {
+	// Move the live sample buffer into the frozen-rotation slot so the next
+	// CollectSample tick starts a fresh translation-phase buffer. ComputeOneshot
+	// later splices these back in for the duration of the solve so the math sees
+	// rotation+translation samples as a single unified deque.
+	m_rotationFrozen = std::move(m_samples);
+	m_samples.clear();   // explicit; std::deque move-from is empty per the standard but be defensive
 }
 
 std::vector<bool> CalibrationCalc::DetectOutliers() const {
@@ -744,6 +754,26 @@ double CalibrationCalc::TranslationDiversity() const {
 	return std::min(std::max(score, 0.0), 1.0);
 }
 
+Eigen::Vector3d CalibrationCalc::TranslationAxisRangesCm() const {
+	// Same bounding-box scan as TranslationDiversity, but returns the per-axis
+	// ranges in centimetres rather than collapsing them to a single score. The
+	// UI tooltip uses these to tell the user which axis is the bottleneck when
+	// the Translation% bar is stuck below 100. Whichever component is smallest
+	// is what's pinning the score (= min component / 30 cm).
+	if (m_samples.size() < 2) return Eigen::Vector3d::Zero();
+	Eigen::Vector3d minPos = Eigen::Vector3d::Constant(std::numeric_limits<double>::infinity());
+	Eigen::Vector3d maxPos = -minPos;
+	int n = 0;
+	for (const auto& s : m_samples) {
+		if (!s.valid) continue;
+		minPos = minPos.cwiseMin(s.target.trans);
+		maxPos = maxPos.cwiseMax(s.target.trans);
+		++n;
+	}
+	if (n < 2) return Eigen::Vector3d::Zero();
+	return (maxPos - minPos) * 100.0;
+}
+
 double CalibrationCalc::RotationDiversity() const {
 	// Maximum angular distance between any two sampled target rotations.
 	// One pair with a wide angular separation is enough to anchor yaw; we
@@ -867,6 +897,11 @@ Eigen::Vector4d CalibrationCalc::ComputeAxisVariance(
 	double jRef = ReferenceJitter();
 	double jTgt = TargetJitter();
 	double rmsThreshold = std::max(0.005, 3.0 * std::sqrt(jRef * jRef + jTgt * jTgt));
+	// Surface the dynamic threshold for triage: a "validate_failed" row is
+	// opaque without knowing whether the floor was at 5 mm (low-jitter) or
+	// 15 mm (high-jitter), and whether the candidate's RMS was honestly above
+	// it or just lost a noise-jitter coin flip.
+	Metrics::validateRmsThresholdMm.Push(rmsThreshold * 1000.0);
 
 	m_lastRejectRms = rmsError;
 	m_lastRejectRmsThreshold = rmsThreshold;
@@ -992,7 +1027,46 @@ bool CalibrationCalc::CalibrateByRelPose(Eigen::AffineCompact3d &out) const {
 
 
 
+namespace {
+	// RAII helper that temporarily prepends frozen rotation-phase samples onto
+	// a live sample buffer for the duration of a one-shot solve. ComputeOneshot
+	// (and every helper it calls — DetectOutliers, CalibrateRotation,
+	// ComputeAxisVariance, ValidateCalibration, ComputeRefToTargetOffset,
+	// ComputeInstantOffset) iterates m_samples directly. Rather than threading
+	// a "use union" parameter through every call site, we splice the frozen
+	// samples in at construction and pop them off in the destructor. Result:
+	// the math sees rotation+translation samples as one deque without any
+	// internal helper having to know about the phase split. ComputeOneshot's
+	// metric pushes (samplesInBuffer, posOffset_lastSample, etc.) also reflect
+	// the unified buffer, which is what we want for triage — the math ran on
+	// the union, so the diagnostic numbers should describe the union.
+	//
+	// Frozen samples go at the FRONT so m_samples.back() (used by
+	// ComputeInstantOffset) still references the most recent live sample.
+	class RotationFreezeSplice {
+		std::deque<Sample>& m_live;
+		size_t m_count;
+	public:
+		RotationFreezeSplice(std::deque<Sample>& live, const std::deque<Sample>& frozen)
+			: m_live(live), m_count(frozen.size())
+		{
+			if (m_count) m_live.insert(m_live.begin(), frozen.begin(), frozen.end());
+		}
+		~RotationFreezeSplice() {
+			if (m_count) m_live.erase(m_live.begin(), m_live.begin() + m_count);
+		}
+		RotationFreezeSplice(const RotationFreezeSplice&) = delete;
+		RotationFreezeSplice& operator=(const RotationFreezeSplice&) = delete;
+	};
+}
+
 bool CalibrationCalc::ComputeOneshot(const bool ignoreOutliers) {
+	// Splice in any frozen rotation-phase samples for the duration of this
+	// solve. No-op when the user is in continuous mode or did a single-phase
+	// one-shot (m_rotationFrozen empty). See the RotationFreezeSplice comment
+	// above for the rationale.
+	RotationFreezeSplice splice(m_samples, m_rotationFrozen);
+
 	// Below ~6 samples, the step=5 outlier-detection produces no deltas, several
 	// downstream solves end up with empty matrices, and validation degenerates.
 	// Refuse to attempt a calibration on too-small inputs rather than letting
@@ -1207,6 +1281,10 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 			constexpr double kRejectionFloor = 0.005; // 5 mm
 			if (std::isfinite(newError)) {
 				const double effectivePrior = std::max(priorCalibrationError, kRejectionFloor);
+				// Surface the value the gate actually used so a triage reader
+				// can see why a small-looking prior didn't admit the candidate
+				// (the floor clamps below 5 mm).
+				Metrics::effectivePriorMm.Push(effectivePrior * 1000.0);
 				if (effectivePrior < newError * threshold) {
 					newCalibrationValid = false;
 					shouldRapidCorrect = false;
@@ -1311,11 +1389,22 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 		// A sub-cm prior with low live residual means rejection is the *correct*
 		// behavior (new samples can't honestly improve it), not a stuck loop. Only
 		// the combination of high prior error + sustained rejection signals a bad
-		// fixpoint. Empirically tuned to skip the watchdog when error_currentCal is
-		// already comfortably under the user-tolerable threshold (~10 mm).
+		// fixpoint.
+		//
+		// Floor at kRejectionFloor (5 mm) — anything tighter than the per-tick
+		// rejection floor IS the noise floor of the validate gate; demoting at
+		// that point would just thrash. Anything *looser* (the previous 10 mm)
+		// turned out to be a trap in real Quest Pro sessions: error_currentCal
+		// plateaus at 5–12 mm with the 1.5× gate then refusing replacement
+		// (need new < 3.3 mm to beat 5 mm prior — usually impossible at the
+		// validate noise floor) and the healthy-skip preventing the watchdog
+		// from clearing the bad fixpoint. Lowering this to match kRejectionFloor
+		// lets the watchdog fire whenever the prior is provably above the noise
+		// floor — i.e. when there *might* be room for an honest improvement
+		// that the threshold gate can't admit.
 		m_consecutiveRejections++;
 		const int MaxConsecutiveRejections = 50; // ~25s at the post-buffer-fill cadence
-		constexpr double kHealthyPriorErrorMax = 0.010; // 10 mm
+		constexpr double kHealthyPriorErrorMax = 0.005; // 5 mm — matches kRejectionFloor
 
 		Metrics::consecutiveRejections.Push((double)m_consecutiveRejections);
 		// Mirror the per-rejection tag into the metrics namespace so
@@ -1324,6 +1413,16 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 
 		const bool calibrationHealthy =
 			m_isValid && priorCalibrationError < kHealthyPriorErrorMax;
+
+		// Surface the wedged-at-noise-floor symptom as a per-tick metric.
+		// Pushes 1.0 only when the watchdog WOULD have fired (we hit the
+		// rejection cap on a valid prior) but skipped because the prior is
+		// inside the healthy band. Otherwise 0.0. CSV grep `watchdogHealthySkip,1`
+		// will reveal exactly the wedge-state ticks the user hit in the last
+		// session — which the once-per-run annotation made invisible.
+		const bool watchdogHealthySkipFiring =
+			m_isValid && m_consecutiveRejections >= MaxConsecutiveRejections && calibrationHealthy;
+		Metrics::watchdogHealthySkip.Push(watchdogHealthySkipFiring ? 1.0 : 0.0);
 
 		if (m_isValid && m_consecutiveRejections >= MaxConsecutiveRejections) {
 			if (calibrationHealthy) {
