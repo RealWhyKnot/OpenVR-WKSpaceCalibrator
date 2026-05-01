@@ -115,7 +115,16 @@ ServerTrackedDeviceProvider::DeltaSize ServerTrackedDeviceProvider::GetTransform
 	const auto src_pose = src * deviceWorldPose;
 	const auto target_pose = target * deviceWorldPose;
 
-	const auto trans_delta = (src_pose.translation - target_pose.translation).squaredNorm();
+	// Use .norm() (linear metres) here, NOT .squaredNorm(). The thresholds
+	// (alignmentSpeedParams.thr_trans_*) are populated everywhere — driver
+	// Init(), overlay defaults, the user-tunable UI sliders — as linear
+	// distances in metres. Comparing squaredNorm against linear thresholds
+	// silently squared the gate: a 20 mm threshold required a 141 mm offset
+	// to trip, so currentRate was permanently TINY (= 0.05 lerp) for any
+	// realistic continuous-cal correction. The runtime cost of the sqrt is
+	// well under 1 µs per call; this hot path runs at ~kHz, the math budget
+	// is microseconds. .angularDistance() is already linear (radians).
+	const auto trans_delta = (src_pose.translation - target_pose.translation).norm();
 	const auto rot_delta = src_pose.rotation.angularDistance(target_pose.rotation);
 
 	DeltaSize trans_level, rot_level;
@@ -407,7 +416,15 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 	// copy-out-under-lock + math-without-lock + write-back. shmem.SetPose writes
 	// to a different-process ring buffer (overlay reader) so the mutex doesn't
 	// synchronize that path; the lock only matters for in-process state.
-	std::lock_guard<std::mutex> lock(stateMutex);
+	//
+	// `unique_lock` (instead of `lock_guard`) so the lookup-fallback path below
+	// can briefly release the mutex around its `vr::VRProperties()` call. That
+	// OpenVR API call lands inside SteamVR and can block for milliseconds on
+	// the runtime's own state lock. Holding our mutex across it stalled every
+	// other tracked device's pose-update path — the documented cause of "70+
+	// HMD stalls per session" the user reported. We re-acquire before touching
+	// any in-process state again.
+	std::unique_lock<std::mutex> lock(stateMutex);
 
 	auto& tf = transforms[openVRID];
 
@@ -497,22 +514,46 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 				}
 			}
 			if (shouldTry) {
-				bool ok = false;
+				// The `vr::VRProperties()` call below lands inside SteamVR and
+				// can block for milliseconds. Drop our mutex for the duration
+				// so other devices' pose-update paths aren't stalled behind us
+				// (the cause of the user's reported 70+ HMD stalls/session).
+				// We've already read everything we needed under the lock —
+				// the in-process state we care about (deviceSystem[],
+				// lookupState[], transforms[]) is untouched between unlock and
+				// the re-lock below; reads/writes of `tf` earlier in the
+				// function happened under the lock and reads/writes of
+				// `tf.targetTransform` etc. below happen after we re-acquire.
+				lock.unlock();
+
+				std::string queriedSys;
+				bool queryOk = false;
 				if (auto* helpers = vr::VRProperties()) {
 					auto handle = helpers->TrackedDeviceToPropertyContainer(openVRID);
 					if (handle != vr::k_ulInvalidPropertyContainer) {
 						vr::ETrackedPropertyError err = vr::TrackedProp_Success;
 						std::string sys = helpers->GetStringProperty(handle, vr::Prop_TrackingSystemName_String, &err);
 						if (err == vr::TrackedProp_Success && !sys.empty()) {
-							deviceSystem[openVRID] = std::move(sys);
-							lookupState[openVRID] = LookupState::Cached;
-							ok = true;
+							queriedSys = std::move(sys);
+							queryOk = true;
 						}
 					}
 				}
-				if (!ok) {
-					lookupState[openVRID] = LookupState::Failed;
-					QueryPerformanceCounter(&lastLookupAttempt[openVRID]);
+
+				lock.lock();
+
+				// Race check: while we were unlocked, the IPC server thread
+				// could have populated this slot via SetDeviceTransform. If it
+				// won the race, defer to its value rather than overwriting
+				// with our (possibly stale) query result.
+				if (lookupState[openVRID] != LookupState::Cached) {
+					if (queryOk) {
+						deviceSystem[openVRID] = std::move(queriedSys);
+						lookupState[openVRID] = LookupState::Cached;
+					} else {
+						lookupState[openVRID] = LookupState::Failed;
+						QueryPerformanceCounter(&lastLookupAttempt[openVRID]);
+					}
 				}
 			}
 		}
