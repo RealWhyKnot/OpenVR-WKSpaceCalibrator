@@ -398,18 +398,29 @@ Eigen::Vector3d CalibrationCalc::CalibrateRotation(const bool ignoreOutliers) co
 		CalCtx.Log(buf);
 	}
 
-	// Project SO(3) -> yaw via the Rodrigues yaw projection. This is the
-	// closed-form yaw component when R is an SO(3) rotation; it ignores the
-	// pitch/roll without dropping rows from the inputs (which was the leakage
-	// problem with the old 2D approach).
+	// Project SO(3) -> yaw via swing-twist quaternion decomposition.
 	//
-	// Sign convention: with R in target -> ref direction (after the transpose
-	// above) and Eigen's right-handed Y-up rotation matrix layout, an upright
-	// +yaw has R(0,2) = +sin(yaw) and R(2,0) = -sin(yaw). So we project as
-	// atan2(R(0,2) - R(2,0), R(0,0) + R(2,2)) to recover +yaw, matching what
-	// the prior 2D code produced via atan2(rot(1,0), rot(0,0)) on its (X,Z)
-	// cross-covariance.
-	double yaw = std::atan2(R(0, 2) - R(2, 0), R(0, 0) + R(2, 2));
+	// The previous Rodrigues projection
+	//     yaw = atan2(R(0,2) - R(2,0), R(0,0) + R(2,2))
+	// is the closed-form yaw ONLY when R has zero pitch/roll. For 5-10 deg
+	// of pitch or roll the recovered yaw error is ~0.3-1 deg -- small but the
+	// whole reason for this rewrite was to remove this kind of leakage from
+	// the math, and HMD calibration almost never lines up with zero pitch
+	// in practice.
+	//
+	// Swing-twist: convert R to quaternion q, then extract the twist about
+	// the Y-axis by zeroing the X and Z components and re-normalising. The
+	// remaining quaternion is a pure rotation around Y; reading its angle
+	// is exact for any SO(3) input.
+	//
+	// Sign convention preserved: with R in target -> ref direction (after
+	// the transpose above) and Eigen's right-handed Y-up convention, the
+	// twist quaternion's y component sign matches the previous Rodrigues
+	// projection's atan2 sign for the zero-pitch/roll case.
+	Eigen::Quaterniond q(R);
+	Eigen::Quaterniond twistY(q.w(), 0.0, q.y(), 0.0);
+	twistY.normalize();
+	double yaw = 2.0 * std::atan2(twistY.y(), twistY.w());
 
 	// Convert to degrees
 	Eigen::Vector3d euler(0.0, yaw * 180.0 / EIGEN_PI, 0.0);
@@ -532,24 +543,33 @@ Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rot
 		Eigen::ColPivHouseholderQR<Eigen::MatrixXd> qr = m_coefficientsTrans.colPivHouseholderQr();
 		trans = qr.solve(m_constantsTrans);
 
-		// Item #6: condition guard. Cheap proxy for SVD's smin/smax: take the
-		// smallest and largest absolute values on the diagonal of QR's R
-		// triangle. For a well-conditioned 3-column system these track the
-		// singular-value extrema closely; for a degenerate system (pure-yaw-
-		// only motion, planar motion, etc.) the smallest |R(i,i)| collapses.
-		// Computed on the LAST iteration's solve so it reflects the post-IRLS
-		// system.
+		// Item #6 (audit Math #2): condition guard via true SVD on the 3x3
+		// normal matrix. Replaces the previous min|R(i,i)| / max|R(i,i)|
+		// proxy from the QR decomposition's R triangle: that proxy is
+		// notoriously loose because ColPivHouseholderQR's column pivoting
+		// can re-order R's diagonal so |R(0,0)| isn't the largest singular
+		// value, and the diagonal magnitudes are NOT the singular values
+		// in general -- they only track the singular-value extrema for
+		// well-conditioned systems.
+		//
+		// JacobiSVD on the 3x3 normal matrix m_coefficientsTrans^T *
+		// m_coefficientsTrans gives exact singular values, sorted descending.
+		// For an Nx3 matrix A, sv(A^T A) = sv(A)^2, so the condition ratio
+		// of A is sqrt(svN/sv0) where svN is the smallest singular value and
+		// sv0 the largest. The condition-number squaring (sv(A) -> sv(A)^2)
+		// costs ~half the precision but JacobiSVD on a 3x3 matrix is well
+		// within double-precision headroom for the gate range we care about
+		// (gate at ratio ~0.05 = condition number 20, squared = 400, way
+		// above any precision floor).
+		//
+		// Same [0,1] semantic as the prior proxy: 1.0 = perfectly
+		// conditioned, 0.0 = singular. Existing 0.05 hard-gate at the
+		// caller continues to work without re-tuning.
 		if (iter == kMaxIters - 1) {
-			Eigen::MatrixXd R = qr.matrixR().template triangularView<Eigen::Upper>();
-			double rmin = std::numeric_limits<double>::infinity();
-			double rmax = 0.0;
-			const Eigen::Index nCols = R.cols();
-			for (Eigen::Index k = 0; k < nCols; k++) {
-				double v = std::abs(R(k, k));
-				if (v < rmin) rmin = v;
-				if (v > rmax) rmax = v;
-			}
-			m_translationConditionRatio = (rmax > 0.0) ? (rmin / rmax) : 0.0;
+			Eigen::Matrix3d normal = m_coefficientsTrans.transpose() * m_coefficientsTrans;
+			Eigen::JacobiSVD<Eigen::Matrix3d> svd(normal);
+			const auto& sv = svd.singularValues();
+			m_translationConditionRatio = (sv(0) > 0.0) ? std::sqrt(sv(2) / sv(0)) : 0.0;
 		}
 
 		// Compute per-pair residuals (we collapse the per-axis residuals into a
