@@ -2,6 +2,8 @@
 #include "Configuration.h"
 #include "CalibrationMetrics.h"   // WriteLogAnnotation -- profile_loaded_calibration
                                   // diagnostic line on launch.
+#include "WedgeDetector.h"        // kMaxPlausibleCalibrationMagnitudeCm — shared
+                                  // with the runtime wedge detector in Calibration.cpp.
 
 #include <picojson.h>
 
@@ -240,6 +242,7 @@ void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	// saved cal (large translation magnitude) loading on every launch is a
 	// known failure mode -- having this line at startup turns "I think the
 	// profile loaded wrong" into a one-grep confirmation.
+	bool wedgedProfileCleared = false;
 	{
 		const double tx = ctx.calibratedTranslation(0);
 		const double ty = ctx.calibratedTranslation(1);
@@ -252,6 +255,26 @@ void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 			ctx.calibratedRotation(0), ctx.calibratedRotation(1), ctx.calibratedRotation(2),
 			ctx.referenceTrackingSystem.c_str(), ctx.targetTrackingSystem.c_str());
 		Metrics::WriteLogAnnotation(loadbuf);
+
+		// Load-time wedge guard. If the saved translation magnitude is
+		// implausibly large, silently zero the calibration data so the
+		// next continuous-cal session starts cold instead of inheriting
+		// the wedge. No banner — the runtime detector in Calibration.cpp
+		// uses the same threshold via spacecal::wedge::kMaxPlausibleCalibrationMagnitudeCm.
+		// The remainder of the profile (settings, chaperone, etc.) is
+		// left alone — only the calibration values are cleared. The
+		// refToTargetPose / relativePosCalibrated reset is finished
+		// below, after their own JSON read paths run.
+		if (magnitude > spacecal::wedge::kMaxPlausibleCalibrationMagnitudeCm) {
+			char guardbuf[320];
+			snprintf(guardbuf, sizeof guardbuf,
+				"wedged_profile_guard_cleared: load_time magnitude=%.3f cm exceeds bound=%.3f cm; zeroed translation+rotation, continuous-cal will start cold (loaded was t=(%.3f,%.3f,%.3f))",
+				magnitude, spacecal::wedge::kMaxPlausibleCalibrationMagnitudeCm, tx, ty, tz);
+			Metrics::WriteLogAnnotation(guardbuf);
+			ctx.calibratedTranslation = Eigen::Vector3d::Zero();
+			ctx.calibratedRotation    = Eigen::Vector3d::Zero();
+			wedgedProfileCleared = true;
+		}
 	}
 	LoadStandby(ctx.referenceStandby, obj["reference_device"]);
 	LoadStandby(ctx.targetStandby, obj["target_device"]);
@@ -507,6 +530,16 @@ void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 
 	if (obj["wizard_completed"].is<bool>()) {
 		ctx.wizardCompleted = obj["wizard_completed"].get<bool>();
+	}
+
+	// Load-time wedge guard, completion. The relative-pose state and
+	// refToTargetPose are read further down in ParseProfile, so we can only
+	// override them here, after all reads are done. End-state mirrors what
+	// the runtime recovery helper in Calibration.cpp produces: a cold start
+	// from identity, with continuous-cal armed to converge from fresh samples.
+	if (wedgedProfileCleared) {
+		ctx.refToTargetPose = Eigen::AffineCompact3d::Identity();
+		ctx.relativePosCalibrated = false;
 	}
 
 	ctx.validProfile = true;

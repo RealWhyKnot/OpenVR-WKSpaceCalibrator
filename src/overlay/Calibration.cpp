@@ -5,6 +5,9 @@
 #include "IPCClient.h"
 #include "CalibrationCalc.h"
 #include "VRState.h"
+#include "WedgeDetector.h"   // ShouldFireRuntimeWedgeRecovery, kMaxPlausibleCalibrationMagnitudeCm
+#include "Wizard.h"          // spacecal::wizard::IsActive — gate the runtime wedge detector
+                             // off while the user is mid-setup so it can't disrupt them.
 
 #include <string>
 #include <vector>
@@ -28,6 +31,20 @@ inline vr::HmdQuaternion_t operator*(const vr::HmdQuaternion_t& lhs, const vr::H
 }
 
 CalibrationContext CalCtx;
+
+// Forward declaration. Defined alongside the auto-recovery snapshot APIs
+// near the bottom of the file but called from TickHmdRelocalizationDetector
+// (Quest re-localization auto-recovery) and CalibrationTick (runtime wedge
+// detector), both of which sit above the definition.
+static void RecoverFromWedgedCalibration(const char* userFacingMessage);
+
+// Runtime wedge detector state. Persists across CalibrationTick calls;
+// updated by spacecal::wedge::ShouldFireRuntimeWedgeRecovery (header-only,
+// pure). Sentinel <0 means "no active wedge candidate"; otherwise stores
+// the glfwGetTime() timestamp of the first tick magnitude crossed the bound.
+// File scope (not anonymous namespace) so CalibrationTick can read+write it
+// directly from earlier in the translation unit.
+static double g_runtimeWedgeSince = -1.0;
 
 // AdditionalCalibration's special members live inline in the header now --
 // CalibrationCalc is complete at the include point, so the implicitly-defined
@@ -1623,54 +1640,24 @@ namespace {
 			s.lastAutoRecoverSnapshot.hasAppliedCalibrationResult = CalCtx.hasAppliedCalibrationResult;
 			s.autoRecoverBannerDismissed                         = false;
 
-			// Step 1: wipe in-memory calibration + sample buffer.
-			calibration.Clear();
-
-			// Step 2: clear CalCtx-side warm-start so the restart doesn't
-			// immediately re-apply the saved (now-stale) relative pose.
-			CalCtx.refToTargetPose = Eigen::AffineCompact3d::Identity();
-			CalCtx.relativePosCalibrated = false;
-			CalCtx.hasAppliedCalibrationResult = false;
-
-			// REMOVED 2026-05-03: SaveProfile call after clear. Originally
-			// added to "prevent bad cal from surviving restart", but the
-			// actual effect was the OPPOSITE — SaveProfile persists
-			// `ctx.calibratedTranslation/Rotation` which still hold the
-			// WEDGED pre-recovery values (Clear() wipes m_estimatedTransformation
-			// inside CalibrationCalc, but doesn't touch the context's
-			// last-applied display values). So the save was locking the
-			// wedge ONTO disk, guaranteeing the next session loads it
-			// again. Without this save, the in-memory cleared state stays
-			// in-memory; the saved profile is unchanged. If the user keeps
-			// playing, the convergence after this recovery will eventually
-			// be saved on a UI action / quit. If they quit before that,
-			// next launch loads the prior state and the user can do a
-			// one-shot to recover (better than guaranteed-wedged-on-load).
+			// Steps 1-4: wipe + restart cold. The helper does
+			// calibration.Clear() + zero CalCtx fields (incl. calibratedTranslation
+			// / calibratedRotation, which Clear() doesn't touch -- this was the
+			// 2026-05-03 SaveProfile-persisted-wedge bug; see the helper's
+			// comment) + StartContinuousCalibration() + posts the user-facing
+			// message AFTER the restart (StartContinuousCalibration clears
+			// CalCtx.messages internally). Step 5 (the user banner) is folded
+			// in via the helper's userFacingMessage argument.
 			//
-			// Triggered by 2026-05-02 sessions where my auto-recovery fired
-			// twice on post-stall false positives and BOTH times the save
-			// persisted the wedged state, locking the user into a bad cal
-			// across multiple program restarts.
-
-			// Step 3: restart continuous-cal cold. The function clears the
-			// calibration buffer again (idempotent), sets state back to
-			// Continuous, and the rest of CalibrationTick will start
-			// collecting fresh samples this very tick. NOTE: this also
-			// calls CalCtx.messages.clear() inside StartCalibration, so
-			// any user-visible status message we want to display has to
-			// be appended AFTER this call.
-			StartContinuousCalibration();
-
-			// Step 5: surface the recovery in the overlay's message buffer.
-			// Placed AFTER StartContinuousCalibration because that function
-			// internally clears CalCtx.messages — putting our message before
-			// it would have it wiped immediately. The user sees this banner
-			// in the calibration log panel for the duration of convergence.
+			// SaveProfile is intentionally NOT called here. The next valid
+			// ComputeIncremental will write the post-recovery values via the
+			// existing path at the end of CalibrationTick, which is exactly
+			// what we want.
 			char uimsg[128];
 			snprintf(uimsg, sizeof uimsg,
 				"Quest re-localized (%.0f cm jump). Recalibrating...\n",
 				hmdDelta * 100.0);
-			CalCtx.Log(uimsg);
+			RecoverFromWedgedCalibration(uimsg);
 
 			s.lastAutoRecoverTime = now;
 		}
@@ -2267,23 +2254,32 @@ void CalibrationTick(double time)
 	auto p = ctx.devicePoses[vr::k_unTrackedDeviceIndex_Hmd].vecPosition;
 	if ((p[0] == 0.0 && p[1] == 0.0 && p[2] == 0.0) || (ctx.xprev == p[0] && ctx.yprev == p[1] && ctx.zprev == p[2])) {
 		// std::cerr << "HMD tracking didn't update, skipping update" << std::endl;
+		// Counter is preserved for the existing diagnostic UI in
+		// UserInterface.cpp ("Stall purge: N events") and the
+		// "hmd_stall_recovered after N ticks" log annotation below.
 		ctx.consecutiveHmdStalls++;
-		// After ~1.5s of stalled HMD tracking, the sample buffer no longer represents
-		// reality (the user might have walked elsewhere, taken the headset off, etc).
-		// Purge it and demote to ContinuousStandby so calibration restarts cleanly
-		// when tracking returns. Without this, stale samples persist and the next
-		// few calibration cycles either accept a bad estimate or sit rejecting
-		// everything until the watchdog fires.
-		const int MaxHmdStalls = 30;
-		if (ctx.consecutiveHmdStalls == MaxHmdStalls) {
-			calibration.Clear();
-			if (ctx.state == CalibrationState::Continuous) {
-				ctx.state = CalibrationState::ContinuousStandby;
-				CalCtx.Log("HMD tracking lost — pausing continuous calibration\n");
-			}
-			// Annotate the log so the post-stall garbage rows have an obvious cause.
-			Metrics::WriteLogAnnotation("hmd_stall: tracking lost, sample buffer purged");
-		}
+		// REVERTED 2026-05-04: previously, after MaxHmdStalls=30 ticks of stalled
+		// HMD tracking, the sample buffer was purged via calibration.Clear() and
+		// state was demoted to ContinuousStandby. The intent was "stale samples no
+		// longer represent reality" — but the actual effect was much worse than
+		// the problem it solved: on stall recovery, StartContinuousCalibration()
+		// re-applies the saved refToTargetPose warm-start (relativePosCalibrated
+		// is NOT reset, asymmetric vs the geometry-shift detector at line 2120
+		// which DOES reset it), and continuous-cal converges from new post-stall
+		// samples against that stale constraint. Each HMD-off/on cycle landed at
+		// a slightly different local minimum; SaveProfile persisted it; cumulative
+		// drift across many cycles wedged the saved profile.
+		//
+		// Empirical evidence (spacecal_log.2026-05-04T17-14-50.txt): two HMD off/on
+		// events at t=1918 (56 ticks) and t=2096 (95 ticks) each produced a 7-9 cm
+		// Z-axis shift in posOffset_currentCal IMMEDIATELY post-recovery, with the
+		// cal magnitude climbing toward the wedge bound across the session.
+		// Upstream (hyblocker) just `return`s on stall — no clear, no demote — and
+		// the user reports this drift didn't happen on the old fork.
+		//
+		// Now matching upstream behavior: just return. Stale samples in the rolling
+		// buffer naturally age out as fresh ones come in post-stall; the existing
+		// rolling-window solver handles the transition without a discrete reset.
 		return;
 	}
 	if (ctx.consecutiveHmdStalls > 0) {
@@ -2632,6 +2628,43 @@ void CalibrationTick(double time)
 		CalCtx.hasAppliedCalibrationResult = true;
 
 		CalCtx.Log("Finished calibration, profile saved\n");
+
+		// Runtime wedge detector. If continuous-cal converges to (or hunts
+		// into) a calibration whose translation magnitude exceeds the
+		// plausibility bound for at least kRuntimeWedgeDebounceSec
+		// uninterrupted seconds, treat it as a runtime wedge: silently wipe
+		// + restart cold. Mirrors the load-time guard in ParseProfile and
+		// the Quest re-localization auto-recovery in TickHmdRelocalizationDetector.
+		//
+		// Gates (per 2026-05-04 plan greenlight):
+		//   - Continuous state only (NOT ContinuousStandby — its calibratedTranslation
+		//     is stale and not actionable).
+		//   - Wizard not active — don't disrupt setup.
+		//
+		// Per feedback_no_button_to_recover_broken_tracking.md (memory):
+		// no banner, no prompt, silent log line is the only user-facing
+		// trace. The user might never know it fired; their trackers come
+		// back to truth via the post-restart re-convergence.
+		if (CalCtx.state == CalibrationState::Continuous
+			&& !spacecal::wizard::IsActive()) {
+			const double magCm = ctx.calibratedTranslation.norm();
+			const double now = glfwGetTime();
+			if (spacecal::wedge::ShouldFireRuntimeWedgeRecovery(
+					magCm, now, g_runtimeWedgeSince)) {
+				char rtbuf[256];
+				snprintf(rtbuf, sizeof rtbuf,
+					"wedged_profile_guard_cleared: runtime magnitude=%.3f cm sustained=%.1fs threshold=%.3f cm; clearing + restarting continuous-cal cold",
+					magCm, spacecal::wedge::kRuntimeWedgeDebounceSec,
+					spacecal::wedge::kMaxPlausibleCalibrationMagnitudeCm);
+				Metrics::WriteLogAnnotation(rtbuf);
+				// nullptr message — silent recovery per the user's
+				// "user notices nothing" directive. The post-restart
+				// reconvergence is visible to the user as their tracker
+				// positions briefly snap to native then walk into the
+				// new fit; no overlay text.
+				RecoverFromWedgedCalibration(/*userFacingMessage=*/nullptr);
+			}
+		}
 	} else {
 		CalCtx.Log("Calibration failed.\n");
 	}
@@ -2804,37 +2837,50 @@ void DismissAutoRecoveryBanner() {
 	g_relocDetector.autoRecoverBannerDismissed = true;
 }
 
-void RecalibrateFromScratch() {
-	// Same effective steps as the auto-recovery action block in
-	// TickHmdRelocalizationDetector, but triggered manually so the
-	// "is it really a relocalization?" gates don't apply.
-
-	// Diagnostic: dump the state we're about to clear. Useful for
-	// triaging "I hit Recalibrate but it didn't help" -- we want to
-	// see what was being thrown away. Same key shape as the Undo dump
-	// for grep parity.
-	{
-		const Eigen::Vector3d t = CalCtx.refToTargetPose.translation();
-		char dumpbuf[256];
-		snprintf(dumpbuf, sizeof dumpbuf,
-			"undo_snapshot_dump (Recalibrate): refToTarget_t=(%.3f,%.3f,%.3f) magnitude=%.3f relativePosCalibrated=%d hasAppliedCalibrationResult=%d",
-			t.x(), t.y(), t.z(), t.norm(),
-			(int)CalCtx.relativePosCalibrated, (int)CalCtx.hasAppliedCalibrationResult);
-		Metrics::WriteLogAnnotation(dumpbuf);
-	}
-
+// Wedge recovery — the canonical wipe routine. Used by both the Quest
+// re-localization auto-recovery (TickHmdRelocalizationDetector) and the
+// runtime wedge detector (CalibrationTick post-cal-update block).
+//
+// Wipes:
+//   - calibration.m_estimatedTransformation, m_isValid, m_samples, etc.
+//   - CalCtx.refToTargetPose (warm-start for the relative-pose constraint)
+//   - CalCtx.relativePosCalibrated (so StartContinuousCalibration's
+//     setRelativeTransformation call passes `false` and doesn't re-anchor
+//     to the wedged value)
+//   - CalCtx.hasAppliedCalibrationResult (lets the trigger-press gate
+//     re-arm if the user has it enabled)
+//   - CalCtx.calibratedTranslation / calibratedRotation (the values that
+//     are actually persisted to the saved profile and applied to the
+//     driver via ScanAndApplyProfile). project_auto_recovery_2026-05-03.md
+//     called out that calibration.Clear() doesn't touch these — leaving
+//     them wedged here is what made the earlier SaveProfile-after-Clear
+//     persist bad state. Zero them explicitly.
+//
+// Does NOT call SaveProfile. The next continuous-cal tick that produces
+// a valid result will overwrite the on-disk profile via the existing
+// path at the end of CalibrationTick (~line 2620), at which point we'll
+// be persisting the post-recovery values, not the wedged ones.
+//
+// `userFacingMessage` is appended to CalCtx.messages AFTER the restart
+// (StartContinuousCalibration internally clears the buffer, so it must be
+// last). Pass nullptr to suppress the user-facing log if the trigger is
+// ambient/silent (e.g. a runtime wedge clear that shouldn't surface UI text
+// per the 2026-05-04 "user notices nothing" directive). The metrics
+// annotation is the caller's responsibility — this helper deliberately
+// doesn't write one so each caller's grep key can differ.
+static void RecoverFromWedgedCalibration(const char* userFacingMessage) {
 	calibration.Clear();
 	CalCtx.refToTargetPose             = Eigen::AffineCompact3d::Identity();
 	CalCtx.relativePosCalibrated       = false;
 	CalCtx.hasAppliedCalibrationResult = false;
-	Metrics::WriteLogAnnotation("manual_recalibrate_from_scratch: user clicked 'Recalibrate from scratch' button");
+	CalCtx.calibratedTranslation       = Eigen::Vector3d::Zero();
+	CalCtx.calibratedRotation          = Eigen::Vector3d::Zero();
+
 	StartContinuousCalibration();
-	// Logged AFTER StartContinuousCalibration because that function
-	// internally clears CalCtx.messages -- the same gotcha the auto-
-	// recovery block hit and documented (see TickHmdRelocalizationDetector
-	// step-5 comment). Putting the user-visible "we did it" message
-	// first would just have it wiped before it rendered.
-	CalCtx.Log("Recalibrating from scratch -- collecting fresh samples...\n");
+
+	if (userFacingMessage != nullptr) {
+		CalCtx.Log(userFacingMessage);
+	}
 }
 
 // Manual playspace recenter: shift the standing zero pose so the user's

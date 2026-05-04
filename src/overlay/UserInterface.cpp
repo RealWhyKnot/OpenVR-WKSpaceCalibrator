@@ -1508,11 +1508,14 @@ static void DrawDiagnosticsPanel(ImVec2 panelSize) {
 		s_lastWatchdogResetTime = now;
 	}
 
-	// HMD-stall purge detection: watch CalCtx.consecutiveHmdStalls cross the
-	// threshold the calibration tick uses internally (~30 samples = ~1.5 s).
-	const int kHmdStallPurgeThreshold = 30;
+	// Long-stall counter: HMD stalled for ≥30 ticks (~1.5 s). Previously the
+	// calibration tick purged the sample buffer at this point; reverted
+	// 2026-05-04 because the purge + warm-start re-anchor caused cumulative
+	// drift on every HMD off/on cycle. The counter remains as a diagnostic
+	// — frequent long-stalls still indicate a tracking-environment problem.
+	const int kHmdLongStallThreshold = 30;
 	const int curStalls = CalCtx.consecutiveHmdStalls;
-	if (curStalls >= kHmdStallPurgeThreshold && s_lastSeenStallCount < kHmdStallPurgeThreshold) {
+	if (curStalls >= kHmdLongStallThreshold && s_lastSeenStallCount < kHmdLongStallThreshold) {
 		s_stallPurgeCount++;
 		s_lastStallPurgeTime = now;
 	}
@@ -1541,20 +1544,21 @@ static void DrawDiagnosticsPanel(ImVec2 panelSize) {
 	const bool stallRecent = s_stallPurgeCount > 0 && (now - s_lastStallPurgeTime) < 15.0;
 	if (stallRecent) {
 		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.30f, 1.0f));
-		ImGui::Text("HMD-stall purge %.0fs ago - recollecting samples (count: %d)",
+		ImGui::Text("HMD long-stall %.0fs ago (count: %d)",
 			now - s_lastStallPurgeTime, s_stallPurgeCount);
 		ImGui::PopStyleColor();
 	} else if (s_stallPurgeCount == 0) {
-		ImGui::TextDisabled("HMD-stall purges: 0 (last: never)");
+		ImGui::TextDisabled("HMD long-stalls: 0 (last: never)");
 	} else {
-		ImGui::TextDisabled("HMD-stall purges: %d (last: %.0fs ago)", s_stallPurgeCount,
+		ImGui::TextDisabled("HMD long-stalls: %d (last: %.0fs ago)", s_stallPurgeCount,
 			now - s_lastStallPurgeTime);
 	}
 	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip("HMD-stall purge: fires when the headset stops reporting fresh poses for ~1.5 seconds\n"
-		                  "(SteamVR hiccup, tracking loss, sleep-wake). The sample buffer is purged because the\n"
-		                  "stale samples around the stall are unreliable. Normal during a brief tracking glitch;\n"
-		                  "frequent stalls suggest a tracking-environment problem (lighting, USB bandwidth, etc).");
+		ImGui::SetTooltip("HMD long-stall: the headset stopped reporting fresh poses for ~1.5 seconds or more\n"
+		                  "(SteamVR hiccup, tracking loss, headset taken off). Diagnostic counter only —\n"
+		                  "calibration is no longer disturbed during a stall (rolling sample buffer ages out\n"
+		                  "stale samples naturally on recovery). Frequent long-stalls suggest a tracking-\n"
+		                  "environment problem (lighting, USB bandwidth, etc).");
 	}
 
 	ImGui::EndGroupPanel();
@@ -1953,30 +1957,14 @@ void CCal_BasicInfo() {
 	ImGui::BeginGroupPanel("Actions", panelSize);
 	float width = ImGui::GetWindowContentRegionWidth(), scale = 1.0f;
 
-	// "Recalibrate from scratch" -- single full-width button above the
-	// three-way grid (audit UX #2). The audit's framing: this is the only
-	// user-accessible escape from a wedged-self-consistent calibration --
-	// a failure mode the watchdog architecturally cannot detect (the math
-	// is internally consistent, just fitting the wrong offset). Without
-	// this button, the honest path was Cancel -> Clear -> Start: three
-	// buttons across two tabs, with no on-screen framing of why a user
-	// might want to do it. "Restart sampling" below perturbs the offset to
-	// force re-search; this button does a true clean-slate restart and is
-	// the right action when the calibration looks visibly wrong (trackers
-	// offset >10cm from where they should be).
-	if (ImGui::Button("Recalibrate from scratch", ImVec2(-FLT_MIN, 0.0f))) {
-		RecalibrateFromScratch();
-	}
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip(
-			"Click this if the calibration looks visibly wrong (trackers offset\n"
-			">10 cm from your hands or feet). Wipes the current estimate and\n"
-			"restarts continuous calibration cold so it converges from fresh\n"
-			"samples. Use this to escape a calibration that has wedged at the\n"
-			"wrong offset -- the math watchdog cannot detect that case because\n"
-			"the bad fit is internally self-consistent.");
-	}
-	ImGui::Spacing();
+	// (Removed 2026-05-04: "Recalibrate from scratch" button. The wedge case
+	// it served as escape-hatch for is now handled silently by the load-time
+	// guard in Configuration.cpp::ParseProfile and the runtime detector in
+	// Calibration.cpp::CalibrationTick. Per
+	// feedback_no_button_to_recover_broken_tracking.md (memory): a recovery
+	// flow whose precondition is broken tracking can't require interaction
+	// from the user via that same broken tracking — auto-detect + auto-fix
+	// is the only correct shape.)
 
 	if (ImGui::BeginTable("##CCal_Cancel", 3, 0, ImVec2(width * scale, ImGui::GetTextLineHeight() * 2))) {
 		ImGui::TableNextRow();
