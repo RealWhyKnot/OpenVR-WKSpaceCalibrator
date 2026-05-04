@@ -1952,6 +1952,32 @@ void CCal_BasicInfo() {
 	// so it visually matches the rest of Basic.
 	ImGui::BeginGroupPanel("Actions", panelSize);
 	float width = ImGui::GetWindowContentRegionWidth(), scale = 1.0f;
+
+	// "Recalibrate from scratch" -- single full-width button above the
+	// three-way grid (audit UX #2). The audit's framing: this is the only
+	// user-accessible escape from a wedged-self-consistent calibration --
+	// a failure mode the watchdog architecturally cannot detect (the math
+	// is internally consistent, just fitting the wrong offset). Without
+	// this button, the honest path was Cancel -> Clear -> Start: three
+	// buttons across two tabs, with no on-screen framing of why a user
+	// might want to do it. "Restart sampling" below perturbs the offset to
+	// force re-search; this button does a true clean-slate restart and is
+	// the right action when the calibration looks visibly wrong (trackers
+	// offset >10cm from where they should be).
+	if (ImGui::Button("Recalibrate from scratch", ImVec2(-FLT_MIN, 0.0f))) {
+		RecalibrateFromScratch();
+	}
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip(
+			"Click this if the calibration looks visibly wrong (trackers offset\n"
+			">10 cm from your hands or feet). Wipes the current estimate and\n"
+			"restarts continuous calibration cold so it converges from fresh\n"
+			"samples. Use this to escape a calibration that has wedged at the\n"
+			"wrong offset -- the math watchdog cannot detect that case because\n"
+			"the bad fit is internally self-consistent.");
+	}
+	ImGui::Spacing();
+
 	if (ImGui::BeginTable("##CCal_Cancel", 3, 0, ImVec2(width * scale, ImGui::GetTextLineHeight() * 2))) {
 		ImGui::TableNextRow();
 		ImGui::TableSetColumnIndex(0);
