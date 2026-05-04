@@ -28,25 +28,6 @@
 // can race the clear.
 static ServerTrackedDeviceProvider *g_driver = nullptr;
 
-// Recovered IVRDriverInputInternal vtable indices, populated by parsing the
-// public IVRDriverInput_003 stub thunks in skeletal::CapturePublicVTable.
-// The mapping turned out to be 1:1 with public method order in M1, but we
-// still parse rather than hardcode in case a SteamVR update reshuffles the
-// internal vtable independently of the public one.
-//
-// Index of -1 means "not yet known"; we refuse to install Internal hooks
-// against any negative index.
-static int     g_internalVTableIndex[7] = {-1, -1, -1, -1, -1, -1, -1};
-static uint8_t g_publicPimplOffset      = 0;
-static bool    g_publicThunksParsed     = false;
-
-// First non-null IVRDriverInputInternal pointer we've installed against.
-// Subsequent calls (additional GetGenericInterface queries during a single
-// session — multiple driver contexts) point into the same static vtable
-// functions in vrserver.exe; MinHook would refuse to re-patch the same target,
-// so we just no-op on duplicates.
-static std::atomic<void *> g_installedAgainstInternal{nullptr};
-
 // Per-hand smoothing state. Index 0 = left, 1 = right. The "previous" buffer
 // is the last bone array we wrote out for that hand — the next frame's slerp
 // target is the raw incoming pose, with the previous as the source.
@@ -159,7 +140,7 @@ static void MaybeLogStats(const char *callerTag)
 static void DumpHandleMap(const char *callerTag);
 
 // Comprehensive periodic dump every kDeepStateLogIntervalSec. Includes:
-// - Install state (publicParsed, installedAgainstInternal, hook registry status)
+// - Hook registry status (Create/Update hooks present)
 // - Current finger config snapshot (driver-side cache)
 // - All known handle->handedness mappings
 // - Per-hand init state (have we seen a first frame?)
@@ -194,16 +175,15 @@ static void MaybeLogDeepState(const char *callerTag)
     double r_hz = (double)r_total / elapsedSec;
 
     LOG("[skeletal] deep_state(%s, %.1fs window):", callerTag, elapsedSec);
-    LOG("[skeletal]   install: publicParsed=%d installedAgainst=%p verboseRemaining=L%d/R%d",
-        (int)g_publicThunksParsed, g_installedAgainstInternal.load(),
+    LOG("[skeletal]   verboseRemaining=L%d/R%d",
         g_verboseCallsRemaining[0].load(), g_verboseCallsRemaining[1].load());
 
-    // Hook registry snapshot — confirm both Internal hooks are still present
-    // (they shouldn't disappear, but a SteamVR-side reload could in theory
-    // drop them; this catches that case). Names are duplicated string
-    // literals here so MaybeLogDeepState can be defined above the Hook<>
-    // static declarations without forward-declaration gymnastics; a single
-    // refactor would have to update both sites if the names ever change.
+    // Hook registry snapshot — confirm both hooks are still present (they
+    // shouldn't disappear, but a SteamVR-side reload could in theory drop
+    // them; this catches that case). Names are duplicated string literals
+    // here so MaybeLogDeepState can be defined above the Hook<> static
+    // declarations without forward-declaration gymnastics; a single refactor
+    // would have to update both sites if the names ever change.
     LOG("[skeletal]   hooks: createInRegistry=%d updateInRegistry=%d",
         (int)IHook::Exists("IVRDriverInputInternal::CreateSkeletonComponent"),
         (int)IHook::Exists("IVRDriverInputInternal::UpdateSkeletonComponent"));
@@ -243,206 +223,6 @@ static void DumpHandleMap(const char *callerTag)
             (unsigned long long)kv.first,
             kv.second == 0 ? "left" : (kv.second == 1 ? "right" : "?"));
     }
-}
-
-// =============================================================================
-// VirtualQuery-guarded memory probes. Used for safely walking unknown
-// vtables and dereferencing the inner pointer recovered from the public
-// pimpl. Faulting on a stray vtable read would crash vrserver — these
-// probes turn that into a logged-and-bailed soft failure instead.
-// =============================================================================
-
-static bool IsAddressReadable(const void *addr, size_t bytes)
-{
-    if (!addr) return false;
-    MEMORY_BASIC_INFORMATION mbi{};
-    if (!VirtualQuery(addr, &mbi, sizeof mbi)) return false;
-    if (mbi.State != MEM_COMMIT) return false;
-    DWORD prot = mbi.Protect & 0xFF;
-    if (prot == 0 || (prot & PAGE_NOACCESS) || (prot & PAGE_GUARD)) return false;
-    auto regionEnd = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
-    auto needEnd   = (uintptr_t)addr + bytes;
-    return needEnd <= regionEnd;
-}
-
-// Tighter check used by DeepProbeInterface before iterating "what we hope
-// is a vtable" pointer slots. Real C++ vtables for objects from a DLL live
-// in the loaded image's .rdata section -- mbi.Type == MEM_IMAGE. Mapped
-// readable regions like KUSER_SHARED_DATA (0x7FFE0000), private heap pages
-// holding plain data, or stray stack pages are MEM_PRIVATE / MEM_MAPPED
-// and never carry a real vtable. Without this filter, a candidate that
-// happened to be readable (via IsAddressReadable) but isn't a real vtable
-// would have its 8 "slots" iterated and logged as if they were function
-// pointers, producing 8 lines of misleading garbage in the diagnostic log
-// on every failed install.
-static bool IsPlausibleVTableRegion(const void *addr)
-{
-    if (!addr) return false;
-    // Cheap obvious-bogus filter: vtable pointers below the first 64KB
-    // (MM_HIGHEST_USER_ADDRESS leaves this range as a NULL trap on Windows)
-    // can never be real. Catches the most common garbage-pointer case
-    // without paying for a VirtualQuery syscall.
-    if ((uintptr_t)addr < 0x10000) return false;
-    MEMORY_BASIC_INFORMATION mbi{};
-    if (!VirtualQuery(addr, &mbi, sizeof mbi)) return false;
-    if (mbi.State != MEM_COMMIT) return false;
-    if (mbi.Type != MEM_IMAGE)   return false;
-    return true;
-}
-
-// =============================================================================
-// Deep memory anatomy probe. Used when an interface install fails its
-// readability check — dumps everything we know about the iface, the
-// putative vtable, and the surrounding memory regions so we can diagnose
-// from the log what the actual memory layout looks like. Output is
-// intentionally verbose; gated by callers so it only fires on first
-// failure, not every time the same iface comes through.
-//
-// Reveals:
-//   - The full memory region the iface lives in (heap? code? stack?)
-//   - The first 8 pointer slots at iface (so we can see if iface[0]
-//     is actually the vtable pointer, or if the layout is different)
-//   - The memory region the vtable pointer points into
-//   - Per-slot readability + value for vtable[0..7]
-//   - For each readable slot, a probe of the function pointer's region
-//     (so we can confirm slots really do point at code)
-// =============================================================================
-static void LogVirtualQueryRegion(const char *tag, const void *addr)
-{
-    if (!addr) {
-        LOG("[skeletal-probe] %s: addr=NULL", tag);
-        return;
-    }
-    MEMORY_BASIC_INFORMATION mbi{};
-    if (!VirtualQuery(addr, &mbi, sizeof mbi)) {
-        LOG("[skeletal-probe] %s: addr=%p VirtualQuery FAILED (err=%lu)", tag, addr, GetLastError());
-        return;
-    }
-    LOG("[skeletal-probe] %s: addr=%p base=%p size=0x%llx state=0x%lx prot=0x%lx type=0x%lx",
-        tag, addr, mbi.BaseAddress, (unsigned long long)mbi.RegionSize,
-        mbi.State, mbi.Protect, mbi.Type);
-}
-
-static void DeepProbeInterface(const char *who, void *iface)
-{
-    if (!iface) {
-        LOG("[skeletal-probe] %s: iface=NULL, nothing to probe", who);
-        return;
-    }
-    LogVirtualQueryRegion(who, iface);
-
-    // Try to read the first 8 pointer slots at iface. If iface is a
-    // standard C++ vtable-having object, slot 0 is the vtable pointer
-    // and slots 1+ are member fields. If iface is something else (e.g.
-    // a struct of function pointers, or a thunk wrapper) the layout
-    // will look different.
-    if (!IsAddressReadable(iface, sizeof(void *) * 8)) {
-        LOG("[skeletal-probe] %s: cannot read 8 slots at iface=%p; trying smaller reads", who, iface);
-        for (int i = 0; i < 8; ++i) {
-            void **slot = ((void **)iface) + i;
-            if (IsAddressReadable(slot, sizeof(void *))) {
-                LOG("[skeletal-probe] %s: iface[%d] readable, value=%p", who, i, *slot);
-            } else {
-                LOG("[skeletal-probe] %s: iface[%d] at %p NOT readable", who, i, (void*)slot);
-            }
-        }
-        return;
-    }
-    void **iface_as_slots = (void **)iface;
-    LOG("[skeletal-probe] %s: iface[0..7] = %p %p %p %p %p %p %p %p",
-        who,
-        iface_as_slots[0], iface_as_slots[1], iface_as_slots[2], iface_as_slots[3],
-        iface_as_slots[4], iface_as_slots[5], iface_as_slots[6], iface_as_slots[7]);
-
-    // Standard C++ assumption: iface[0] is the vtable pointer. Probe the
-    // region it points into.
-    void *vtableCandidate = iface_as_slots[0];
-    LogVirtualQueryRegion("vtable_ptr_region", vtableCandidate);
-
-    // Bail before slot iteration if vtableCandidate isn't in a plausible
-    // image region. Without this, a candidate that happens to land in a
-    // readable-but-not-actually-a-vtable area (KUSER_SHARED_DATA at
-    // 0x7FFE0000, a heap page that happens to contain pointer-sized values,
-    // etc.) would have its "slots" dereferenced and logged as if they were
-    // function pointers -- producing 8 lines of misleading garbage on every
-    // failed install. Real vtables live in MEM_IMAGE pages from a loaded
-    // DLL's .rdata.
-    if (!IsPlausibleVTableRegion(vtableCandidate)) {
-        LOG("[skeletal-probe] %s: vtableCandidate=%p not in MEM_IMAGE region; skipping per-slot probe (likely not a real vtable)",
-            who, vtableCandidate);
-        return;
-    }
-
-    // Per-slot probe. Print whether each is readable, the slot's value
-    // (which should be a function pointer if it's a real vtable), and
-    // for the readable ones, the region the function pointer points into.
-    for (int i = 0; i < 8; ++i) {
-        void **slotAddr = ((void **)vtableCandidate) + i;
-        if (!IsAddressReadable(slotAddr, sizeof(void *))) {
-            LOG("[skeletal-probe] %s: vtable[%d] at %p NOT readable", who, i, (void*)slotAddr);
-            continue;
-        }
-        void *fn = *slotAddr;
-        // Check the function pointer points into committed memory too.
-        bool fnReadable = IsAddressReadable(fn, 8);
-        LOG("[skeletal-probe] %s: vtable[%d] at %p = %p (fn region readable=%d)",
-            who, i, (void*)slotAddr, fn, (int)fnReadable);
-        if (fnReadable) {
-            // Print first 8 bytes of the function — useful for sanity-
-            // checking that this really is code (look for opcode prefixes
-            // like 48 8B... indicating x64 mov).
-            const uint8_t *p = (const uint8_t *)fn;
-            LOG("[skeletal-probe] %s: vtable[%d] fn first8 = %02x %02x %02x %02x %02x %02x %02x %02x",
-                who, i, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
-        }
-    }
-}
-
-// =============================================================================
-// Public-stub thunk parser. Every IVRDriverInput_003 vtable entry in vrserver
-// is an 11-14 byte pimpl forwarder of the shape:
-//
-//   48 8B 49 NN     mov rcx, [rcx + NN]        ; NN = pimpl offset (observed = 8)
-//   48 8B 01     OR 4C 8B 11   mov rax/r10, [rcx]
-//   48 FF 60 MM  OR 49 FF 62 MM  jmp [rax/r10 + MM]   ; MM/8 = inner vtable index
-//   (special-cased: 48 FF 20 / 49 FF 22 = jmp [reg] = inner vtable index 0)
-//
-// Returns {valid=true, pimplOffset, innerVtableIndex} on a clean parse, or
-// valid=false if any byte doesn't match. Used at install time to recover
-// the Internal vtable layout for free without a private header.
-// =============================================================================
-
-struct ThunkParse
-{
-    bool    valid;
-    uint8_t pimplOffset;
-    uint8_t innerVtableIndex;
-};
-
-static ThunkParse ParsePublicVTableThunk(const void *fn)
-{
-    ThunkParse out{false, 0, 0};
-    if (!IsAddressReadable(fn, 16)) return out;
-    auto *p = (const uint8_t *)fn;
-
-    // mov rcx, [rcx + disp8]: 48 8B 49 NN
-    if (p[0] != 0x48 || p[1] != 0x8B || p[2] != 0x49) return out;
-    out.pimplOffset = p[3];
-    p += 4;
-
-    // mov rax, [rcx] (48 8B 01) or mov r10, [rcx] (4C 8B 11)
-    if (p[0] == 0x48 && p[1] == 0x8B && p[2] == 0x01)      p += 3;
-    else if (p[0] == 0x4C && p[1] == 0x8B && p[2] == 0x11) p += 3;
-    else return out;
-
-    if      (p[0] == 0x48 && p[1] == 0xFF && p[2] == 0x20) out.innerVtableIndex = 0;
-    else if (p[0] == 0x48 && p[1] == 0xFF && p[2] == 0x60) out.innerVtableIndex = (uint8_t)(p[3] / 8);
-    else if (p[0] == 0x49 && p[1] == 0xFF && p[2] == 0x22) out.innerVtableIndex = 0;
-    else if (p[0] == 0x49 && p[1] == 0xFF && p[2] == 0x62) out.innerVtableIndex = (uint8_t)(p[3] / 8);
-    else return out;
-
-    out.valid = true;
-    return out;
 }
 
 // =============================================================================
@@ -775,10 +555,6 @@ namespace skeletal {
 void Init(ServerTrackedDeviceProvider *driver)
 {
     g_driver = driver;
-    g_installedAgainstInternal.store(nullptr);
-    g_publicThunksParsed = false;
-    g_publicPimplOffset  = 0;
-    for (int i = 0; i < 7; ++i) g_internalVTableIndex[i] = -1;
     QueryPerformanceFrequency(&g_qpcFreq);
     g_lastStatsLogQpc.store(0);
     g_lastDeepStateLogQpc.store(0);
@@ -822,8 +598,7 @@ void Shutdown()
     fakeOld.QuadPart -= (LONGLONG)(kDeepStateLogIntervalSec * (double)g_qpcFreq.QuadPart) + 1;
     g_lastDeepStateLogQpc.store(fakeOld.QuadPart);
     MaybeLogDeepState("Shutdown");
-    LOG("[skeletal] Shutdown: subsystem disarmed (publicThunksParsed=%d, installedAgainstInternal=%p)",
-        (int)g_publicThunksParsed, g_installedAgainstInternal.load());
+    LOG("[skeletal] Shutdown: subsystem disarmed");
 
     // Intentionally do NOT clear g_driver. ServerTrackedDeviceProvider
     // outlives this DLL: SteamVR holds the provider object alive across the
@@ -835,183 +610,11 @@ void Shutdown()
     // window, but defending the pointer itself keeps the invariant local
     // to this file in case a future detour is added without the scope
     // guard.
-    g_installedAgainstInternal.store(nullptr);
     {
         std::lock_guard<std::mutex> lk(g_skeletalMutex);
         g_handleToHandedness.clear();
         for (int h = 0; h < 2; ++h) g_handState[h].initialized = false;
     }
-}
-
-bool IsPublicVTableCaptured()
-{
-    return g_publicThunksParsed;
-}
-
-void CapturePublicVTable(void *iface)
-{
-    if (!iface) return;
-    if (g_publicThunksParsed) {
-        // Idempotent re-entry — common: every IVRDriverInput_003 query (one
-        // per driver per session) calls in here. After the first success we
-        // just no-op silently to avoid log spam.
-        return;
-    }
-    LOG("[skeletal] CapturePublicVTable invoked: iface=%p", iface);
-    // Deep-probe the public interface as a working baseline. The Internal
-    // probe (in TryInstallInternalHook on failure) compares against this —
-    // if their layouts look fundamentally different that tells us the
-    // Internal returned by GetGenericInterface isn't a standard vtable-
-    // having object.
-    DeepProbeInterface("public", iface);
-    if (!IsAddressReadable(iface, sizeof(void *))) {
-        LOG("[skeletal] CapturePublicVTable: iface %p not readable, aborting", iface);
-        return;
-    }
-    void **vtable = *((void ***)iface);
-    if (!IsAddressReadable(vtable, sizeof(void *) * 7)) {
-        LOG("[skeletal] CapturePublicVTable: vtable %p not readable for 7 slots, aborting", (void*)vtable);
-        return;
-    }
-
-    ThunkParse parses[7];
-    bool       allValid  = true;
-    uint8_t    pimplSeen = 0;
-    for (int i = 0; i < 7; ++i) {
-        parses[i] = ParsePublicVTableThunk(vtable[i]);
-        if (!parses[i].valid) { allValid = false; continue; }
-        if (pimplSeen == 0) pimplSeen = parses[i].pimplOffset;
-        else if (pimplSeen != parses[i].pimplOffset) {
-            LOG("[skeletal] pimpl-offset mismatch at public method %d (got %u, expected %u); aborting parse",
-                i, (unsigned)parses[i].pimplOffset, (unsigned)pimplSeen);
-            allValid = false;
-        }
-    }
-    if (!allValid || pimplSeen == 0) {
-        LOG("[skeletal] public IVRDriverInput thunk parse failed; finger smoothing will not install");
-        return;
-    }
-    for (int i = 0; i < 7; ++i) g_internalVTableIndex[i] = parses[i].innerVtableIndex;
-    g_publicPimplOffset  = pimplSeen;
-    g_publicThunksParsed = true;
-    LOG("[skeletal] public IVRDriverInput thunks parsed: pimplOffset=%u indices={%d,%d,%d,%d,%d,%d,%d}",
-        (unsigned)g_publicPimplOffset,
-        g_internalVTableIndex[0], g_internalVTableIndex[1], g_internalVTableIndex[2],
-        g_internalVTableIndex[3], g_internalVTableIndex[4], g_internalVTableIndex[5],
-        g_internalVTableIndex[6]);
-}
-
-void TryInstallInternalHook(void *iface)
-{
-    if (!iface) return;
-
-    LOG("[skeletal] TryInstallInternalHook invoked: iface=%p publicParsed=%d prevInstalled=%p",
-        iface, (int)g_publicThunksParsed, g_installedAgainstInternal.load());
-
-    // First-install only. If we've already installed against any Internal
-    // pointer this session, bail — subsequent pointers map to the same
-    // static vtable functions and MinHook would refuse anyway.
-    void *prev = nullptr;
-    if (!g_installedAgainstInternal.compare_exchange_strong(prev, iface)) {
-        LOG("[skeletal] TryInstallInternalHook: already installed against %p, no-op", prev);
-        return;
-    }
-
-    if (!g_publicThunksParsed) {
-        LOG("[skeletal] Internal pointer arrived before public-stub thunks were parsed; install will retry on next query (caller should have proactively fetched IVRDriverInput_003 — see InterfaceHookInjector::DetourGetGenericInterface)");
-        // Roll back the install marker so a subsequent invocation could retry.
-        g_installedAgainstInternal.store(nullptr);
-        return;
-    }
-    if (!IsAddressReadable(iface, sizeof(void *))) {
-        LOG("[skeletal] Internal interface pointer %p not readable; aborting install", iface);
-        g_installedAgainstInternal.store(nullptr);
-        return;
-    }
-    void **vtable = *((void ***)iface);
-    int updateIdx = g_internalVTableIndex[6];   // public[6] = UpdateSkeletonComponent
-    int createIdx = g_internalVTableIndex[5];   // public[5] = CreateSkeletonComponent
-    if (updateIdx < 0 || createIdx < 0) {
-        LOG("[skeletal] recovered Internal indices invalid (update=%d create=%d); aborting", updateIdx, createIdx);
-        g_installedAgainstInternal.store(nullptr);
-        return;
-    }
-    // ALWAYS deep-probe the Internal interface, regardless of whether the
-    // readability check below passes or fails. Captures the iface anatomy
-    // for both the working-install and failing-install cases, so we can
-    // diff the two if behaviour changes between SteamVR builds.
-    DeepProbeInterface("internal", iface);
-
-    if (!IsAddressReadable(&vtable[updateIdx], sizeof(void *)) ||
-        !IsAddressReadable(&vtable[createIdx], sizeof(void *)))
-    {
-        LOG("[skeletal] Internal vtable slot pointers out of range; aborting (updateIdx=%d createIdx=%d vtable=%p)",
-            updateIdx, createIdx, (void*)vtable);
-
-        // Per-slot drilldown — log readability AND value (if readable) for
-        // every slot 0..updateIdx. If slot N is unreadable but slot 0 is,
-        // the vtable might be smaller than 7 entries. If slot 0 is also
-        // unreadable, the vtable pointer itself is bogus.
-        for (int i = 0; i <= updateIdx + 1 && i < 16; ++i) {
-            void **slotAddr = vtable + i;
-            bool readable = IsAddressReadable(slotAddr, sizeof(void *));
-            if (readable) {
-                LOG("[skeletal]   per_slot vtable[%d] @ %p readable, value=%p", i, (void*)slotAddr, *slotAddr);
-            } else {
-                LOG("[skeletal]   per_slot vtable[%d] @ %p NOT readable", i, (void*)slotAddr);
-            }
-        }
-        g_installedAgainstInternal.store(nullptr);
-        return;
-    }
-
-    // Pre-install vtable snapshot. After install we re-read these slots and
-    // compare; the values should change to point at MinHook trampolines.
-    void *preCreate = vtable[createIdx];
-    void *preUpdate = vtable[updateIdx];
-    LOG("[skeletal] pre-install snapshot: vtable[%d] (Create) = %p, vtable[%d] (Update) = %p",
-        createIdx, preCreate, updateIdx, preUpdate);
-
-    if (!IHook::Exists(InternalCreateSkeletonHook.name)) {
-        InternalCreateSkeletonHook.CreateHookInObjectVTable(iface, createIdx, &DetourInternalCreateSkeletonComponent);
-        IHook::Register(&InternalCreateSkeletonHook);
-        LOG("[skeletal]   Create hook installed: originalFunc=%p, detour=%p (orig should NOT == detour)",
-            (void*)InternalCreateSkeletonHook.originalFunc, (void*)&DetourInternalCreateSkeletonComponent);
-    } else {
-        LOG("[skeletal]   Create hook ALREADY EXISTS in registry; skipping install");
-    }
-    if (!IHook::Exists(InternalUpdateSkeletonHook.name)) {
-        InternalUpdateSkeletonHook.CreateHookInObjectVTable(iface, updateIdx, &DetourInternalUpdateSkeletonComponent);
-        IHook::Register(&InternalUpdateSkeletonHook);
-        LOG("[skeletal]   Update hook installed: originalFunc=%p, detour=%p (orig should NOT == detour)",
-            (void*)InternalUpdateSkeletonHook.originalFunc, (void*)&DetourInternalUpdateSkeletonComponent);
-    } else {
-        LOG("[skeletal]   Update hook ALREADY EXISTS in registry; skipping install");
-    }
-
-    // Post-install verification. The vtable slot values themselves typically
-    // DON'T change with MinHook (it patches the function body, not the
-    // pointer in the vtable), so we expect post == pre here. The change
-    // should instead be in originalFunc (which is the MinHook trampoline,
-    // distinct from both the original target and our detour).
-    void *postCreate = vtable[createIdx];
-    void *postUpdate = vtable[updateIdx];
-    LOG("[skeletal] post-install snapshot: vtable[%d] (Create) = %p (changed=%d), vtable[%d] (Update) = %p (changed=%d)",
-        createIdx, postCreate, (int)(postCreate != preCreate),
-        updateIdx, postUpdate, (int)(postUpdate != preUpdate));
-
-    // Probe the trampolines that MinHook stored in originalFunc — they should
-    // be inside MinHook's allocated trampoline pool (typically a separate
-    // VirtualAlloc'd region near the target). Confirm they're readable code.
-    if (InternalCreateSkeletonHook.originalFunc) {
-        LogVirtualQueryRegion("create_originalFunc_region", (void*)InternalCreateSkeletonHook.originalFunc);
-    }
-    if (InternalUpdateSkeletonHook.originalFunc) {
-        LogVirtualQueryRegion("update_originalFunc_region", (void*)InternalUpdateSkeletonHook.originalFunc);
-    }
-
-    LOG("[skeletal] installed Internal hooks: CreateSkeleton @ vtable[%d], UpdateSkeleton @ vtable[%d] -- waiting for first calls",
-        createIdx, updateIdx);
 }
 
 } // namespace skeletal
