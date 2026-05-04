@@ -2744,6 +2744,24 @@ void DismissAutoRecoveryBanner() {
 	g_relocDetector.autoRecoverBannerDismissed = true;
 }
 
+void RecalibrateFromScratch() {
+	// Same effective steps as the auto-recovery action block in
+	// TickHmdRelocalizationDetector, but triggered manually so the
+	// "is it really a relocalization?" gates don't apply.
+	calibration.Clear();
+	CalCtx.refToTargetPose             = Eigen::AffineCompact3d::Identity();
+	CalCtx.relativePosCalibrated       = false;
+	CalCtx.hasAppliedCalibrationResult = false;
+	Metrics::WriteLogAnnotation("manual_recalibrate_from_scratch: user clicked 'Recalibrate from scratch' button");
+	StartContinuousCalibration();
+	// Logged AFTER StartContinuousCalibration because that function
+	// internally clears CalCtx.messages -- the same gotcha the auto-
+	// recovery block hit and documented (see TickHmdRelocalizationDetector
+	// step-5 comment). Putting the user-visible "we did it" message
+	// first would just have it wiped before it rendered.
+	CalCtx.Log("Recalibrating from scratch -- collecting fresh samples...\n");
+}
+
 // Manual playspace recenter: shift the standing zero pose so the user's
 // current physical HMD position becomes the chaperone center. Called from
 // the "Recenter playspace" UI button. Y is preserved (don't recalibrate
