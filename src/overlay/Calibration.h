@@ -584,22 +584,6 @@ bool UndoLastAutoRecovery();
 // continues; only the UI banner disappears.
 void DismissAutoRecoveryBanner();
 
-// Manual "I'm stuck, give me a clean slate" escape from a wedged
-// calibration. Wipes in-memory calibration state, resets the CalCtx
-// warm-start fields (refToTargetPose / relativePosCalibrated /
-// hasAppliedCalibrationResult), and restarts continuous calibration
-// cold so it converges from fresh samples. Equivalent to what the
-// auto-recovery does internally, but triggered by user click. Bound
-// to the "Recalibrate from scratch" button on the Basic tab.
-//
-// This is the only user-accessible escape from a wedged-self-consistent
-// calibration -- a class of failure the watchdog architecturally
-// cannot detect (the math is internally consistent, just at the wrong
-// offset). The honest path before this button was Cancel -> Clear ->
-// Start, three buttons across two tabs; users who hit a wedged cal
-// often gave up rather than figuring it out.
-void RecalibrateFromScratch();
-
 // Manual playspace recenter: shift the standing zero pose so the user's
 // current HMD position becomes the chaperone center. X and Z translate;
 // Y (floor) and rotation are preserved. Used by the "Recenter playspace"
