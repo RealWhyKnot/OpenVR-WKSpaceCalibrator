@@ -265,6 +265,31 @@ static bool IsAddressReadable(const void *addr, size_t bytes)
     return needEnd <= regionEnd;
 }
 
+// Tighter check used by DeepProbeInterface before iterating "what we hope
+// is a vtable" pointer slots. Real C++ vtables for objects from a DLL live
+// in the loaded image's .rdata section -- mbi.Type == MEM_IMAGE. Mapped
+// readable regions like KUSER_SHARED_DATA (0x7FFE0000), private heap pages
+// holding plain data, or stray stack pages are MEM_PRIVATE / MEM_MAPPED
+// and never carry a real vtable. Without this filter, a candidate that
+// happened to be readable (via IsAddressReadable) but isn't a real vtable
+// would have its 8 "slots" iterated and logged as if they were function
+// pointers, producing 8 lines of misleading garbage in the diagnostic log
+// on every failed install.
+static bool IsPlausibleVTableRegion(const void *addr)
+{
+    if (!addr) return false;
+    // Cheap obvious-bogus filter: vtable pointers below the first 64KB
+    // (MM_HIGHEST_USER_ADDRESS leaves this range as a NULL trap on Windows)
+    // can never be real. Catches the most common garbage-pointer case
+    // without paying for a VirtualQuery syscall.
+    if ((uintptr_t)addr < 0x10000) return false;
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (!VirtualQuery(addr, &mbi, sizeof mbi)) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    if (mbi.Type != MEM_IMAGE)   return false;
+    return true;
+}
+
 // =============================================================================
 // Deep memory anatomy probe. Used when an interface install fails its
 // readability check — dumps everything we know about the iface, the
@@ -333,6 +358,20 @@ static void DeepProbeInterface(const char *who, void *iface)
     // region it points into.
     void *vtableCandidate = iface_as_slots[0];
     LogVirtualQueryRegion("vtable_ptr_region", vtableCandidate);
+
+    // Bail before slot iteration if vtableCandidate isn't in a plausible
+    // image region. Without this, a candidate that happens to land in a
+    // readable-but-not-actually-a-vtable area (KUSER_SHARED_DATA at
+    // 0x7FFE0000, a heap page that happens to contain pointer-sized values,
+    // etc.) would have its "slots" dereferenced and logged as if they were
+    // function pointers -- producing 8 lines of misleading garbage on every
+    // failed install. Real vtables live in MEM_IMAGE pages from a loaded
+    // DLL's .rdata.
+    if (!IsPlausibleVTableRegion(vtableCandidate)) {
+        LOG("[skeletal-probe] %s: vtableCandidate=%p not in MEM_IMAGE region; skipping per-slot probe (likely not a real vtable)",
+            who, vtableCandidate);
+        return;
+    }
 
     // Per-slot probe. Print whether each is readable, the slot's value
     // (which should be a function pointer if it's a real vtable), and
@@ -767,9 +806,10 @@ void Init(ServerTrackedDeviceProvider *driver)
 
 void Shutdown()
 {
-    // Called after IHook::DestroyAll from the existing DisableHooks(). Our
-    // hooks are already torn down; this is just state hygiene so a driver-
-    // reload cycle starts clean.
+    // Called after IHook::DestroyAll + InterfaceHooks::DrainInFlightDetours
+    // from the existing DisableHooks(). Our detours are guaranteed to have
+    // exited before we get here (drain is the previous step), so no in-flight
+    // caller can race anything we do here.
     MaybeLogStats("Shutdown");
     // Force a final deep-state dump regardless of throttle so even a short-
     // lived session leaves us a full snapshot in the log. Bypass the throttle
@@ -784,7 +824,17 @@ void Shutdown()
     MaybeLogDeepState("Shutdown");
     LOG("[skeletal] Shutdown: subsystem disarmed (publicThunksParsed=%d, installedAgainstInternal=%p)",
         (int)g_publicThunksParsed, g_installedAgainstInternal.load());
-    g_driver = nullptr;
+
+    // Intentionally do NOT clear g_driver. ServerTrackedDeviceProvider
+    // outlives this DLL: SteamVR holds the provider object alive across the
+    // entire driver session, and Init() will overwrite g_driver on the next
+    // load. Nulling it here used to crash vrserver on every reload that
+    // coincided with a 340Hz UpdateSkeleton -- the detour reads g_driver
+    // after the !g_driver guard and a window between guard and use let the
+    // pointer go to NULL mid-call. Item 2's in-flight drain closes that
+    // window, but defending the pointer itself keeps the invariant local
+    // to this file in case a future detour is added without the scope
+    // guard.
     g_installedAgainstInternal.store(nullptr);
     {
         std::lock_guard<std::mutex> lk(g_skeletalMutex);
