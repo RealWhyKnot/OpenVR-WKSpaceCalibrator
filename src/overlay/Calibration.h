@@ -565,6 +565,25 @@ int GetWatchdogResetCount();
 bool LastDetectedRelocalization(double& outAgeSeconds, double& outDeltaMeters,
                                 double& outDeltaDegrees);
 
+// Recent auto-recovery info: returns true if auto-recovery clobbered the
+// calibration in the last 60 seconds AND the user hasn't dismissed the
+// banner. Populates outAge (seconds since recovery fired) and outDeltaMeters
+// (the HMD jump magnitude that triggered the recovery). Used by the UI to
+// render a sticky banner with Undo + Dismiss buttons.
+bool LastAutoRecoveryActive(double& outAge, double& outDeltaMeters);
+
+// Restore the pre-recovery refToTargetPose / relativePosCalibrated /
+// hasAppliedCalibrationResult, taking the user back to the calibration
+// state that was in effect before the auto-recovery cleared it. Returns
+// true if the snapshot existed and was restored, false if no recovery
+// has happened yet or undo was already applied. Idempotent: a second
+// click is a no-op.
+bool UndoLastAutoRecovery();
+
+// Hide the recovery banner without undoing. The recovered calibration
+// continues; only the UI banner disappears.
+void DismissAutoRecoveryBanner();
+
 // Manual playspace recenter: shift the standing zero pose so the user's
 // current HMD position becomes the chaperone center. X and Z translate;
 // Y (floor) and rotation are preserved. Used by the "Recenter playspace"
