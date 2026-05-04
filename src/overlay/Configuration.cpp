@@ -1,8 +1,12 @@
 #include "stdafx.h"
 #include "Configuration.h"
+#include "CalibrationMetrics.h"   // WriteLogAnnotation -- profile_loaded_calibration
+                                  // diagnostic line on launch.
 
 #include <picojson.h>
 
+#include <cmath>     // std::sqrt for magnitude computation in the launch log
+#include <cstdio>    // snprintf for the profile_loaded_calibration log buffer
 #include <string>
 #include <iostream>
 #include <fstream>
@@ -229,6 +233,26 @@ void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	ctx.calibratedTranslation(0) = obj["x"].get<double>();
 	ctx.calibratedTranslation(1) = obj["y"].get<double>();
 	ctx.calibratedTranslation(2) = obj["z"].get<double>();
+
+	// Diagnostic: surface the loaded calibration immediately at startup so
+	// the user's "tracking is insanely off on launch" symptom is visible
+	// in the log without needing to wait for any further events. A wedged
+	// saved cal (large translation magnitude) loading on every launch is a
+	// known failure mode -- having this line at startup turns "I think the
+	// profile loaded wrong" into a one-grep confirmation.
+	{
+		const double tx = ctx.calibratedTranslation(0);
+		const double ty = ctx.calibratedTranslation(1);
+		const double tz = ctx.calibratedTranslation(2);
+		const double magnitude = std::sqrt(tx*tx + ty*ty + tz*tz);
+		char loadbuf[256];
+		snprintf(loadbuf, sizeof loadbuf,
+			"profile_loaded_calibration: t=(%.3f,%.3f,%.3f) magnitude=%.3f rot_deg=(roll=%.2f, yaw=%.2f, pitch=%.2f) ref_system='%s' tgt_system='%s'",
+			tx, ty, tz, magnitude,
+			ctx.calibratedRotation(0), ctx.calibratedRotation(1), ctx.calibratedRotation(2),
+			ctx.referenceTrackingSystem.c_str(), ctx.targetTrackingSystem.c_str());
+		Metrics::WriteLogAnnotation(loadbuf);
+	}
 	LoadStandby(ctx.referenceStandby, obj["reference_device"]);
 	LoadStandby(ctx.targetStandby, obj["target_device"]);
 	if (obj["autostart_continuous_calibration"].evaluate_as_boolean()) {
