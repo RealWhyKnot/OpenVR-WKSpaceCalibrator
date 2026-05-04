@@ -112,6 +112,32 @@ void BuildMainWindow(bool runningInOverlay_)
 	// banner is the more transient state.
 	DrawVRWaitingBanner();
 
+	// Auto-recovery banner (audit UX #3). Sticky for 60 s after the auto-
+	// recover fires so the user actually notices that their calibration was
+	// just clobbered, with Undo + Dismiss buttons. Without this the only
+	// signal was a single line in CalCtx.messages, swept on the next
+	// messages.clear(), invisible on tabs other than Basic. The 2026-05-02
+	// false-positive recoveries that destroyed working cals would have been
+	// caught here -- the user could have hit Undo within seconds.
+	{
+		double recoveryAge = 0.0, recoveryDelta = 0.0;
+		if (LastAutoRecoveryActive(recoveryAge, recoveryDelta)) {
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.4f, 1.0f));
+			ImGui::TextWrapped(
+				"Auto-recovery cleared calibration %.0fs ago (~%.0f cm HMD jump). Recalibrating from scratch.",
+				recoveryAge, recoveryDelta * 100.0);
+			ImGui::PopStyleColor();
+			if (ImGui::SmallButton("Undo (restore prior calibration)")) {
+				UndoLastAutoRecovery();
+			}
+			ImGui::SameLine();
+			if (ImGui::SmallButton("Dismiss")) {
+				DismissAutoRecoveryBanner();
+			}
+			ImGui::Separator();
+		}
+	}
+
 	// First-run auto-open of the setup wizard. Defer until VR is ready --
 	// the wizard's first step depends on enumerating tracking systems via
 	// VRState::Load, which is empty without a live OpenVR connection. If

@@ -1220,7 +1220,41 @@ namespace {
 		// continuous-cal at t=1527.69, my detector saw a 29cm pose delta at
 		// t=1527.74, auto-recovery fired and clobbered the working cal.
 		// Adding this gate so the same scenario can't repeat.
+		//
+		// NOTE: stamped on EVERY non-OK tick below (not just the OK->!OK
+		// transition), so sub-100ms flicker between OK/OutOfRange/OK still
+		// records a stall and arms the post-stall grace.
 		double lastHmdInvalidTime = -1e9;
+
+		// Per-base-station distance to the HMD on the previous tick. Used as
+		// a corroborating signal for the auto-recovery gate: a real Quest
+		// re-localization will jump the HMD position while base stations
+		// remain stable in their own tracking frame, so the HMD-to-base
+		// distance should also jump by ~the same magnitude. If only the
+		// HMD-frame delta jumps but per-base relative distances don't,
+		// something else is going on (HMD drifted with bases, transient
+		// driver state, etc.) and we should NOT clobber the calibration.
+		std::map<std::string, double> prevHmdToBaseDist;
+
+		// --- Auto-recovery snapshot: pre-clear state so Undo can restore.
+		// Captured INSIDE the auto-recover action block, just before
+		// calibration.Clear() runs. Snapshot is "valid" until the user
+		// hits Undo (which restores + invalidates) or Dismiss (which only
+		// hides the UI banner; the snapshot stays so a later Undo button
+		// rendered through some other path would still work, though there
+		// currently isn't one).
+		struct AutoRecoverySnapshot {
+			bool valid = false;
+			Eigen::AffineCompact3d refToTargetPose = Eigen::AffineCompact3d::Identity();
+			bool relativePosCalibrated         = false;
+			bool hasAppliedCalibrationResult   = false;
+		};
+		AutoRecoverySnapshot lastAutoRecoverSnapshot;
+
+		// Set by DismissAutoRecoveryBanner. Reset to false on every new
+		// auto-recover firing so subsequent recoveries get their own banner
+		// even if the user dismissed an earlier one.
+		bool autoRecoverBannerDismissed = false;
 	};
 	RelocalizationDetectorState g_relocDetector;
 
@@ -1252,14 +1286,32 @@ namespace {
 	// quickly we'd interrupt the convergence and prevent the calibration
 	// from ever stabilising.
 	//
-	// Post-stall grace: 10 s after an HMD-tracking-lost event, refuse to
-	// auto-recover. The stall flow has its own restart logic; let it converge
-	// before considering further intervention. Long enough that even a chunky
-	// post-stall pose-settling jitter window doesn't trigger us.
-	constexpr double kRelocAutoRecoverThresholdM   = 0.30;  // 30 cm (was 15, too low)
-	constexpr double kRelocAutoRecoverStartupSec   = 30.0;  // 30 s startup grace
-	constexpr double kRelocAutoRecoverThrottleSec  = 30.0;  // 30 s between recovers
-	constexpr double kRelocAutoRecoverPostStallSec = 10.0;  // 10 s after stall recovery
+	// Post-stall grace: 30 s after an HMD-tracking-lost event, refuse to
+	// auto-recover. Was 10 s; raised to match the throttle window so the
+	// SAME amount of clear, post-stall convergence is required whether the
+	// previous event was a stall or a previous auto-recover. Audit point:
+	// the stall flow's own restart logic converges in seconds, but the
+	// pose data takes longer to settle into a consistent frame, and a
+	// detector fire during the settling window correlates strongly with
+	// the false positives observed on 2026-05-02 / 2026-05-03 (29cm and
+	// 86cm "drift events" landing right after stalls).
+	//
+	// Per-base corroboration threshold: a real Quest re-localization
+	// shifts the HMD position while base stations stay put in their own
+	// frame, so the HMD-to-each-base distance changes by ~hmdDelta. We
+	// require at least kRelocAutoRecoverMinBaseConfirms base stations to
+	// show >= kRelocAutoRecoverBaseDistJumpM jump in HMD-relative distance.
+	// 15 cm threshold is half the HMD jump threshold so a real 30cm jump
+	// trivially passes; smaller settles/jitters that are below half the
+	// HMD threshold get filtered out. Two-base requirement defends against
+	// a single base station with bad tracking inflating its delta on its
+	// own.
+	constexpr double kRelocAutoRecoverThresholdM     = 0.30;  // 30 cm (was 15, too low)
+	constexpr double kRelocAutoRecoverStartupSec     = 30.0;  // 30 s startup grace
+	constexpr double kRelocAutoRecoverThrottleSec    = 30.0;  // 30 s between recovers
+	constexpr double kRelocAutoRecoverPostStallSec   = 30.0;  // 30 s after stall recovery (was 10, audit Math #3)
+	constexpr double kRelocAutoRecoverBaseDistJumpM  = 0.15;  // 15 cm per-base dist-from-hmd jump
+	constexpr int    kRelocAutoRecoverMinBaseConfirms = 2;    // need 2 bases to corroborate
 
 	void TickHmdRelocalizationDetector(double now) {
 		if (!vr::VRSystem()) return;
@@ -1316,8 +1368,16 @@ namespace {
 		// cache the existing universe-shift detector populates -- but we
 		// can't read its state directly without coupling to it, so do a
 		// fresh scan here (cheap; ~4 base stations max).
+		//
+		// Also compute per-base HMD-relative distance for the auto-recovery
+		// corroboration check (audit Math #3): a real Quest re-localization
+		// shifts the HMD while base stations stay put, so the HMD-to-base
+		// distance changes by ~hmdDelta on every base. Tracked here so the
+		// next-tick comparison can verify enough bases agree.
 		double bsMaxDelta = 0.0;
 		int bsCount = 0;
+		std::map<std::string, double> currentHmdToBaseDist;
+		int basesAgreeingOnJump = 0;
 		char propBuf[vr::k_unMaxPropertyStringSize] = {};
 		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id) {
 			if (vr::VRSystem()->GetTrackedDeviceClass(id) != vr::TrackedDeviceClass_TrackingReference) continue;
@@ -1335,6 +1395,20 @@ namespace {
 			if (it == baseStationCache.end()) continue;
 			double d = (p.trans - it->second.pose.translation()).norm();
 			if (d > bsMaxDelta) bsMaxDelta = d;
+
+			// Per-base HMD-relative distance corroboration. Compute distance
+			// from HMD to this base on this tick; compare to last tick's
+			// distance for the same base; count bases whose distance jumped
+			// by >= the corroboration threshold.
+			double dist = (hmdPose.translation() - p.trans).norm();
+			currentHmdToBaseDist[serial] = dist;
+			auto prevIt = s.prevHmdToBaseDist.find(serial);
+			if (prevIt != s.prevHmdToBaseDist.end()) {
+				double distJump = std::abs(dist - prevIt->second);
+				if (distJump >= kRelocAutoRecoverBaseDistJumpM) {
+					++basesAgreeingOnJump;
+				}
+			}
 		}
 
 		// Body trackers in OTHER tracking system(s). For Quest HMD + Lighthouse
@@ -1450,18 +1524,26 @@ namespace {
 		const bool magnitudeOK       = currentHmdDelta >= kRelocAutoRecoverThresholdM;
 		const bool startupOK         = now >= kRelocAutoRecoverStartupSec;
 		const bool throttleOK        = (now - s.lastAutoRecoverTime) >= kRelocAutoRecoverThrottleSec;
+		// Corroboration (audit Math #3): require >= N base stations to ALSO
+		// show >= 15cm jump in HMD-relative distance. Defends against the
+		// failure mode where the HMD pose appears to teleport on a single
+		// tick due to driver-side state churn while base stations DIDN'T
+		// see a proportional change in their distance to the HMD (i.e. the
+		// "teleport" was a measurement artifact, not real motion).
+		const bool basesCorroborate  = basesAgreeingOnJump >= kRelocAutoRecoverMinBaseConfirms;
 
 		// If `fired` is true (a relocalization log line was emitted) but a
 		// gate blocked the recovery, log WHY — gives us debug evidence for
 		// every borderline event so we can tune thresholds against real data
 		// instead of guessing. Throttled to once per fire (the fire itself
 		// is throttled to 5s by the existing code), so this won't flood.
-		if (fired && (!magnitudeOK || !stateOK || !startupOK || !throttleOK || postStallGrace)) {
+		if (fired && (!magnitudeOK || !stateOK || !startupOK || !throttleOK || postStallGrace || !basesCorroborate)) {
 			char skipbuf[384];
 			snprintf(skipbuf, sizeof skipbuf,
-				"auto_recover_skipped: hmdDelta=%.3f magnitudeOK=%d stateOK=%d startupOK=%d throttleOK=%d postStallGrace=%d (secSinceStall=%.2f) state=%d",
+				"auto_recover_skipped: hmdDelta=%.3f magnitudeOK=%d stateOK=%d startupOK=%d throttleOK=%d postStallGrace=%d (secSinceStall=%.2f) basesAgreeing=%d/%d state=%d",
 				currentHmdDelta, (int)magnitudeOK, (int)stateOK, (int)startupOK, (int)throttleOK,
-				(int)postStallGrace, secSinceStall, (int)CalCtx.state);
+				(int)postStallGrace, secSinceStall,
+				basesAgreeingOnJump, kRelocAutoRecoverMinBaseConfirms, (int)CalCtx.state);
 			Metrics::WriteLogAnnotation(skipbuf);
 		}
 
@@ -1470,7 +1552,8 @@ namespace {
 			&& stateOK
 			&& startupOK
 			&& throttleOK
-			&& !postStallGrace)
+			&& !postStallGrace
+			&& basesCorroborate)
 		{
 			const double hmdDelta = currentHmdDelta;
 			const Eigen::Vector3d dpos = hmdPose.translation() - s.prevHmd.translation();
@@ -1482,6 +1565,20 @@ namespace {
 				(CalCtx.state == CalibrationState::Continuous) ? "Continuous" : "ContinuousStandby",
 				(int)calibration.isValid(), secSinceStall);
 			Metrics::WriteLogAnnotation(logbuf);
+
+			// Step 0 (audit UX #3): snapshot the pre-recovery calibration
+			// state so the UI's "Undo" button can restore it. Snapshot the
+			// CalCtx fields the recovery is about to clear -- restoring
+			// these is sufficient to put the user back in the wedged
+			// calibration (which is, after all, what they were running
+			// happily in until the false-positive auto-recovery clobbered
+			// it). Reset the dismissed flag so this new event gets a
+			// fresh banner even if a previous one was dismissed.
+			s.lastAutoRecoverSnapshot.valid                      = true;
+			s.lastAutoRecoverSnapshot.refToTargetPose            = CalCtx.refToTargetPose;
+			s.lastAutoRecoverSnapshot.relativePosCalibrated      = CalCtx.relativePosCalibrated;
+			s.lastAutoRecoverSnapshot.hasAppliedCalibrationResult = CalCtx.hasAppliedCalibrationResult;
+			s.autoRecoverBannerDismissed                         = false;
 
 			// Step 1: wipe in-memory calibration + sample buffer.
 			calibration.Clear();
@@ -1539,6 +1636,7 @@ namespace {
 		s.prevHmd = hmdPose;
 		s.havePrevHmd = true;
 		s.prevBodyTrans = std::move(currentBodyTrans);
+		s.prevHmdToBaseDist = std::move(currentHmdToBaseDist);
 	}
 }
 
@@ -2602,6 +2700,48 @@ bool LastDetectedRelocalization(double& outAgeSeconds, double& outDeltaMeters,
 	outDeltaMeters = g_relocDetector.lastFireDelta.norm();
 	outDeltaDegrees = g_relocDetector.lastFireRotRad * 180.0 / EIGEN_PI;
 	return true;
+}
+
+bool LastAutoRecoveryActive(double& outAge, double& outDeltaMeters) {
+	auto& s = g_relocDetector;
+	if (!s.lastAutoRecoverSnapshot.valid)   return false;
+	if (s.autoRecoverBannerDismissed)       return false;
+	if (s.lastAutoRecoverTime <= -1e8)      return false;
+	const double now = glfwGetTime();
+	const double age = now - s.lastAutoRecoverTime;
+	// 60 s sticky window matches the audit suggestion. After that the
+	// banner self-dismisses; the snapshot itself stays valid in case some
+	// other path wants to expose Undo (currently nothing does).
+	if (age > 60.0) return false;
+	outAge          = age;
+	outDeltaMeters  = s.lastFireDelta.norm();
+	return true;
+}
+
+bool UndoLastAutoRecovery() {
+	auto& s = g_relocDetector;
+	if (!s.lastAutoRecoverSnapshot.valid) return false;
+
+	// Restore the three CalCtx fields the recovery had cleared. The
+	// continuous-cal tick will then re-apply the saved relative-pose
+	// constraint via setRelativeTransformation on the next frame, putting
+	// the body trackers back where they were before the (false-positive)
+	// auto-recover clobbered the calibration.
+	CalCtx.refToTargetPose             = s.lastAutoRecoverSnapshot.refToTargetPose;
+	CalCtx.relativePosCalibrated       = s.lastAutoRecoverSnapshot.relativePosCalibrated;
+	CalCtx.hasAppliedCalibrationResult = s.lastAutoRecoverSnapshot.hasAppliedCalibrationResult;
+
+	// Invalidate the snapshot so a second Undo click does nothing.
+	s.lastAutoRecoverSnapshot.valid    = false;
+	s.autoRecoverBannerDismissed       = true;
+
+	Metrics::WriteLogAnnotation("auto_recover_undone: pre-recovery calibration restored from snapshot");
+	CalCtx.Log("Auto-recovery undone. Restored pre-recovery calibration.\n");
+	return true;
+}
+
+void DismissAutoRecoveryBanner() {
+	g_relocDetector.autoRecoverBannerDismissed = true;
 }
 
 // Manual playspace recenter: shift the standing zero pose so the user's
