@@ -1,5 +1,8 @@
 ﻿#include "stdafx.h"
 #include "Calibration.h"
+#include "CalibrationMetrics.h"   // WriteLogAnnotation — used to capture VR_Init
+                                  // and overlay-creation outcomes for cross-launch
+                                  // diff (script vs Start menu).
 #include "Configuration.h"
 #include "EmbeddedFiles.h"
 #include "UserInterface.h"
@@ -203,6 +206,21 @@ void TryCreateVROverlay() {
 		&overlayMainHandle, &overlayThumbnailHandle
 	);
 
+	// Annotation BEFORE the throw paths so we capture the error code even if
+	// the throw aborts startup. KeyInUse specifically would tell us another
+	// SC overlay is already registered with vrserver — relevant to the
+	// script-relaunch hypothesis (force-killed previous instance left a
+	// stale registration that vrserver hasn't reaped yet).
+	{
+		char annot[256];
+		snprintf(annot, sizeof annot, "vr_overlay_create: result=%d (%s) mainHandle=%llu thumbHandle=%llu",
+			(int)error,
+			vr::VROverlay()->GetOverlayErrorNameFromEnum(error),
+			(unsigned long long)overlayMainHandle,
+			(unsigned long long)overlayThumbnailHandle);
+		Metrics::WriteLogAnnotation(annot);
+	}
+
 	if (error == vr::VROverlayError_KeyInUse) {
 		throw std::runtime_error("Another instance of Space Calibrator is already running");
 	} else if (error != vr::VROverlayError_None) {
@@ -321,6 +339,16 @@ static bool TryInitVRStack()
 	//   VRInitError_Init_VRClientDLLNotFound      -- SteamVR isn't installed.
 	auto initError = vr::VRInitError_None;
 	vr::VR_Init(&initError, vr::VRApplication_Background);
+	{
+		// Log every VR_Init outcome so we can see if SteamVR's response
+		// differs across launch contexts (script vs Start menu).
+		// VR_GetVRInitErrorAsEnglishDescription is safe to call even on
+		// VRInitError_None (returns "None").
+		char annot[256];
+		snprintf(annot, sizeof annot, "vr_init_phase1_background: result=%d (%s)",
+			(int)initError, vr::VR_GetVRInitErrorAsEnglishDescription(initError));
+		Metrics::WriteLogAnnotation(annot);
+	}
 	if (initError != vr::VRInitError_None) {
 		g_lastVRError = std::string("Waiting for SteamVR: ")
 			+ vr::VR_GetVRInitErrorAsEnglishDescription(initError);
@@ -334,6 +362,12 @@ static bool TryInitVRStack()
 	vr::VR_Shutdown();
 
 	vr::VR_Init(&initError, vr::VRApplication_Overlay);
+	{
+		char annot[256];
+		snprintf(annot, sizeof annot, "vr_init_phase2_overlay: result=%d (%s)",
+			(int)initError, vr::VR_GetVRInitErrorAsEnglishDescription(initError));
+		Metrics::WriteLogAnnotation(annot);
+	}
 	if (initError != vr::VRInitError_None) {
 		// Race: SteamVR was up a moment ago but the overlay init failed.
 		// Could be a momentary state during SteamVR shutdown, or a permission
