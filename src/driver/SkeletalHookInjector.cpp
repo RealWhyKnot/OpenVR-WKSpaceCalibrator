@@ -1,5 +1,9 @@
 #include "SkeletalHookInjector.h"
 #include "Hooking.h"
+#include "InterfaceHookInjector.h"   // InterfaceHooks::DetourScope — bracket
+                                     // each detour body so DisableHooks can
+                                     // drain in-flight callers before the DLL
+                                     // is unmapped on driver unload.
 #include "Logging.h"
 #include "ServerTrackedDeviceProvider.h"
 
@@ -517,6 +521,7 @@ static vr::EVRInputError DetourInternalCreateSkeletonComponent(
     uint32_t unGripLimitTransformCount,
     vr::VRInputComponentHandle_t *pHandle)
 {
+    InterfaceHooks::DetourScope _scope;
     auto result = InternalCreateSkeletonHook.originalFunc(
         _this, ulContainer, pchName, pchSkeletonPath, pchBasePosePath,
         eSkeletalTrackingLevel, pGripLimitTransforms, unGripLimitTransformCount, pHandle);
@@ -588,6 +593,7 @@ static vr::EVRInputError DetourInternalUpdateSkeletonComponent(
     const vr::VRBoneTransform_t *pTransforms,
     uint32_t unTransformCount)
 {
+    InterfaceHooks::DetourScope _scope;
     // Fast passthrough: feature-off, unrecognised inputs, or no driver pointer.
     // This is the dominant code path when finger smoothing isn't enabled.
     if (!g_driver || !pTransforms || unTransformCount != 31) {

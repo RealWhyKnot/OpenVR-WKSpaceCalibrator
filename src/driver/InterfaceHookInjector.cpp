@@ -4,9 +4,50 @@
 #include "ServerTrackedDeviceProvider.h"
 #include "SkeletalHookInjector.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstring>
+#include <thread>
 
 static ServerTrackedDeviceProvider *Driver = nullptr;
+
+// In-flight detour counter. Every detour body in this file AND in
+// SkeletalHookInjector.cpp brackets itself with DetourScope which inc/decs
+// this counter. DrainInFlightDetours spins until it hits zero so DisableHooks
+// can guarantee no detour is mid-execution when it returns.
+static std::atomic<int> g_inFlightDetours{0};
+
+namespace InterfaceHooks {
+
+void EnterDetour() noexcept
+{
+	g_inFlightDetours.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void ExitDetour() noexcept
+{
+	g_inFlightDetours.fetch_sub(1, std::memory_order_acq_rel);
+}
+
+void DrainInFlightDetours() noexcept
+{
+	// Detours are µs-scale; in practice this loop exits in a single yield or
+	// less. The 500ms cap is a watchdog: if a detour is genuinely stuck (e.g.
+	// blocked on a SteamVR mutex held by a thread we're racing) we'd rather
+	// log and proceed than hang shutdown forever and force-kill the driver.
+	using clock = std::chrono::steady_clock;
+	const auto deadline = clock::now() + std::chrono::milliseconds(500);
+	while (g_inFlightDetours.load(std::memory_order_acquire) > 0) {
+		if (clock::now() > deadline) {
+			LOG("DrainInFlightDetours: timeout with %d in-flight callers; proceeding with shutdown anyway",
+				g_inFlightDetours.load(std::memory_order_acquire));
+			return;
+		}
+		std::this_thread::yield();
+	}
+}
+
+} // namespace InterfaceHooks
 
 static Hook<void*(*)(vr::IVRDriverContext *, const char *, vr::EVRInitError *)> 
 	GetGenericInterfaceHook("IVRDriverContext::GetGenericInterface");
@@ -19,6 +60,7 @@ static Hook<void(*)(vr::IVRServerDriverHost *, uint32_t, const vr::DriverPose_t 
 
 static void DetourTrackedDevicePoseUpdated005(vr::IVRServerDriverHost *_this, uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
+	InterfaceHooks::DetourScope _scope;
 	//TRACE("ServerTrackedDeviceProvider::DetourTrackedDevicePoseUpdated(%d)", unWhichDevice);
 	const vr::DriverPose_t* pNewPose = &newPose; // somehow newPose is nullptr sometimes??????
 	if (pNewPose && unPoseStructSize == sizeof(vr::DriverPose_t)) {
@@ -35,6 +77,7 @@ static void DetourTrackedDevicePoseUpdated005(vr::IVRServerDriverHost *_this, ui
 
 static void DetourTrackedDevicePoseUpdated006(vr::IVRServerDriverHost *_this, uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
+	InterfaceHooks::DetourScope _scope;
 	//TRACE("ServerTrackedDeviceProvider::DetourTrackedDevicePoseUpdated(%d)", unWhichDevice);
 	const vr::DriverPose_t* pNewPose = &newPose; // somehow newPose is nullptr sometimes??????
 	if (pNewPose && unPoseStructSize == sizeof(vr::DriverPose_t)) {
@@ -52,6 +95,7 @@ static void DetourTrackedDevicePoseUpdated006(vr::IVRServerDriverHost *_this, ui
 
 static void *DetourGetGenericInterface(vr::IVRDriverContext *_this, const char *pchInterfaceVersion, vr::EVRInitError *peError)
 {
+	InterfaceHooks::DetourScope _scope;
 	TRACE("ServerTrackedDeviceProvider::DetourGetGenericInterface(%s)", pchInterfaceVersion);
 	auto originalInterface = GetGenericInterfaceHook.originalFunc(_this, pchInterfaceVersion, peError);
 
@@ -141,10 +185,21 @@ void InjectHooks(ServerTrackedDeviceProvider *driver, vr::IVRDriverContext *pDri
 
 void DisableHooks()
 {
-	// IHook::DestroyAll removes all our MinHook patches first, including the
-	// skeletal hooks. Once that returns no detour can fire, so it's safe to
-	// drop the skeletal subsystem's cached pointer.
+	// 1. Remove the MinHook patches. After DestroyAll returns, no NEW callers
+	//    can enter our detours via the hooked vtable slot (the slot is
+	//    restored to point at the original function).
+	// 2. Drain in-flight callers. MinHook does NOT wait for already-executing
+	//    detour bodies to return — without this, the pose-update detour
+	//    firing at ~kHz across all tracked devices has a window where a
+	//    detour body is mid-execution while we tear down state below it. At
+	//    SteamVR's driver-unload time that race is fatal: the DLL gets
+	//    unmapped while a thread is still inside our code.
+	// 3. Drop the skeletal subsystem's cached driver pointer + per-hand
+	//    state. Safe now because (1)+(2) guarantee no skeletal detour body
+	//    is in flight.
+	// 4. Tear down MinHook itself.
 	IHook::DestroyAll();
+	InterfaceHooks::DrainInFlightDetours();
 	skeletal::Shutdown();
 	MH_Uninitialize();
 }
