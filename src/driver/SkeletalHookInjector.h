@@ -42,4 +42,16 @@ void Init(ServerTrackedDeviceProvider *driver);
 // from a clean state.
 void Shutdown();
 
+// Called from DetourGetGenericInterface in InterfaceHookInjector.cpp when the
+// returned interface name matches "IVRDriverInput_*" (substring; excludes
+// "Internal"). Patches the returned vtable's slots 5 (CreateSkeletonComponent)
+// and 6 (UpdateSkeletonComponent) with MinHook. Idempotent — IHook::Exists
+// guards the second invocation. Includes a defensive sanity check borrowed
+// from BattleAxeVR/PSVR2 shim: if the iface's vtable spread between slots 0
+// and 6 is implausibly large (>64 KB), refuse to install. Real vrserver
+// vtables fit easily within the same .text page; a huge spread means the
+// "interface" pointer is garbage (e.g. settings memory, like the Internal
+// chase encountered).
+void TryInstallPublicHooks(void *iface);
+
 } // namespace skeletal
