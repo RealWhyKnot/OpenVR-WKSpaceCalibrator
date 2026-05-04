@@ -3,6 +3,7 @@
 #include "InterfaceHookInjector.h"
 #include "IsometryTransform.h"
 
+#include <cstring>
 #include <random>
 
 vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext *pDriverContext)
@@ -645,21 +646,26 @@ void ServerTrackedDeviceProvider::HandleApplyRandomOffset() {
 
 void ServerTrackedDeviceProvider::SetFingerSmoothingConfig(const protocol::FingerSmoothingConfig &cfg)
 {
-	protocol::FingerSmoothingConfig prev;
-	{
-		std::lock_guard<std::mutex> lk(fingerCfgMutex);
-		prev = fingerCfg;
-		fingerCfg = cfg;
-	}
+	static_assert(sizeof(protocol::FingerSmoothingConfig) <= sizeof(uint64_t),
+		"FingerSmoothingConfig must fit inside atomic<uint64_t>");
+
+	// Pack cfg into a uint64_t. Zero-init the target so the upper bytes
+	// (beyond sizeof(cfg) = 6) are always 0; the comparison below relies
+	// on packed equality only changing when the meaningful bytes change.
+	uint64_t newPacked = 0;
+	std::memcpy(&newPacked, &cfg, sizeof(cfg));
+
+	// Single atomic exchange gives us both the publish + the previous
+	// value for change-detection logging without a separate load.
+	const uint64_t oldPacked = fingerCfgPacked.exchange(newPacked, std::memory_order_acq_rel);
+
 	// Log only on real changes so a slider drag (60 Hz no-op tick) doesn't
-	// flood the log file. master_enabled / mask flips are rare, smoothness
-	// changes during a drag are the noisy ones. We log every change anyway —
-	// debugging "is smoothing reaching the driver?" matters more than log
-	// volume, and the user's session-level log is small.
-	if (prev.master_enabled != cfg.master_enabled
-	 || prev.smoothness     != cfg.smoothness
-	 || prev.finger_mask    != cfg.finger_mask)
-	{
+	// flood the log file. Packed equality covers all three meaningful
+	// fields (master_enabled, smoothness, finger_mask) plus _reserved
+	// which is always 0 -- so a non-zero diff means a real change.
+	if (oldPacked != newPacked) {
+		protocol::FingerSmoothingConfig prev{};
+		std::memcpy(&prev, &oldPacked, sizeof(prev));
 		LOG("[skeletal] SetFingerSmoothingConfig via IPC: enabled=%d smoothness=%u mask=0x%04x (was: enabled=%d smoothness=%u mask=0x%04x)",
 			(int)cfg.master_enabled, (unsigned)cfg.smoothness, (unsigned)cfg.finger_mask,
 			(int)prev.master_enabled, (unsigned)prev.smoothness, (unsigned)prev.finger_mask);
@@ -668,6 +674,11 @@ void ServerTrackedDeviceProvider::SetFingerSmoothingConfig(const protocol::Finge
 
 protocol::FingerSmoothingConfig ServerTrackedDeviceProvider::GetFingerSmoothingConfig() const
 {
-	std::lock_guard<std::mutex> lk(fingerCfgMutex);
-	return fingerCfg;
+	// Hot path: ~680 Hz (340 Hz × 2 hands) skeletal detour reads. Single
+	// atomic load + acquire fence + memcpy = no contention, no syscalls,
+	// no LOG()-inside-critical-section drift to worry about.
+	const uint64_t packed = fingerCfgPacked.load(std::memory_order_acquire);
+	protocol::FingerSmoothingConfig cfg{};
+	std::memcpy(&cfg, &packed, sizeof(cfg));
+	return cfg;
 }

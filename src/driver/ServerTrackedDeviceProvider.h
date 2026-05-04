@@ -11,6 +11,8 @@
 #include <openvr_driver.h>
 
 #include <array>
+#include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <string>
 
@@ -193,13 +195,24 @@ private:
 
 	protocol::AlignmentSpeedParams alignmentSpeedParams;
 
-	// Finger-smoothing config + its dedicated mutex. Single-writer (IPC
-	// thread, on user UI input — rare) / many-reader (skeletal hook detour,
-	// ~340 Hz/hand). Default-constructed to {master_enabled=false,
-	// smoothness=0, finger_mask=0, _reserved=0} so the detour fast-paths to
-	// passthrough until the overlay has sent a real config.
-	mutable std::mutex                fingerCfgMutex;
-	protocol::FingerSmoothingConfig   fingerCfg{};
+	// Finger-smoothing config packed into an atomic uint64_t. Single-writer
+	// (IPC thread, on user UI input — rare) / many-reader (skeletal hook
+	// detour, ~340 Hz/hand × 2 hands = 680 Hz). The previous version used
+	// a mutex around the 6-byte struct; for a hot read at 680 Hz that's
+	// gratuitous contention on a tiny POD that fits in a single cache line.
+	// More importantly any future LOG() drift inside the critical section
+	// would stall every skeletal update on a disk write.
+	//
+	// FingerSmoothingConfig is 6 bytes (1 master_enabled, 1 smoothness,
+	// 2 finger_mask, 1 _reserved, with 1 byte trailing alignment padding).
+	// memcpy into the lower 6 bytes of the uint64_t with the upper bytes
+	// always zero. std::atomic<uint64_t> is always lock-free on x64 so the
+	// hot-path read is a single mov + acquire fence.
+	//
+	// Default zero = {master_enabled=false, smoothness=0, finger_mask=0}
+	// so the detour fast-paths to passthrough until the overlay has sent
+	// a real config.
+	mutable std::atomic<uint64_t>     fingerCfgPacked{0};
 
 	// Look up an existing fallback slot by system name (linear scan + memcmp).
 	// Returns nullptr if no slot is currently occupied with that name.
