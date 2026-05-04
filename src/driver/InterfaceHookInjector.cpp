@@ -116,13 +116,24 @@ static void *DetourGetGenericInterface(vr::IVRDriverContext *_this, const char *
 			IHook::Register(&TrackedDevicePoseUpdatedHook006);
 		}
 	}
-	// Skeletal-hook install branches removed in 2026-05-04 pivot — see
-	// memory/project_finger_smoothing_real_hook_target.md. The next commit
-	// adds a single substring-match branch that hooks the PUBLIC IVRDriverInput
-	// vtable directly (slots 5 and 6); the old IVRDriverInputInternal chase +
-	// thunk parser + DeepProbe were dead code (the install always failed
-	// because the lookup returned a pointer into vrserver's parsed-settings
-	// JSON memory, not an interface object).
+	else if (iface.find("IVRDriverInput_") != std::string::npos
+	         && iface.find("Internal") == std::string::npos)
+	{
+		// Public IVRDriverInput query — substring match catches both
+		// IVRDriverInput_003 (SC's bundled SDK; user's runtime currently
+		// publishes this) and IVRDriverInput_004 (current OpenVR master;
+		// adds Pose+EyeTracking at slots 7-10 but keeps Skeleton creates+
+		// updates at slots 5/6). Internal exclusion guards against
+		// IVRDriverInputInternal_XXX (a 2-method eye-tracking interface,
+		// unrelated to skeletal data — see memory file).
+		//
+		// The lighthouse driver calls vr::VRDriverInput()->UpdateSkeleton-
+		// Component() which is a virtual dispatch through the vtable
+		// returned here; patching slot 6 catches the call. Same approach
+		// HandOfLesser uses in production.
+		LOG("[skeletal] %s queried via context: iface=%p", iface.c_str(), originalInterface);
+		skeletal::TryInstallPublicHooks(originalInterface);
+	}
 
 	return originalInterface;
 }

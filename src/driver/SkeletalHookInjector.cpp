@@ -185,8 +185,8 @@ static void MaybeLogDeepState(const char *callerTag)
     // declarations without forward-declaration gymnastics; a single refactor
     // would have to update both sites if the names ever change.
     LOG("[skeletal]   hooks: createInRegistry=%d updateInRegistry=%d",
-        (int)IHook::Exists("IVRDriverInputInternal::CreateSkeletonComponent"),
-        (int)IHook::Exists("IVRDriverInputInternal::UpdateSkeletonComponent"));
+        (int)IHook::Exists("IVRDriverInput::CreateSkeletonComponent"),
+        (int)IHook::Exists("IVRDriverInput::UpdateSkeletonComponent"));
 
     // Current driver-side finger config snapshot. If this disagrees with what
     // the overlay last sent (visible in the SetFingerSmoothingConfig log),
@@ -313,6 +313,48 @@ static float SmoothnessToAlpha(uint8_t smoothness)
 }
 
 // =============================================================================
+// VirtualQuery-guarded memory probes. Used to safely walk the iface pointer
+// before patching its vtable. Faulting on a stray vtable read would crash
+// vrserver — these probes turn that into a logged-and-bailed soft failure
+// instead. Used by TryInstallPublicHooks below.
+// =============================================================================
+
+static bool IsAddressReadable(const void *addr, size_t bytes)
+{
+    if (!addr) return false;
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (!VirtualQuery(addr, &mbi, sizeof mbi)) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    DWORD prot = mbi.Protect & 0xFF;
+    if (prot == 0 || (prot & PAGE_NOACCESS) || (prot & PAGE_GUARD)) return false;
+    auto regionEnd = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+    auto needEnd   = (uintptr_t)addr + bytes;
+    return needEnd <= regionEnd;
+}
+
+// Log a one-line region descriptor: base, size, state, protection, type. Used
+// post-install to confirm that the patched vtable slots actually point into
+// vrserver's loaded image (.text section, MEM_IMAGE) rather than something
+// non-executable. If we ever see slot 5 or slot 6 land in a heap or mapped
+// region, the iface we hooked wasn't a real interface and the hook patched
+// the wrong target.
+static void LogVirtualQueryRegion(const char *tag, const void *addr)
+{
+    if (!addr) {
+        LOG("[skeletal-probe] %s: addr=NULL", tag);
+        return;
+    }
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (!VirtualQuery(addr, &mbi, sizeof mbi)) {
+        LOG("[skeletal-probe] %s: addr=%p VirtualQuery FAILED (err=%lu)", tag, addr, GetLastError());
+        return;
+    }
+    LOG("[skeletal-probe] %s: addr=%p base=%p size=0x%llx state=0x%lx prot=0x%lx type=0x%lx",
+        tag, addr, mbi.BaseAddress, (unsigned long long)mbi.RegionSize,
+        mbi.State, mbi.Protect, mbi.Type);
+}
+
+// =============================================================================
 // Hook<> instances. Names must be unique against everything else registered
 // in IHook::hooks (see SC's existing InterfaceHookInjector.cpp). Two slots
 // only — UpdateSkeleton (the smoothing target) and CreateSkeleton (used to
@@ -321,15 +363,15 @@ static float SmoothnessToAlpha(uint8_t smoothness)
 // =============================================================================
 
 static Hook<vr::EVRInputError(*)(vr::IVRDriverInput *, vr::VRInputComponentHandle_t, vr::EVRSkeletalMotionRange, const vr::VRBoneTransform_t *, uint32_t)>
-    InternalUpdateSkeletonHook("IVRDriverInputInternal::UpdateSkeletonComponent");
+    PublicUpdateSkeletonHook("IVRDriverInput::UpdateSkeletonComponent");
 static Hook<vr::EVRInputError(*)(vr::IVRDriverInput *, vr::PropertyContainerHandle_t, const char *, const char *, const char *, vr::EVRSkeletalTrackingLevel, const vr::VRBoneTransform_t *, uint32_t, vr::VRInputComponentHandle_t *)>
-    InternalCreateSkeletonHook("IVRDriverInputInternal::CreateSkeletonComponent");
+    PublicCreateSkeletonHook("IVRDriverInput::CreateSkeletonComponent");
 
 // =============================================================================
 // Detours.
 // =============================================================================
 
-static vr::EVRInputError DetourInternalCreateSkeletonComponent(
+static vr::EVRInputError DetourPublicCreateSkeletonComponent(
     vr::IVRDriverInput *_this,
     vr::PropertyContainerHandle_t ulContainer,
     const char *pchName,
@@ -341,7 +383,7 @@ static vr::EVRInputError DetourInternalCreateSkeletonComponent(
     vr::VRInputComponentHandle_t *pHandle)
 {
     InterfaceHooks::DetourScope _scope;
-    auto result = InternalCreateSkeletonHook.originalFunc(
+    auto result = PublicCreateSkeletonHook.originalFunc(
         _this, ulContainer, pchName, pchSkeletonPath, pchBasePosePath,
         eSkeletalTrackingLevel, pGripLimitTransforms, unGripLimitTransformCount, pHandle);
 
@@ -405,7 +447,7 @@ static vr::EVRInputError DetourInternalCreateSkeletonComponent(
     return result;
 }
 
-static vr::EVRInputError DetourInternalUpdateSkeletonComponent(
+static vr::EVRInputError DetourPublicUpdateSkeletonComponent(
     vr::IVRDriverInput *_this,
     vr::VRInputComponentHandle_t ulComponent,
     vr::EVRSkeletalMotionRange eMotionRange,
@@ -419,7 +461,7 @@ static vr::EVRInputError DetourInternalUpdateSkeletonComponent(
         if (!pTransforms || unTransformCount != 31) {
             g_invalidTransformCalls.fetch_add(1, std::memory_order_relaxed);
         }
-        return InternalUpdateSkeletonHook.originalFunc(_this, ulComponent, eMotionRange, pTransforms, unTransformCount);
+        return PublicUpdateSkeletonHook.originalFunc(_this, ulComponent, eMotionRange, pTransforms, unTransformCount);
     }
     auto cfg = g_driver->GetFingerSmoothingConfig();
 
@@ -456,7 +498,7 @@ static vr::EVRInputError DetourInternalUpdateSkeletonComponent(
         // and the user would see silence in the log instead of the diagnostic
         // that points at the real problem (unknown_handle != 0).
         MaybeLogStats("UpdateSkeleton/unknown");
-        return InternalUpdateSkeletonHook.originalFunc(_this, ulComponent, eMotionRange, pTransforms, unTransformCount);
+        return PublicUpdateSkeletonHook.originalFunc(_this, ulComponent, eMotionRange, pTransforms, unTransformCount);
     }
 
     g_stats[handedness].totalCalls.fetch_add(1, std::memory_order_relaxed);
@@ -504,7 +546,7 @@ static vr::EVRInputError DetourInternalUpdateSkeletonComponent(
     if (!cfg.master_enabled || cfg.smoothness == 0) {
         g_stats[handedness].passthroughCalls.fetch_add(1, std::memory_order_relaxed);
         MaybeLogStats("UpdateSkeleton");
-        return InternalUpdateSkeletonHook.originalFunc(_this, ulComponent, eMotionRange, pTransforms, unTransformCount);
+        return PublicUpdateSkeletonHook.originalFunc(_this, ulComponent, eMotionRange, pTransforms, unTransformCount);
     }
 
     float alpha = SmoothnessToAlpha(cfg.smoothness);
@@ -543,7 +585,7 @@ static vr::EVRInputError DetourInternalUpdateSkeletonComponent(
 
     g_stats[handedness].smoothedCalls.fetch_add(1, std::memory_order_relaxed);
     MaybeLogStats("UpdateSkeleton");
-    return InternalUpdateSkeletonHook.originalFunc(_this, ulComponent, eMotionRange, smoothed, unTransformCount);
+    return PublicUpdateSkeletonHook.originalFunc(_this, ulComponent, eMotionRange, smoothed, unTransformCount);
 }
 
 // =============================================================================
@@ -615,6 +657,85 @@ void Shutdown()
         g_handleToHandedness.clear();
         for (int h = 0; h < 2; ++h) g_handState[h].initialized = false;
     }
+}
+
+void TryInstallPublicHooks(void *iface)
+{
+    if (!iface) return;
+
+    // Idempotent: once both hooks are registered, additional invocations
+    // (one per driver context query of IVRDriverInput_*) no-op cheaply.
+    // The MinHook target functions are static across all queries returning
+    // the same singleton vtable in vrserver, so re-patching would be harmless
+    // but we'd rather skip the work + the noisy log lines.
+    bool createAlready = IHook::Exists(PublicCreateSkeletonHook.name);
+    bool updateAlready = IHook::Exists(PublicUpdateSkeletonHook.name);
+    if (createAlready && updateAlready) return;
+
+    LOG("[skeletal] TryInstallPublicHooks invoked: iface=%p createInRegistry=%d updateInRegistry=%d",
+        iface, (int)createAlready, (int)updateAlready);
+
+    // Defensive readability + sanity check. A real C++ object has its vtable
+    // pointer at offset 0; the vtable itself is a contiguous array of
+    // function pointers in the DLL's .rdata. If the pointer SteamVR returned
+    // is something else (e.g. a JsonCpp settings struct, like the
+    // IVRDriverInputInternal_XXX chase encountered — see memory file), the
+    // dereferenced "vtable" will not be readable for 7 slots, OR slot 0 and
+    // slot 6 will be wildly different addresses (not even in the same
+    // module). Both checks must pass before we patch anything.
+    if (!IsAddressReadable(iface, sizeof(void *))) {
+        LOG("[skeletal] iface %p not readable; aborting install", iface);
+        return;
+    }
+    void **vtable = *((void ***)iface);
+    if (!IsAddressReadable(vtable, sizeof(void *) * 7)) {
+        LOG("[skeletal] vtable %p not readable for 7 slots; aborting install (iface=%p — likely garbage, e.g. settings memory)",
+            (void *)vtable, iface);
+        return;
+    }
+    // BattleAxeVR/PSVR2 shim defensive pattern: real vrserver vtables are a
+    // contiguous block of function pointers, all into the same .text section
+    // of vrserver.exe. Slot 0 (CreateBoolean) and slot 6 (UpdateSkeleton) are
+    // virtual functions of the same C++ class; their addresses are within a
+    // few hundred bytes of each other in practice. A spread of more than
+    // 64 KB means either (a) the iface pointer is bogus and "vtable" points
+    // at random data, or (b) the OpenVR ABI has shifted in a way we don't
+    // understand and we should bail rather than patch the wrong target.
+    intptr_t spread = (intptr_t)vtable[6] - (intptr_t)vtable[0];
+    if (spread < 0) spread = -spread;
+    if (spread > 0x10000) {
+        LOG("[skeletal] vtable spread |slot6 - slot0| = 0x%llx bytes (>64KB); refusing to install (iface=%p slot0=%p slot6=%p — likely garbage)",
+            (unsigned long long)spread, iface, vtable[0], vtable[6]);
+        return;
+    }
+
+    // Pre-install snapshot for the post-install diff. The slot values
+    // themselves typically don't change with MinHook (it patches the
+    // function body, not the pointer in the vtable), so we expect post == pre
+    // here. The change should be in originalFunc (which is the MinHook
+    // trampoline, distinct from both the original target and our detour).
+    void *preCreate = vtable[5];
+    void *preUpdate = vtable[6];
+    LOG("[skeletal] pre-install snapshot: vtable[5] (Create) = %p, vtable[6] (Update) = %p, spread=0x%llx",
+        preCreate, preUpdate, (unsigned long long)spread);
+
+    if (!createAlready) {
+        PublicCreateSkeletonHook.CreateHookInObjectVTable(iface, 5, &DetourPublicCreateSkeletonComponent);
+        IHook::Register(&PublicCreateSkeletonHook);
+        LOG("[skeletal]   Create hook installed at vtable[5]: originalFunc=%p, detour=%p",
+            (void *)PublicCreateSkeletonHook.originalFunc, (void *)&DetourPublicCreateSkeletonComponent);
+    }
+    if (!updateAlready) {
+        PublicUpdateSkeletonHook.CreateHookInObjectVTable(iface, 6, &DetourPublicUpdateSkeletonComponent);
+        IHook::Register(&PublicUpdateSkeletonHook);
+        LOG("[skeletal]   Update hook installed at vtable[6]: originalFunc=%p, detour=%p",
+            (void *)PublicUpdateSkeletonHook.originalFunc, (void *)&DetourPublicUpdateSkeletonComponent);
+    }
+
+    LogVirtualQueryRegion("public_vtable_slot5", vtable[5]);
+    LogVirtualQueryRegion("public_vtable_slot6", vtable[6]);
+
+    LOG("[skeletal] installed PUBLIC IVRDriverInput hooks: vtable[5]=Create, vtable[6]=Update -- waiting for first calls");
 }
 
 } // namespace skeletal
