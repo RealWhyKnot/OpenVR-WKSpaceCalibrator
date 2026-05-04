@@ -6,6 +6,13 @@
 #include <openvr.h>
 #include <string>
 #include <vector>
+#include <tlhelp32.h>   // Toolhelp32 snapshot — used for parent-process lookup
+                        // in the launch-context banner block below.
+#include <psapi.h>      // QueryFullProcessImageNameW for parent exe path.
+#include <sddl.h>       // ConvertSidToStringSidW — token user SID stringification.
+#pragma comment(lib, "Advapi32.lib")  // OpenProcessToken / GetTokenInformation /
+                                      // ConvertSidToStringSidW. Already linked
+                                      // transitively but explicit is safer.
 
 namespace Metrics {
 	double TimeSpan = 30, CurrentTime = 0;
@@ -279,6 +286,244 @@ namespace Metrics {
 		}
 	}
 
+	// =============================================================================
+	// Launch-context banner. Writes a block of `# key=value` lines describing
+	// EVERYTHING that could plausibly differ between a Start-menu launch and a
+	// script-launched instance: process identity, parent process, command line,
+	// cwd, token/elevation/integrity/session, window station + desktop, console
+	// attachment, startup flags, and any VR/Steam/OpenVR env vars.
+	//
+	// Goal: make it possible to take two log files (one launched from Start
+	// menu, one from quick.ps1) and diff the banners to see what's actually
+	// different at the process level. Without this we're left speculating.
+	//
+	// Each Win32 call that fails logs the error code rather than being silently
+	// dropped — a missing parent_exe with err=5 (access denied) is a meaningful
+	// data point, not noise.
+	// =============================================================================
+	static std::string WideToUtf8(const wchar_t* w)
+	{
+		if (!w) return std::string();
+		int len = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
+		if (len <= 0) return std::string();
+		std::string out(len - 1, '\0'); // -1 to drop the trailing NUL count
+		WideCharToMultiByte(CP_UTF8, 0, w, -1, &out[0], len, nullptr, nullptr);
+		return out;
+	}
+
+	static void WriteLaunchContextBanner(std::ofstream& out)
+	{
+		// --- Process identity ----------------------------------------------------
+		const DWORD pid = GetCurrentProcessId();
+		out << "# launch_pid=" << pid << "\n";
+
+		wchar_t exePath[MAX_PATH] = {};
+		if (GetModuleFileNameW(nullptr, exePath, MAX_PATH)) {
+			out << "# launch_exe_path=" << WideToUtf8(exePath) << "\n";
+		} else {
+			out << "# launch_exe_path=GetModuleFileNameW_failed_err=" << GetLastError() << "\n";
+		}
+
+		LPWSTR cmdline = GetCommandLineW();
+		if (cmdline) {
+			out << "# launch_command_line=" << WideToUtf8(cmdline) << "\n";
+		}
+
+		wchar_t cwd[MAX_PATH] = {};
+		DWORD cwdLen = GetCurrentDirectoryW(MAX_PATH, cwd);
+		if (cwdLen > 0 && cwdLen < MAX_PATH) {
+			out << "# launch_cwd=" << WideToUtf8(cwd) << "\n";
+		} else {
+			out << "# launch_cwd=GetCurrentDirectoryW_failed_err=" << GetLastError() << "\n";
+		}
+
+		// --- Parent process (THE big question for the script-vs-manual mystery) -
+		// Toolhelp32 is documented + reliable on every Win10/11 build. The
+		// alternative (NtQueryInformationProcess + ProcessBasicInformation) is
+		// undocumented and overkill here. Snapshot is one process-wide enumeration,
+		// runs in <1ms.
+		DWORD parentPid = 0;
+		{
+			HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+			if (snap != INVALID_HANDLE_VALUE) {
+				PROCESSENTRY32W pe{};
+				pe.dwSize = sizeof pe;
+				if (Process32FirstW(snap, &pe)) {
+					do {
+						if (pe.th32ProcessID == pid) {
+							parentPid = pe.th32ParentProcessID;
+							break;
+						}
+					} while (Process32NextW(snap, &pe));
+				}
+				CloseHandle(snap);
+			} else {
+				out << "# launch_parent_lookup=snapshot_failed_err=" << GetLastError() << "\n";
+			}
+		}
+		out << "# launch_parent_pid=" << parentPid << "\n";
+
+		// Parent exe path. We need PROCESS_QUERY_LIMITED_INFORMATION (Win Vista+);
+		// works across integrity levels for processes the current token can see.
+		if (parentPid != 0) {
+			HANDLE hParent = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, parentPid);
+			if (hParent) {
+				wchar_t parentExe[MAX_PATH] = {};
+				DWORD len = MAX_PATH;
+				if (QueryFullProcessImageNameW(hParent, 0, parentExe, &len)) {
+					out << "# launch_parent_exe=" << WideToUtf8(parentExe) << "\n";
+				} else {
+					out << "# launch_parent_exe=QueryFullProcessImageNameW_failed_err="
+					    << GetLastError() << "\n";
+				}
+				CloseHandle(hParent);
+			} else {
+				out << "# launch_parent_exe=OpenProcess_failed_err=" << GetLastError() << "\n";
+			}
+		}
+
+		// --- Token: elevation, integrity, session, user SID --------------------
+		HANDLE token = nullptr;
+		if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) && token) {
+			// Integrity level. The SID's last sub-authority is the IL constant
+			// (0x1000=Low, 0x2000=Medium, 0x3000=High, 0x4000=System). A
+			// script-launched-from-elevated-shell process would show High;
+			// a Start-menu launch normally shows Medium.
+			DWORD size = 0;
+			GetTokenInformation(token, TokenIntegrityLevel, nullptr, 0, &size);
+			if (size > 0) {
+				std::vector<BYTE> buf(size);
+				if (GetTokenInformation(token, TokenIntegrityLevel, buf.data(), size, &size)) {
+					auto* tml = reinterpret_cast<TOKEN_MANDATORY_LABEL*>(buf.data());
+					DWORD subAuth = *GetSidSubAuthority(
+						tml->Label.Sid,
+						(DWORD)(UCHAR)(*GetSidSubAuthorityCount(tml->Label.Sid) - 1));
+					const char* levelName = "unknown";
+					if (subAuth < 0x1000)      levelName = "untrusted";
+					else if (subAuth < 0x2000) levelName = "low";
+					else if (subAuth < 0x3000) levelName = "medium";
+					else if (subAuth < 0x4000) levelName = "high";
+					else                       levelName = "system";
+					char tmp[64];
+					sprintf_s(tmp, "%s(0x%lx)", levelName, subAuth);
+					out << "# launch_token_integrity=" << tmp << "\n";
+				}
+			}
+
+			TOKEN_ELEVATION elevation{};
+			DWORD elevSize = sizeof elevation;
+			if (GetTokenInformation(token, TokenElevation, &elevation, elevSize, &elevSize)) {
+				out << "# launch_token_elevated=" << (elevation.TokenIsElevated ? "yes" : "no") << "\n";
+			}
+
+			TOKEN_ELEVATION_TYPE elevType{};
+			DWORD elevTypeSize = sizeof elevType;
+			if (GetTokenInformation(token, TokenElevationType, &elevType, elevTypeSize, &elevTypeSize)) {
+				const char* etName = "unknown";
+				switch (elevType) {
+					case TokenElevationTypeDefault: etName = "default"; break;
+					case TokenElevationTypeFull:    etName = "full"; break;
+					case TokenElevationTypeLimited: etName = "limited"; break;
+				}
+				out << "# launch_token_elevation_type=" << etName << "\n";
+			}
+
+			DWORD sessionId = 0;
+			DWORD sessSize = sizeof sessionId;
+			if (GetTokenInformation(token, TokenSessionId, &sessionId, sessSize, &sessSize)) {
+				out << "# launch_session_id=" << sessionId << "\n";
+			}
+
+			// User SID — convert to string form for log readability.
+			DWORD tuSize = 0;
+			GetTokenInformation(token, TokenUser, nullptr, 0, &tuSize);
+			if (tuSize > 0) {
+				std::vector<BYTE> tuBuf(tuSize);
+				if (GetTokenInformation(token, TokenUser, tuBuf.data(), tuSize, &tuSize)) {
+					auto* tu = reinterpret_cast<TOKEN_USER*>(tuBuf.data());
+					LPWSTR sidStr = nullptr;
+					if (ConvertSidToStringSidW(tu->User.Sid, &sidStr)) {
+						out << "# launch_user_sid=" << WideToUtf8(sidStr) << "\n";
+						LocalFree(sidStr);
+					}
+				}
+			}
+
+			CloseHandle(token);
+		} else {
+			out << "# launch_token=OpenProcessToken_failed_err=" << GetLastError() << "\n";
+		}
+
+		// --- Window station + desktop ------------------------------------------
+		// "WinSta0\Default" is the normal interactive desktop. A service-spawned
+		// process or one in a non-interactive context would show different.
+		HWINSTA hwinsta = GetProcessWindowStation();
+		if (hwinsta) {
+			wchar_t wsname[256] = {};
+			DWORD needed = 0;
+			if (GetUserObjectInformationW(hwinsta, UOI_NAME, wsname, sizeof wsname, &needed)) {
+				out << "# launch_winstation=" << WideToUtf8(wsname) << "\n";
+			}
+		}
+		HDESK hdesk = GetThreadDesktop(GetCurrentThreadId());
+		if (hdesk) {
+			wchar_t deskname[256] = {};
+			DWORD needed = 0;
+			if (GetUserObjectInformationW(hdesk, UOI_NAME, deskname, sizeof deskname, &needed)) {
+				out << "# launch_desktop=" << WideToUtf8(deskname) << "\n";
+			}
+		}
+
+		// --- Console + startup info --------------------------------------------
+		HWND console = GetConsoleWindow();
+		out << "# launch_console_attached=" << (console != nullptr ? "yes" : "no") << "\n";
+
+		STARTUPINFOW si{};
+		si.cb = sizeof si;
+		GetStartupInfoW(&si);
+		char sibuf[128];
+		sprintf_s(sibuf, "0x%lx show_window=0x%x has_title=%d",
+			si.dwFlags, (unsigned)si.wShowWindow, si.lpTitle ? 1 : 0);
+		out << "# launch_startup_info=" << sibuf << "\n";
+		if (si.lpTitle) {
+			out << "# launch_startup_title=" << WideToUtf8(si.lpTitle) << "\n";
+		}
+
+		// --- Environment variable summary --------------------------------------
+		// Don't dump full environment (may contain credentials in CI/agent
+		// contexts). Count total + dump only known-safe VR/Steam-related ones.
+		LPWCH env = GetEnvironmentStringsW();
+		int envCount = 0;
+		std::string vrEnvDump;
+		if (env) {
+			LPWCH p = env;
+			while (*p) {
+				envCount++;
+				std::wstring entry(p);
+				// Whitelist: log full key=value for vars matching VR-relevant
+				// prefixes. Common ones that affect SteamVR / OpenVR runtime
+				// behavior: VR_*, OPENVR_*, XR_*, STEAM_*, OVR_*. Excludes
+				// things like PATH (huge) or generic user-secret containers.
+				if (entry.rfind(L"VR_", 0) == 0
+				 || entry.rfind(L"OPENVR_", 0) == 0
+				 || entry.rfind(L"XR_", 0) == 0
+				 || entry.rfind(L"STEAM_", 0) == 0
+				 || entry.rfind(L"OVR_", 0) == 0
+				 || entry.rfind(L"VRPATH", 0) == 0)
+				{
+					vrEnvDump += "# launch_vr_env=";
+					vrEnvDump += WideToUtf8(p);
+					vrEnvDump += "\n";
+				}
+				while (*p) p++;
+				p++;
+			}
+			FreeEnvironmentStringsW(env);
+		}
+		out << "# launch_env_var_count=" << envCount << "\n";
+		out << vrEnvDump;
+	}
+
 	// %userprofile%\LocalLow\SpaceCalibrator\Logs
 	static bool OpenLogFile() {
 		PWSTR RootPath = nullptr;
@@ -402,6 +647,24 @@ namespace Metrics {
 			GetSystemInfo(&si);
 			logFile << "# logical_processors=" << si.dwNumberOfProcessors << "\n";
 		}
+
+		// === Launch context ====================================================
+		// Captures everything that could differ between a Start-menu launch and
+		// a script-launched instance. Diffing these blocks across two log files
+		// (one from each launch path) tells us exactly what's environmentally
+		// different about the process — without this, we're guessing about
+		// elevation / parent-process / cwd / session etc.
+		//
+		// Triggered by the 2026-05-03 user report: tracking consistently breaks
+		// when SpaceCalibrator.exe is launched by quick.ps1 -Install's auto-
+		// relaunch, but works fine when the same exe is launched from the
+		// Start menu. Same exe, same driver, same registry profile. Some part
+		// of the process context must differ; this block captures the candidates.
+		//
+		// All values are best-effort — Win32 calls that fail are logged with
+		// the error code rather than skipped, so a missing field doesn't hide
+		// the failure mode itself.
+		WriteLaunchContextBanner(logFile);
 
 		// Banner divider so a human grepping the file can see where header ends
 		// and the column row begins. Replay harness ignores any line starting with #.
