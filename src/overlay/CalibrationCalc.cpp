@@ -1276,6 +1276,25 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 				usingRelPose = true;
 				newError = relPoseError;
 				calibration = byRelPose;
+
+				// Forensic diagnostic for audit row #6 (project_upstream_regression_audit_2026-05-04):
+				// fork flipped enableStaticRecalibration default false→true, which
+				// makes this byRelPose-shortcut path active for lock-OFF setups
+				// where the underlying refToTargetPose may not be a meaningful
+				// constraint. If a sleeper regression manifests as cal drift in
+				// lock-OFF sessions, the rate of this annotation will reveal it.
+				// Throttled 5 s — ComputeIncremental can fire at 10+ Hz.
+				static auto s_lastUsingRelPoseLog = std::chrono::steady_clock::time_point{};
+				const auto nowTpRP = std::chrono::steady_clock::now();
+				if (nowTpRP - s_lastUsingRelPoseLog >= std::chrono::seconds(5)) {
+					s_lastUsingRelPoseLog = nowTpRP;
+					char rpbuf[200];
+					snprintf(rpbuf, sizeof rpbuf,
+						"usingRelPose_fired: relPoseError=%.3fmm priorError=%.3fmm relPosCal=%d lockRel=%d",
+						relPoseError * 1000.0, priorCalibrationError * 1000.0,
+						(int)m_relativePosCalibrated, (int)lockRelativePosition);
+					Metrics::WriteLogAnnotation(rpbuf);
+				}
 			}
 		}
 	}

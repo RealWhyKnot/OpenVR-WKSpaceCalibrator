@@ -111,9 +111,26 @@ void CalibrationContext::UpdateAutoLockDetector(
 		if (angle > rotMaxAngle) rotMaxAngle = angle;
 	}
 
+	const bool prevLocked = autoLockEffectivelyLocked;
 	autoLockEffectivelyLocked =
 		(translStdDev < kAutoLockTranslThreshM) &&
 		(rotMaxAngle < kAutoLockRotThreshRad);
+
+	// Forensic diagnostic for audit row #11 (project_upstream_regression_audit_2026-05-04).
+	// Fork-only AUTO mode flips lockRelativePosition mid-session based on
+	// observed relative-pose stability. A flip while the user thinks they're
+	// in OFF mode (e.g. from misreading the UI) would change which constraint
+	// CalibrateByRelPose is gated against. Fires only on transitions, so
+	// healthy AUTO sessions produce one annotation per actual flip — not a
+	// flood. Use grep `auto_lock_flip:` on session logs to spot any flapping.
+	if (prevLocked != autoLockEffectivelyLocked) {
+		char flipbuf[200];
+		snprintf(flipbuf, sizeof flipbuf,
+			"auto_lock_flip: previous=%d now=%d translStdDev=%.4fm rotMaxAng=%.4frad samples=%zu",
+			(int)prevLocked, (int)autoLockEffectivelyLocked,
+			translStdDev, rotMaxAngle, autoLockHistory.size());
+		Metrics::WriteLogAnnotation(flipbuf);
+	}
 }
 
 void CalibrationContext::ResolveLockMode()
@@ -2168,7 +2185,24 @@ void CalibrationTick(double time)
 				// Bound the per-update step to keep one bad correlation from
 				// teleporting the offset estimate.
 				if (std::isfinite(lagMs) && std::fabs(lagMs) <= 200.0) {
+					const double prevEma = ctx.estimatedLatencyOffsetMs;
 					ctx.estimatedLatencyOffsetMs = 0.7 * ctx.estimatedLatencyOffsetMs + 0.3 * lagMs;
+					// Forensic diagnostic for audit row #12 (project_upstream_regression_audit_2026-05-04).
+					// The cross-correlation buffer doesn't reset across HMD
+					// stalls — `dur` here can span the stall duration while
+					// `intervals` is bounded by buffer size, producing a
+					// deflated sample rate and inflating lagMs. The 200 ms
+					// clamp above bounds this, but the EMA can still drift
+					// for a few cycles. Log every successful update with
+					// dur and sampleRateHz so post-stall anomalies show up
+					// in the data. Throttled by the existing 1 s gate at
+					// line 2167 (timeLastLatencyEstimate).
+					char latbuf[224];
+					snprintf(latbuf, sizeof latbuf,
+						"latency_ema_update: lagMs=%.2f sampleRateHz=%.2f intervals=%zu dur=%.2fs prev=%.2f new=%.2f",
+						lagMs, sampleRateHz, intervals, dur,
+						prevEma, ctx.estimatedLatencyOffsetMs);
+					Metrics::WriteLogAnnotation(latbuf);
 				}
 			}
 		}
