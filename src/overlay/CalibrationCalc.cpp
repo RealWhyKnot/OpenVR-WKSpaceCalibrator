@@ -2,6 +2,7 @@
 #include "Calibration.h"
 #include "CalibrationMetrics.h"
 #include "Protocol.h"
+#include "WatchdogDecisions.h"  // ShouldClearViaWatchdog, IsCalibrationHealthy
 
 #include <chrono>  // steady_clock for throttled diagnostic logs in
                    // CalibrateRotation / CalibrateTranslation. The throttle
@@ -1471,8 +1472,11 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 		// floor — i.e. when there *might* be room for an honest improvement
 		// that the threshold gate can't admit.
 		m_consecutiveRejections++;
-		const int MaxConsecutiveRejections = 50; // ~25s at the post-buffer-fill cadence
-		constexpr double kHealthyPriorErrorMax = 0.005; // 5 mm — matches kRejectionFloor
+		// Constants are now pinned in WatchdogDecisions.h so any future tuning
+		// of the rejection cap or healthy-prior floor is forced through the
+		// regression-test suite. See WatchdogDecisions.h doc comment for the
+		// failure mode the boundary is calibrated against.
+		const int MaxConsecutiveRejections = spacecal::watchdog::kMaxConsecutiveRejections;
 
 		Metrics::consecutiveRejections.Push((double)m_consecutiveRejections);
 		// Mirror the per-rejection tag into the metrics namespace so
@@ -1480,7 +1484,7 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 		Metrics::lastRejectReason = m_rejectReasonTag;
 
 		const bool calibrationHealthy =
-			m_isValid && priorCalibrationError < kHealthyPriorErrorMax;
+			spacecal::watchdog::IsCalibrationHealthy(m_isValid, priorCalibrationError);
 
 		// Surface the wedged-at-noise-floor symptom as a per-tick metric.
 		// Pushes 1.0 only when the watchdog WOULD have fired (we hit the
