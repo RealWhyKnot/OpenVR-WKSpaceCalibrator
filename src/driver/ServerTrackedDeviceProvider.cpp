@@ -318,6 +318,19 @@ void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTr
 	// or never initialized. Snap to the target so we don't ramp in from a junk state.
 	if (!wasEnabled && tf.enabled) {
 		tf.transform = tf.targetTransform;
+		// Forensic diagnostic for audit row #8 (project_upstream_regression_audit_2026-05-04).
+		// If a sleeper bug ever puts a stale fallback transform into
+		// `tf.transform` before this snap, the snap would lock-in the
+		// staleness for the user. Surfacing every snap-on-enable lets
+		// post-mortem grep `device_transform_snap_on_enable` reveal the
+		// pattern. Once-per-event (driven by SetDeviceTransform IPC), so
+		// no throttling needed.
+		LOG("device_transform_snap_on_enable: id=%u target=(%.3f,%.3f,%.3f) prevFallbackActive=%d",
+			(unsigned)newTransform.openVRID,
+			tf.targetTransform.translation.x(),
+			tf.targetTransform.translation.y(),
+			tf.targetTransform.translation.z(),
+			(int)tf.fallbackActive);
 	}
 
 	// On disable transition, drop any pending lerp target so a future re-enable
