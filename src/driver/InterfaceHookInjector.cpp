@@ -116,47 +116,13 @@ static void *DetourGetGenericInterface(vr::IVRDriverContext *_this, const char *
 			IHook::Register(&TrackedDevicePoseUpdatedHook006);
 		}
 	}
-	else if (iface == "IVRDriverInput_003")
-	{
-		// Capture the public IVRDriverInput vtable so SkeletalHookInjector can
-		// parse the pimpl thunks and recover the IVRDriverInputInternal vtable
-		// indices (no public header for Internal exists). We do NOT install any
-		// hook on the public interface — M1 proved lighthouse never calls
-		// through it; this is purely structural intel.
-		LOG("[skeletal] IVRDriverInput_003 queried via context: iface=%p", originalInterface);
-		skeletal::CapturePublicVTable(originalInterface);
-	}
-	else if (iface.find("IVRDriverInputInternal") != std::string::npos)
-	{
-		// Substring match because the version suffix on Internal interfaces
-		// (typically "_XXX") shifts across SteamVR builds. The actual hook
-		// install is idempotent per session — first non-null pointer wins.
-		LOG("[skeletal] %s queried via context: iface=%p", iface.c_str(), originalInterface);
-
-		// In the user's 2026-05-02 session the SC driver loaded, IVRDriverInputInternal
-		// queries arrived 4 times via this hook, but IVRDriverInput_003 was never
-		// queried — install bailed every time with "Internal pointer arrived
-		// before public-stub thunks were parsed" and finger smoothing was dead
-		// for the session. Root cause: the SC driver itself never calls
-		// vr::VRDriverInput(), so OpenVR's lazy accessor never fires the
-		// public query through SC's context, but the GetGenericInterface vtable
-		// patch is shared across all driver contexts in the same vrserver, so
-		// we still see Internal queries from other drivers landing here.
-		//
-		// Fix: proactively fetch IVRDriverInput_003 ourselves when the public
-		// vtable hasn't been captured yet, so the thunk parser has the data it
-		// needs before TryInstallInternalHook is asked to install.
-		if (originalInterface && !skeletal::IsPublicVTableCaptured())
-		{
-			vr::EVRInitError fetchErr = vr::VRInitError_None;
-			void *publicIface = GetGenericInterfaceHook.originalFunc(_this, "IVRDriverInput_003", &fetchErr);
-			LOG("[skeletal] proactive IVRDriverInput_003 fetch: iface=%p err=%d", publicIface, (int)fetchErr);
-			if (publicIface) {
-				skeletal::CapturePublicVTable(publicIface);
-			}
-		}
-		skeletal::TryInstallInternalHook(originalInterface);
-	}
+	// Skeletal-hook install branches removed in 2026-05-04 pivot — see
+	// memory/project_finger_smoothing_real_hook_target.md. The next commit
+	// adds a single substring-match branch that hooks the PUBLIC IVRDriverInput
+	// vtable directly (slots 5 and 6); the old IVRDriverInputInternal chase +
+	// thunk parser + DeepProbe were dead code (the install always failed
+	// because the lookup returned a pointer into vrserver's parsed-settings
+	// JSON memory, not an interface object).
 
 	return originalInterface;
 }
