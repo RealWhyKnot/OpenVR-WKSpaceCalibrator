@@ -1221,20 +1221,15 @@ namespace {
 		// t=1527.74, auto-recovery fired and clobbered the working cal.
 		// Adding this gate so the same scenario can't repeat.
 		//
-		// NOTE: stamped on EVERY non-OK tick below (not just the OK->!OK
-		// transition), so sub-100ms flicker between OK/OutOfRange/OK still
-		// records a stall and arms the post-stall grace.
+		// NOTE: claimed-but-empirically-false: "stamped on every non-OK tick
+		// below". 2026-05-04 logs show this stays at the session-start
+		// sentinel even across a 94-second stall, meaning either the
+		// !hmdValid branch isn't being entered during real stalls, or
+		// devicePoses[Hmd] reports valid-but-stale during stalls. Tracking
+		// as a follow-up; new debug logging (reloc_tick, reloc_hmd_invalid_
+		// stamped) added in the same change set as this comment will surface
+		// the data needed to fix it.
 		double lastHmdInvalidTime = -1e9;
-
-		// Per-base-station distance to the HMD on the previous tick. Used as
-		// a corroborating signal for the auto-recovery gate: a real Quest
-		// re-localization will jump the HMD position while base stations
-		// remain stable in their own tracking frame, so the HMD-to-base
-		// distance should also jump by ~the same magnitude. If only the
-		// HMD-frame delta jumps but per-base relative distances don't,
-		// something else is going on (HMD drifted with bases, transient
-		// driver state, etc.) and we should NOT clobber the calibration.
-		std::map<std::string, double> prevHmdToBaseDist;
 
 		// --- Auto-recovery snapshot: pre-clear state so Undo can restore.
 		// Captured INSIDE the auto-recover action block, just before
@@ -1286,32 +1281,19 @@ namespace {
 	// quickly we'd interrupt the convergence and prevent the calibration
 	// from ever stabilising.
 	//
-	// Post-stall grace: 30 s after an HMD-tracking-lost event, refuse to
-	// auto-recover. Was 10 s; raised to match the throttle window so the
-	// SAME amount of clear, post-stall convergence is required whether the
-	// previous event was a stall or a previous auto-recover. Audit point:
-	// the stall flow's own restart logic converges in seconds, but the
-	// pose data takes longer to settle into a consistent frame, and a
-	// detector fire during the settling window correlates strongly with
-	// the false positives observed on 2026-05-02 / 2026-05-03 (29cm and
-	// 86cm "drift events" landing right after stalls).
-	//
-	// Per-base corroboration threshold: a real Quest re-localization
-	// shifts the HMD position while base stations stay put in their own
-	// frame, so the HMD-to-each-base distance changes by ~hmdDelta. We
-	// require at least kRelocAutoRecoverMinBaseConfirms base stations to
-	// show >= kRelocAutoRecoverBaseDistJumpM jump in HMD-relative distance.
-	// 15 cm threshold is half the HMD jump threshold so a real 30cm jump
-	// trivially passes; smaller settles/jitters that are below half the
-	// HMD threshold get filtered out. Two-base requirement defends against
-	// a single base station with bad tracking inflating its delta on its
-	// own.
-	constexpr double kRelocAutoRecoverThresholdM     = 0.30;  // 30 cm (was 15, too low)
-	constexpr double kRelocAutoRecoverStartupSec     = 30.0;  // 30 s startup grace
-	constexpr double kRelocAutoRecoverThrottleSec    = 30.0;  // 30 s between recovers
-	constexpr double kRelocAutoRecoverPostStallSec   = 30.0;  // 30 s after stall recovery (was 10, audit Math #3)
-	constexpr double kRelocAutoRecoverBaseDistJumpM  = 0.15;  // 15 cm per-base dist-from-hmd jump
-	constexpr int    kRelocAutoRecoverMinBaseConfirms = 2;    // need 2 bases to corroborate
+	// Post-stall grace: 10 s after an HMD-tracking-lost event, refuse to
+	// auto-recover. The stall flow has its own restart logic; let it converge
+	// before considering further intervention. Long enough that even a chunky
+	// post-stall pose-settling jitter window doesn't trigger us. (Was briefly
+	// raised to 30 s in fd81e83 alongside the per-base corroboration gate;
+	// reverted with that gate in 2026-05-04 -- the 30 s value never actually
+	// applied in practice because lastHmdInvalidTime doesn't advance during
+	// real stalls, see TODO above. Restoring 10 s as the original behavior
+	// while we figure out the timestamp-not-updating problem separately.)
+	constexpr double kRelocAutoRecoverThresholdM   = 0.30;  // 30 cm (was 15, too low)
+	constexpr double kRelocAutoRecoverStartupSec   = 30.0;  // 30 s startup grace
+	constexpr double kRelocAutoRecoverThrottleSec  = 30.0;  // 30 s between recovers
+	constexpr double kRelocAutoRecoverPostStallSec = 10.0;  // 10 s after stall recovery
 
 	void TickHmdRelocalizationDetector(double now) {
 		if (!vr::VRSystem()) return;
@@ -1368,16 +1350,8 @@ namespace {
 		// cache the existing universe-shift detector populates -- but we
 		// can't read its state directly without coupling to it, so do a
 		// fresh scan here (cheap; ~4 base stations max).
-		//
-		// Also compute per-base HMD-relative distance for the auto-recovery
-		// corroboration check (audit Math #3): a real Quest re-localization
-		// shifts the HMD while base stations stay put, so the HMD-to-base
-		// distance changes by ~hmdDelta on every base. Tracked here so the
-		// next-tick comparison can verify enough bases agree.
 		double bsMaxDelta = 0.0;
 		int bsCount = 0;
-		std::map<std::string, double> currentHmdToBaseDist;
-		int basesAgreeingOnJump = 0;
 		char propBuf[vr::k_unMaxPropertyStringSize] = {};
 		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id) {
 			if (vr::VRSystem()->GetTrackedDeviceClass(id) != vr::TrackedDeviceClass_TrackingReference) continue;
@@ -1395,20 +1369,6 @@ namespace {
 			if (it == baseStationCache.end()) continue;
 			double d = (p.trans - it->second.pose.translation()).norm();
 			if (d > bsMaxDelta) bsMaxDelta = d;
-
-			// Per-base HMD-relative distance corroboration. Compute distance
-			// from HMD to this base on this tick; compare to last tick's
-			// distance for the same base; count bases whose distance jumped
-			// by >= the corroboration threshold.
-			double dist = (hmdPose.translation() - p.trans).norm();
-			currentHmdToBaseDist[serial] = dist;
-			auto prevIt = s.prevHmdToBaseDist.find(serial);
-			if (prevIt != s.prevHmdToBaseDist.end()) {
-				double distJump = std::abs(dist - prevIt->second);
-				if (distJump >= kRelocAutoRecoverBaseDistJumpM) {
-					++basesAgreeingOnJump;
-				}
-			}
 		}
 
 		// Body trackers in OTHER tracking system(s). For Quest HMD + Lighthouse
@@ -1524,26 +1484,18 @@ namespace {
 		const bool magnitudeOK       = currentHmdDelta >= kRelocAutoRecoverThresholdM;
 		const bool startupOK         = now >= kRelocAutoRecoverStartupSec;
 		const bool throttleOK        = (now - s.lastAutoRecoverTime) >= kRelocAutoRecoverThrottleSec;
-		// Corroboration (audit Math #3): require >= N base stations to ALSO
-		// show >= 15cm jump in HMD-relative distance. Defends against the
-		// failure mode where the HMD pose appears to teleport on a single
-		// tick due to driver-side state churn while base stations DIDN'T
-		// see a proportional change in their distance to the HMD (i.e. the
-		// "teleport" was a measurement artifact, not real motion).
-		const bool basesCorroborate  = basesAgreeingOnJump >= kRelocAutoRecoverMinBaseConfirms;
 
 		// If `fired` is true (a relocalization log line was emitted) but a
 		// gate blocked the recovery, log WHY — gives us debug evidence for
 		// every borderline event so we can tune thresholds against real data
 		// instead of guessing. Throttled to once per fire (the fire itself
 		// is throttled to 5s by the existing code), so this won't flood.
-		if (fired && (!magnitudeOK || !stateOK || !startupOK || !throttleOK || postStallGrace || !basesCorroborate)) {
+		if (fired && (!magnitudeOK || !stateOK || !startupOK || !throttleOK || postStallGrace)) {
 			char skipbuf[384];
 			snprintf(skipbuf, sizeof skipbuf,
-				"auto_recover_skipped: hmdDelta=%.3f magnitudeOK=%d stateOK=%d startupOK=%d throttleOK=%d postStallGrace=%d (secSinceStall=%.2f) basesAgreeing=%d/%d state=%d",
+				"auto_recover_skipped: hmdDelta=%.3f magnitudeOK=%d stateOK=%d startupOK=%d throttleOK=%d postStallGrace=%d (secSinceStall=%.2f) state=%d",
 				currentHmdDelta, (int)magnitudeOK, (int)stateOK, (int)startupOK, (int)throttleOK,
-				(int)postStallGrace, secSinceStall,
-				basesAgreeingOnJump, kRelocAutoRecoverMinBaseConfirms, (int)CalCtx.state);
+				(int)postStallGrace, secSinceStall, (int)CalCtx.state);
 			Metrics::WriteLogAnnotation(skipbuf);
 		}
 
@@ -1552,8 +1504,7 @@ namespace {
 			&& stateOK
 			&& startupOK
 			&& throttleOK
-			&& !postStallGrace
-			&& basesCorroborate)
+			&& !postStallGrace)
 		{
 			const double hmdDelta = currentHmdDelta;
 			const Eigen::Vector3d dpos = hmdPose.translation() - s.prevHmd.translation();
@@ -1636,7 +1587,6 @@ namespace {
 		s.prevHmd = hmdPose;
 		s.havePrevHmd = true;
 		s.prevBodyTrans = std::move(currentBodyTrans);
-		s.prevHmdToBaseDist = std::move(currentHmdToBaseDist);
 	}
 }
 
