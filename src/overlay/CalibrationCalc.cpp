@@ -3,6 +3,10 @@
 #include "CalibrationMetrics.h"
 #include "Protocol.h"
 
+#include <chrono>  // steady_clock for throttled diagnostic logs in
+                   // CalibrateRotation / CalibrateTranslation. The throttle
+                   // keeps the per-tick solver loop from flooding the log.
+
 inline vr::HmdQuaternion_t operator*(const vr::HmdQuaternion_t& lhs, const vr::HmdQuaternion_t& rhs) {
 	return {
 		(lhs.w * rhs.w) - (lhs.x * rhs.x) - (lhs.y * rhs.y) - (lhs.z * rhs.z),
@@ -422,6 +426,28 @@ Eigen::Vector3d CalibrationCalc::CalibrateRotation(const bool ignoreOutliers) co
 	twistY.normalize();
 	double yaw = 2.0 * std::atan2(twistY.y(), twistY.w());
 
+	// Diagnostic: also compute the previous Rodrigues yaw projection so we
+	// can monitor the empirical delta between the two methods on real
+	// inputs. Throttled to once per 2 s so a multi-Hz solver loop doesn't
+	// flood the log. The 2026-05-04 audit-fix-cleanup work added this so
+	// future "calibration looks off" reports have data to back-check whether
+	// the swing-twist switch is producing meaningfully different yaw than
+	// the Rodrigues approximation would have.
+	{
+		static auto s_lastLog = std::chrono::steady_clock::time_point{};
+		auto nowTp = std::chrono::steady_clock::now();
+		if (nowTp - s_lastLog >= std::chrono::seconds(2)) {
+			s_lastLog = nowTp;
+			const double rodriguesYaw = std::atan2(R(0, 2) - R(2, 0), R(0, 0) + R(2, 2));
+			char yawbuf[160];
+			snprintf(yawbuf, sizeof yawbuf,
+				"cal_rotation_yaw: rodrigues_yaw=%.4f swingtwist_yaw=%.4f delta=%.4f (degrees: rod=%.3f st=%.3f)",
+				rodriguesYaw, yaw, yaw - rodriguesYaw,
+				rodriguesYaw * 180.0 / EIGEN_PI, yaw * 180.0 / EIGEN_PI);
+			Metrics::WriteLogAnnotation(yawbuf);
+		}
+	}
+
 	// Convert to degrees
 	Eigen::Vector3d euler(0.0, yaw * 180.0 / EIGEN_PI, 0.0);
 
@@ -570,6 +596,28 @@ Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rot
 			Eigen::JacobiSVD<Eigen::Matrix3d> svd(normal);
 			const auto& sv = svd.singularValues();
 			m_translationConditionRatio = (sv(0) > 0.0) ? std::sqrt(sv(2) / sv(0)) : 0.0;
+
+			// Diagnostic: log the condition ratio + sample count so we can
+			// observe how often the gate is near-singular (ratio below the
+			// 0.05 threshold) on real data. Throttled to once per 2 s so a
+			// per-tick solver doesn't flood the log. The 2026-05-04 audit-
+			// fix-cleanup work added this so we have evidence to back-check
+			// whether the SVD-on-normal-matrix gate is producing different
+			// pass/fail decisions than the prior QR-R-diagonal proxy would
+			// have on the user's actual data.
+			static auto s_lastCondLog = std::chrono::steady_clock::time_point{};
+			auto nowTp = std::chrono::steady_clock::now();
+			if (nowTp - s_lastCondLog >= std::chrono::seconds(2)) {
+				s_lastCondLog = nowTp;
+				const double kGateThreshold = 0.05;
+				const bool pass = m_translationConditionRatio >= kGateThreshold;
+				char condbuf[224];
+				snprintf(condbuf, sizeof condbuf,
+					"cal_translation_cond: svd_ratio=%.6f threshold=%.6f pass=%d sample_count=%lld sv=(%.6e, %.6e, %.6e)",
+					m_translationConditionRatio, kGateThreshold, (int)pass,
+					(long long)deltas.size(), sv(0), sv(1), sv(2));
+				Metrics::WriteLogAnnotation(condbuf);
+			}
 		}
 
 		// Compute per-pair residuals (we collapse the per-axis residuals into a

@@ -1250,6 +1250,26 @@ namespace {
 		// auto-recover firing so subsequent recoveries get their own banner
 		// even if the user dismissed an earlier one.
 		bool autoRecoverBannerDismissed = false;
+
+		// --- DIAGNOSTIC ONLY (no gating). Per-base-station HMD-relative
+		// distance from the previous tick, used to dump per-base distance
+		// jumps into the log when hmd_relocalization_detected fires. The
+		// fd81e83 commit tried to USE this as a corroboration gate, but
+		// the math is broken for cross-system setups (Quest+Lighthouse)
+		// because hmdPose and base poses live in different tracking-system
+		// frames in CalCtx.devicePoses. Reverted as a gate; kept here only
+		// as diagnostic data so a future log diff can see what cross-frame
+		// geometry the detector observed.
+		std::map<std::string, double> prevHmdToBaseDist;
+
+		// Throttle for the per-tick reloc_tick diagnostic log. 1 Hz cap so
+		// we always have a recent baseline state in the log without flooding.
+		double lastTickLogTime = -1e9;
+
+		// Throttle for the per-tick reloc_hmd_invalid_stamped diagnostic log
+		// inside the !hmdValid branch. Same 1 Hz cap so a long stall produces
+		// 1 line per second instead of 60+.
+		double lastInvalidLogTime = -1e9;
 	};
 	RelocalizationDetectorState g_relocDetector;
 
@@ -1316,12 +1336,50 @@ namespace {
 		const auto& hmdRaw = CalCtx.devicePoses[vr::k_unTrackedDeviceIndex_Hmd];
 		const bool hmdValid = hmdRaw.poseIsValid && hmdRaw.deviceIsConnected
 			&& hmdRaw.result == vr::ETrackingResult::TrackingResult_Running_OK;
+
+		// Diagnostic: per-tick state baseline, throttled to 1 Hz. Future
+		// triage of "tracking went weird" reports can grep `reloc_tick` to
+		// see what the detector observed across a problematic window. Also
+		// the only way to confirm the function is being called every tick
+		// (vs. some upstream skipping it during stalls -- which is what we
+		// suspect is preventing lastHmdInvalidTime from advancing during
+		// real stalls, see comment on the field).
+		if ((now - s.lastTickLogTime) >= 1.0) {
+			s.lastTickLogTime = now;
+			char tickbuf[256];
+			snprintf(tickbuf, sizeof tickbuf,
+				"reloc_tick: hmdValid=%d havePrevHmd=%d state=%d hmdRaw.result=%d hmdRaw.poseIsValid=%d hmdRaw.deviceIsConnected=%d lastHmdInvalidTime=%.3f secSinceStall=%.2f",
+				(int)hmdValid, (int)s.havePrevHmd, (int)CalCtx.state,
+				(int)hmdRaw.result, (int)hmdRaw.poseIsValid, (int)hmdRaw.deviceIsConnected,
+				s.lastHmdInvalidTime, now - s.lastHmdInvalidTime);
+			Metrics::WriteLogAnnotation(tickbuf);
+		}
+
 		if (!hmdValid) {
 			// Tracking dropout. Drop the cache so we don't compare across
 			// the dropout (which would produce a spurious jump). Also stamp
 			// the dropout time — the auto-recovery gate uses it to enforce
 			// a post-stall grace window so we don't double-tap the existing
 			// stall-recovery flow's StartContinuousCalibration.
+
+			// Diagnostic: log every entry into the !hmdValid branch (1 Hz
+			// throttled). This is the data we need to debug why
+			// lastHmdInvalidTime doesn't advance during real stalls --
+			// either this branch isn't being entered (devicePoses[Hmd]
+			// reports stale-but-valid during stalls), or it IS being
+			// entered but the stamp isn't reaching the auto-recovery gate
+			// for some other reason. Either way, having a log line per
+			// stall second will surface the truth on the next reproduction.
+			if ((now - s.lastInvalidLogTime) >= 1.0) {
+				s.lastInvalidLogTime = now;
+				char invbuf[224];
+				snprintf(invbuf, sizeof invbuf,
+					"reloc_hmd_invalid_stamped: now=%.3f prev_lastHmdInvalidTime=%.3f hmdRaw.result=%d hmdRaw.poseIsValid=%d hmdRaw.deviceIsConnected=%d",
+					now, s.lastHmdInvalidTime,
+					(int)hmdRaw.result, (int)hmdRaw.poseIsValid, (int)hmdRaw.deviceIsConnected);
+				Metrics::WriteLogAnnotation(invbuf);
+			}
+
 			s.havePrevHmd = false;
 			s.prevBodyTrans.clear();
 			s.lastHmdInvalidTime = now;
@@ -1350,8 +1408,17 @@ namespace {
 		// cache the existing universe-shift detector populates -- but we
 		// can't read its state directly without coupling to it, so do a
 		// fresh scan here (cheap; ~4 base stations max).
+		//
+		// Also track per-base HMD-relative distance (cur + prev) for
+		// DIAGNOSTIC dumping in the reloc_base_dists log when a fire
+		// event triggers below. NOT used as a gate (the fd81e83 attempt
+		// at gating on this was reverted -- HMD and base poses live in
+		// different tracking-system frames in CalCtx.devicePoses, so
+		// the cross-frame distance has no consistent physical meaning).
+		// Kept here purely so the log shows what the detector saw.
 		double bsMaxDelta = 0.0;
 		int bsCount = 0;
+		std::map<std::string, double> currentHmdToBaseDist;
 		char propBuf[vr::k_unMaxPropertyStringSize] = {};
 		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id) {
 			if (vr::VRSystem()->GetTrackedDeviceClass(id) != vr::TrackedDeviceClass_TrackingReference) continue;
@@ -1365,6 +1432,7 @@ namespace {
 			if (err != vr::TrackedProp_Success) continue;
 			std::string serial = propBuf;
 			Pose p = ConvertPose(dp);
+			currentHmdToBaseDist[serial] = (hmdPose.translation() - p.trans).norm();
 			auto it = baseStationCache.find(serial); // populated by TickBaseStationDrift
 			if (it == baseStationCache.end()) continue;
 			double d = (p.trans - it->second.pose.translation()).norm();
@@ -1424,6 +1492,30 @@ namespace {
 					dpos.x(), dpos.y(), dpos.z(), angRad,
 					hmdDelta, bodyMaxDelta, bsMaxDelta, bsCount);
 				Metrics::WriteLogAnnotation(logbuf);
+
+				// Diagnostic: per-base distance dump alongside every fire,
+				// so a future log can show whether the cross-frame HMD-to-
+				// base distance jumped on this event (it usually doesn't on
+				// cross-system Quest+Lighthouse setups -- that's why the
+				// fd81e83 corroboration gate had to be reverted). Format
+				// chunks one base station per snprintf so the line stays
+				// bounded.
+				{
+					char baseBuf[1024];
+					int written = snprintf(baseBuf, sizeof baseBuf, "reloc_base_dists:");
+					for (const auto& kv : currentHmdToBaseDist) {
+						auto prevIt = s.prevHmdToBaseDist.find(kv.first);
+						double prev = (prevIt != s.prevHmdToBaseDist.end()) ? prevIt->second : -1.0;
+						double jump = (prev >= 0.0) ? std::abs(kv.second - prev) : 0.0;
+						int n = snprintf(baseBuf + written, sizeof(baseBuf) - written,
+							" {serial=%s prev=%.3f cur=%.3f jump=%.3f}",
+							kv.first.c_str(), prev, kv.second, jump);
+						if (n <= 0 || (size_t)(written + n) >= sizeof baseBuf) break;
+						written += n;
+					}
+					Metrics::WriteLogAnnotation(baseBuf);
+				}
+
 				s.lastFireTime = now;
 				s.lastFireDelta = dpos;
 				s.lastFireRotRad = angRad;
@@ -1587,6 +1679,9 @@ namespace {
 		s.prevHmd = hmdPose;
 		s.havePrevHmd = true;
 		s.prevBodyTrans = std::move(currentBodyTrans);
+		// Diagnostic-only: per-base distance cache for next-tick comparison
+		// in the reloc_base_dists log.
+		s.prevHmdToBaseDist = std::move(currentHmdToBaseDist);
 	}
 }
 
@@ -2672,6 +2767,21 @@ bool UndoLastAutoRecovery() {
 	auto& s = g_relocDetector;
 	if (!s.lastAutoRecoverSnapshot.valid) return false;
 
+	// Diagnostic: dump the snapshot we're about to restore. Useful when the
+	// user reports "I hit Undo and tracking is still wrong" -- we want to
+	// see what state we put them back into. Logged BEFORE the restore so
+	// even if the restore is a no-op for some reason, we have the data.
+	{
+		const auto& snap = s.lastAutoRecoverSnapshot;
+		const Eigen::Vector3d t = snap.refToTargetPose.translation();
+		char dumpbuf[256];
+		snprintf(dumpbuf, sizeof dumpbuf,
+			"undo_snapshot_dump (Undo): refToTarget_t=(%.3f,%.3f,%.3f) magnitude=%.3f relativePosCalibrated=%d hasAppliedCalibrationResult=%d",
+			t.x(), t.y(), t.z(), t.norm(),
+			(int)snap.relativePosCalibrated, (int)snap.hasAppliedCalibrationResult);
+		Metrics::WriteLogAnnotation(dumpbuf);
+	}
+
 	// Restore the three CalCtx fields the recovery had cleared. The
 	// continuous-cal tick will then re-apply the saved relative-pose
 	// constraint via setRelativeTransformation on the next frame, putting
@@ -2698,6 +2808,21 @@ void RecalibrateFromScratch() {
 	// Same effective steps as the auto-recovery action block in
 	// TickHmdRelocalizationDetector, but triggered manually so the
 	// "is it really a relocalization?" gates don't apply.
+
+	// Diagnostic: dump the state we're about to clear. Useful for
+	// triaging "I hit Recalibrate but it didn't help" -- we want to
+	// see what was being thrown away. Same key shape as the Undo dump
+	// for grep parity.
+	{
+		const Eigen::Vector3d t = CalCtx.refToTargetPose.translation();
+		char dumpbuf[256];
+		snprintf(dumpbuf, sizeof dumpbuf,
+			"undo_snapshot_dump (Recalibrate): refToTarget_t=(%.3f,%.3f,%.3f) magnitude=%.3f relativePosCalibrated=%d hasAppliedCalibrationResult=%d",
+			t.x(), t.y(), t.z(), t.norm(),
+			(int)CalCtx.relativePosCalibrated, (int)CalCtx.hasAppliedCalibrationResult);
+		Metrics::WriteLogAnnotation(dumpbuf);
+	}
+
 	calibration.Clear();
 	CalCtx.refToTargetPose             = Eigen::AffineCompact3d::Identity();
 	CalCtx.relativePosCalibrated       = false;
