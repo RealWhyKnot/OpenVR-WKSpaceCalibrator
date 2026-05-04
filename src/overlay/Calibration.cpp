@@ -716,10 +716,22 @@ namespace {
 	}
 }
 
+// Defined in UserInterface.cpp. Pushes the current finger-smoothing config
+// (persisted from disk via LoadProfile) to the driver. Called once on initial
+// connect so the driver picks up the user's setting without requiring a UI
+// interaction; later changes flow through the slider handler in
+// CCal_DrawFingerSmoothing.
+extern void SendFingerSmoothingConfig(CalibrationContext &ctx);
+
 void InitCalibrator()
 {
 	Driver.Connect();
 	shmem.Open(OPENVR_SPACECALIBRATOR_SHMEM_NAME);
+	// Push the persisted finger-smoothing config so the driver matches what
+	// the overlay just loaded from registry. Default-constructed FingerCfg in
+	// the driver is "feature off" so this is a no-op for users who haven't
+	// opted in, and the slider handler picks up subsequent changes live.
+	SendFingerSmoothingConfig(CalCtx);
 }
 
 // Called by IPCClient::SendBlocking after a successful reconnect. vrserver crashing
@@ -1183,6 +1195,32 @@ namespace {
 		// recenter button.
 		Eigen::Vector3d lastFireDelta = Eigen::Vector3d::Zero();
 		double lastFireRotRad = 0.0;
+
+		// Last time auto-recovery actually clobbered the calibration. Throttled
+		// separately from the 5-second logging fire — the cost of a too-eager
+		// auto-recover is much higher than a too-eager log line. Continuous-cal
+		// needs uninterrupted time to converge after each recover, so we keep
+		// at least 30s between consecutive auto-recovers.
+		double lastAutoRecoverTime = -1e9;
+
+		// Last time HMD tracking transitioned from valid -> invalid (a stall
+		// began). Used to enforce a post-stall grace period: a "relocalization"
+		// detected within seconds of a stall recovery is more likely the Quest
+		// settling its post-stall pose than a true SLAM teleport. The existing
+		// stall-recovery flow ALREADY calls StartContinuousCalibration to
+		// bootstrap, so a same-instant auto-recover would just double-tap that
+		// flow AND save an empty profile.
+		//
+		// Set to "now" whenever we see hmdValid transition false (stall begin).
+		// Auto-recovery checks (now - lastHmdInvalidTime) and refuses to fire
+		// if the post-stall window hasn't elapsed.
+		//
+		// Triggered the first false-positive on 2026-05-02 (build 2026.5.2.8):
+		// 3.5s stall ended at t=1527.69, the existing flow auto-restarted
+		// continuous-cal at t=1527.69, my detector saw a 29cm pose delta at
+		// t=1527.74, auto-recovery fired and clobbered the working cal.
+		// Adding this gate so the same scenario can't repeat.
+		double lastHmdInvalidTime = -1e9;
 	};
 	RelocalizationDetectorState g_relocDetector;
 
@@ -1191,6 +1229,37 @@ namespace {
 	constexpr double kRelocBaseStableM    = 0.001;  // 1 mm
 	constexpr double kRelocThrottleSec    = 5.0;
 	constexpr int    kRelocMinBaseStations = 2;
+
+	// Auto-recovery thresholds. Stricter than the logging trigger because the
+	// cost of a false-positive auto-recovery (clobbering a working cal) is
+	// much higher than a false-positive log line. The user's reported wedged
+	// event was 86 cm; the false-positive that clobbered a working cal was
+	// 29 cm right after a stall. So we need BOTH a higher magnitude floor AND
+	// a post-stall lockout.
+	//
+	// Threshold: 30 cm (raised from 15 cm after the 2026-05-02 false-positive).
+	// SLAM noise is typically <2 cm/tick, real teleport events tend to be
+	// 30-100+ cm. 30 cm filters out the post-stall-settling case (which can
+	// look like 20-30 cm) without losing the catastrophic-wedge case (60+ cm).
+	//
+	// Startup grace: don't fire in the first 30 s of the session. Pose data
+	// settling + initial driver bootstrap can produce spurious large deltas
+	// in the first few ticks; better to let the system stabilise before we
+	// start invalidating.
+	//
+	// Throttle: at least 30 s between auto-recovers. Continuous-cal needs
+	// uninterrupted time to converge after each recovery; if we re-fire too
+	// quickly we'd interrupt the convergence and prevent the calibration
+	// from ever stabilising.
+	//
+	// Post-stall grace: 10 s after an HMD-tracking-lost event, refuse to
+	// auto-recover. The stall flow has its own restart logic; let it converge
+	// before considering further intervention. Long enough that even a chunky
+	// post-stall pose-settling jitter window doesn't trigger us.
+	constexpr double kRelocAutoRecoverThresholdM   = 0.30;  // 30 cm (was 15, too low)
+	constexpr double kRelocAutoRecoverStartupSec   = 30.0;  // 30 s startup grace
+	constexpr double kRelocAutoRecoverThrottleSec  = 30.0;  // 30 s between recovers
+	constexpr double kRelocAutoRecoverPostStallSec = 10.0;  // 10 s after stall recovery
 
 	void TickHmdRelocalizationDetector(double now) {
 		if (!vr::VRSystem()) return;
@@ -1215,9 +1284,13 @@ namespace {
 			&& hmdRaw.result == vr::ETrackingResult::TrackingResult_Running_OK;
 		if (!hmdValid) {
 			// Tracking dropout. Drop the cache so we don't compare across
-			// the dropout (which would produce a spurious jump).
+			// the dropout (which would produce a spurious jump). Also stamp
+			// the dropout time — the auto-recovery gate uses it to enforce
+			// a post-stall grace window so we don't double-tap the existing
+			// stall-recovery flow's StartContinuousCalibration.
 			s.havePrevHmd = false;
 			s.prevBodyTrans.clear();
+			s.lastHmdInvalidTime = now;
 			return;
 		}
 
@@ -1323,7 +1396,144 @@ namespace {
 				fired = true;
 			}
 		}
-		(void)fired; // future: trigger correction action(s)
+
+		// =================================================================
+		// AUTO-RECOVERY: clobber the wedged calibration when a real
+		// re-localization is detected.
+		//
+		// Background: continuous-cal can converge to a "self-consistent fit
+		// at the wrong offset" after a Quest re-localization. Once wedged,
+		// continuous-cal cannot recover on its own — the saved relative
+		// pose constraint pulls every refinement back to the bad neighborhood.
+		// Until 2026-05-02 the only fix was to restart the overlay and
+		// re-do calibration manually. This block makes recovery automatic.
+		//
+		// Entry conditions are intentionally stricter than the logging fire:
+		//   - hmdDelta >= 15 cm (logging fires at 5 cm)
+		//   - State == Continuous or ContinuousStandby (don't surprise the
+		//     user mid-wizard or in None mode where there's nothing to fix)
+		//   - Session has been running >= 30 s (avoid bootstrap noise)
+		//   - >= 30 s since last auto-recover (let cal converge between resets)
+		//
+		// The triple-AND of the underlying detector means we already have
+		// strong evidence this is a real re-localization, not natural motion.
+		// The extra gates here are about being conservative on the *action*,
+		// since clobbering a working cal is bad and we want zero false-fires.
+		//
+		// Recovery procedure:
+		//   1. calibration.Clear() — wipes m_estimatedTransformation,
+		//      m_isValid, m_samples, m_refToTargetPose, m_relativePosCalibrated.
+		//   2. CalCtx.refToTargetPose / relativePosCalibrated reset, so the
+		//      restart in step 4 doesn't immediately re-apply the saved bad
+		//      relative-pose constraint via setRelativeTransformation.
+		//   3. SaveProfile() — persist the cleared state. Without this, a
+		//      subsequent program restart would re-load the bad cal from
+		//      disk and the recovery would only have helped the live session.
+		//   4. StartContinuousCalibration() — restart cold. Continuous-cal
+		//      will bootstrap from new pose pairs and converge to the
+		//      correct (post-relocalization) calibration within seconds.
+		//
+		// User feedback: the fresh-start period IS visible — body trackers
+		// will appear at their lighthouse-system positions for a few seconds
+		// before the new fit locks in. That's a much better outcome than
+		// "calibration is permanently 86 cm off until you restart the
+		// overlay manually."
+		// Auto-recover gate. Each clause excludes a specific false-positive
+		// scenario; if you change one, document why.
+		const double currentHmdDelta = s.havePrevHmd
+			? (hmdPose.translation() - s.prevHmd.translation()).norm()
+			: 0.0;
+		const double secSinceStall   = now - s.lastHmdInvalidTime;
+		const bool postStallGrace    = secSinceStall < kRelocAutoRecoverPostStallSec;
+		const bool stateOK           = (CalCtx.state == CalibrationState::Continuous
+		                              || CalCtx.state == CalibrationState::ContinuousStandby);
+		const bool magnitudeOK       = currentHmdDelta >= kRelocAutoRecoverThresholdM;
+		const bool startupOK         = now >= kRelocAutoRecoverStartupSec;
+		const bool throttleOK        = (now - s.lastAutoRecoverTime) >= kRelocAutoRecoverThrottleSec;
+
+		// If `fired` is true (a relocalization log line was emitted) but a
+		// gate blocked the recovery, log WHY — gives us debug evidence for
+		// every borderline event so we can tune thresholds against real data
+		// instead of guessing. Throttled to once per fire (the fire itself
+		// is throttled to 5s by the existing code), so this won't flood.
+		if (fired && (!magnitudeOK || !stateOK || !startupOK || !throttleOK || postStallGrace)) {
+			char skipbuf[384];
+			snprintf(skipbuf, sizeof skipbuf,
+				"auto_recover_skipped: hmdDelta=%.3f magnitudeOK=%d stateOK=%d startupOK=%d throttleOK=%d postStallGrace=%d (secSinceStall=%.2f) state=%d",
+				currentHmdDelta, (int)magnitudeOK, (int)stateOK, (int)startupOK, (int)throttleOK,
+				(int)postStallGrace, secSinceStall, (int)CalCtx.state);
+			Metrics::WriteLogAnnotation(skipbuf);
+		}
+
+		if (fired
+			&& magnitudeOK
+			&& stateOK
+			&& startupOK
+			&& throttleOK
+			&& !postStallGrace)
+		{
+			const double hmdDelta = currentHmdDelta;
+			const Eigen::Vector3d dpos = hmdPose.translation() - s.prevHmd.translation();
+			char logbuf[384];
+			snprintf(logbuf, sizeof logbuf,
+				"auto_recover_from_relocalization: hmdDelta=%.3f dpos=(%.3f,%.3f,%.3f) rotRad=%.3f"
+				" priorState=%s priorValid=%d secSinceStall=%.2f -> calibration cleared, continuous-cal restarting",
+				hmdDelta, dpos.x(), dpos.y(), dpos.z(), s.lastFireRotRad,
+				(CalCtx.state == CalibrationState::Continuous) ? "Continuous" : "ContinuousStandby",
+				(int)calibration.isValid(), secSinceStall);
+			Metrics::WriteLogAnnotation(logbuf);
+
+			// Step 1: wipe in-memory calibration + sample buffer.
+			calibration.Clear();
+
+			// Step 2: clear CalCtx-side warm-start so the restart doesn't
+			// immediately re-apply the saved (now-stale) relative pose.
+			CalCtx.refToTargetPose = Eigen::AffineCompact3d::Identity();
+			CalCtx.relativePosCalibrated = false;
+			CalCtx.hasAppliedCalibrationResult = false;
+
+			// REMOVED 2026-05-03: SaveProfile call after clear. Originally
+			// added to "prevent bad cal from surviving restart", but the
+			// actual effect was the OPPOSITE — SaveProfile persists
+			// `ctx.calibratedTranslation/Rotation` which still hold the
+			// WEDGED pre-recovery values (Clear() wipes m_estimatedTransformation
+			// inside CalibrationCalc, but doesn't touch the context's
+			// last-applied display values). So the save was locking the
+			// wedge ONTO disk, guaranteeing the next session loads it
+			// again. Without this save, the in-memory cleared state stays
+			// in-memory; the saved profile is unchanged. If the user keeps
+			// playing, the convergence after this recovery will eventually
+			// be saved on a UI action / quit. If they quit before that,
+			// next launch loads the prior state and the user can do a
+			// one-shot to recover (better than guaranteed-wedged-on-load).
+			//
+			// Triggered by 2026-05-02 sessions where my auto-recovery fired
+			// twice on post-stall false positives and BOTH times the save
+			// persisted the wedged state, locking the user into a bad cal
+			// across multiple program restarts.
+
+			// Step 3: restart continuous-cal cold. The function clears the
+			// calibration buffer again (idempotent), sets state back to
+			// Continuous, and the rest of CalibrationTick will start
+			// collecting fresh samples this very tick. NOTE: this also
+			// calls CalCtx.messages.clear() inside StartCalibration, so
+			// any user-visible status message we want to display has to
+			// be appended AFTER this call.
+			StartContinuousCalibration();
+
+			// Step 5: surface the recovery in the overlay's message buffer.
+			// Placed AFTER StartContinuousCalibration because that function
+			// internally clears CalCtx.messages — putting our message before
+			// it would have it wiped immediately. The user sees this banner
+			// in the calibration log panel for the duration of convergence.
+			char uimsg[128];
+			snprintf(uimsg, sizeof uimsg,
+				"Quest re-localized (%.0f cm jump). Recalibrating...\n",
+				hmdDelta * 100.0);
+			CalCtx.Log(uimsg);
+
+			s.lastAutoRecoverTime = now;
+		}
 
 		// Update cache for next tick.
 		s.prevHmd = hmdPose;
