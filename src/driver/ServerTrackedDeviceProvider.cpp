@@ -624,3 +624,32 @@ void ServerTrackedDeviceProvider::HandleApplyRandomOffset() {
 	oss << "Applied random offset: " << posOffset << " from init " << init << std::endl;
 	LOG("%s", oss.str().c_str());
 }
+
+void ServerTrackedDeviceProvider::SetFingerSmoothingConfig(const protocol::FingerSmoothingConfig &cfg)
+{
+	protocol::FingerSmoothingConfig prev;
+	{
+		std::lock_guard<std::mutex> lk(fingerCfgMutex);
+		prev = fingerCfg;
+		fingerCfg = cfg;
+	}
+	// Log only on real changes so a slider drag (60 Hz no-op tick) doesn't
+	// flood the log file. master_enabled / mask flips are rare, smoothness
+	// changes during a drag are the noisy ones. We log every change anyway —
+	// debugging "is smoothing reaching the driver?" matters more than log
+	// volume, and the user's session-level log is small.
+	if (prev.master_enabled != cfg.master_enabled
+	 || prev.smoothness     != cfg.smoothness
+	 || prev.finger_mask    != cfg.finger_mask)
+	{
+		LOG("[skeletal] SetFingerSmoothingConfig via IPC: enabled=%d smoothness=%u mask=0x%04x (was: enabled=%d smoothness=%u mask=0x%04x)",
+			(int)cfg.master_enabled, (unsigned)cfg.smoothness, (unsigned)cfg.finger_mask,
+			(int)prev.master_enabled, (unsigned)prev.smoothness, (unsigned)prev.finger_mask);
+	}
+}
+
+protocol::FingerSmoothingConfig ServerTrackedDeviceProvider::GetFingerSmoothingConfig() const
+{
+	std::lock_guard<std::mutex> lk(fingerCfgMutex);
+	return fingerCfg;
+}

@@ -54,6 +54,15 @@ public:
 		alignmentSpeedParams = params;
 	}
 
+	// Finger-smoothing config cache. Written by IPCServer when the overlay
+	// pushes a new config (rare — only on UI changes). Read by the
+	// IVRDriverInputInternal::UpdateSkeletonComponent detour at hand-update
+	// rate (~340 Hz/hand). Held under its OWN mutex distinct from
+	// stateMutex so finger updates can never block the pose-update path,
+	// and vice-versa.
+	void SetFingerSmoothingConfig(const protocol::FingerSmoothingConfig &cfg);
+	protocol::FingerSmoothingConfig GetFingerSmoothingConfig() const;
+
 private:
 	IPCServer server;
 	protocol::DriverPoseShmem shmem;
@@ -183,6 +192,14 @@ private:
 	DeltaSize currentDeltaSpeed[vr::k_unMaxTrackedDeviceCount];
 
 	protocol::AlignmentSpeedParams alignmentSpeedParams;
+
+	// Finger-smoothing config + its dedicated mutex. Single-writer (IPC
+	// thread, on user UI input — rare) / many-reader (skeletal hook detour,
+	// ~340 Hz/hand). Default-constructed to {master_enabled=false,
+	// smoothness=0, finger_mask=0, _reserved=0} so the detour fast-paths to
+	// passthrough until the overlay has sent a real config.
+	mutable std::mutex                fingerCfgMutex;
+	protocol::FingerSmoothingConfig   fingerCfg{};
 
 	// Look up an existing fallback slot by system name (linear scan + memcmp).
 	// Returns nullptr if no slot is currently occupied with that name.

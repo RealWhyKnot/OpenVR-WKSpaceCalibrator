@@ -97,7 +97,15 @@ namespace protocol
 	// velocity / acceleration / poseTimeOffset by (1 - smoothness/100) instead of
 	// zeroing them when the bool was true. smoothness=100 reproduces the old freeze
 	// behaviour; smoothness=0 leaves the pose untouched (off).
-	const uint32_t Version = 8;
+	// v9 (2026-05-02): adds RequestSetFingerSmoothing + FingerSmoothingConfig union
+	// member. Driver-side hook on IVRDriverInputInternal::UpdateSkeletonComponent
+	// applies per-bone slerp smoothing to Index Knuckles bone arrays before they
+	// reach OpenVR consumers (proven 2026-05-02 in VRChat). Default OFF; the union
+	// and Request sizeof are unchanged because the new struct is much smaller than
+	// SetDeviceTransform — the bump is to force a paired overlay+driver reinstall
+	// so the user sees a clean handshake error instead of a silently-ignored new
+	// request type if they upgrade only one half.
+	const uint32_t Version = 9;
 
 	// Maximum length of a tracking-system-name string (e.g., "lighthouse", "oculus",
 	// "Pimax Crystal HMD"). 32 bytes is more than enough for known systems and keeps
@@ -111,7 +119,11 @@ namespace protocol
 		RequestSetDeviceTransform,
 		RequestSetAlignmentSpeedParams,
 		RequestDebugOffset,
-		RequestSetTrackingSystemFallback
+		RequestSetTrackingSystemFallback,
+		// v9 (2026-05-02): finger-smoothing config push. Driver caches the
+		// payload behind a small mutex; the IVRDriverInputInternal hook reads
+		// it on every UpdateSkeletonComponent call (~340 Hz/hand).
+		RequestSetFingerSmoothing,
 	};
 
 	enum ResponseType
@@ -211,6 +223,52 @@ namespace protocol
 			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(true), updateScale(true), translation(translation), rotation(rotation), scale(scale), lerp(false), quash(false), target_system{}, predictionSmoothness(0), recalibrateOnMovement(false) { }
 	};
 
+	// Per-finger enable mask layout for FingerSmoothingConfig::finger_mask.
+	// Bit (LSB-first):
+	//   0  left thumb     5  right thumb
+	//   1  left index     6  right index
+	//   2  left middle    7  right middle
+	//   3  left ring      8  right ring
+	//   4  left pinky     9  right pinky
+	// All 10 bits set = every finger smoothed (the typical opt-in case). Setting
+	// a bit to 0 makes that finger pass through raw, useful when one finger's
+	// smoothing produces an artifact and the user wants to isolate it without
+	// disabling the whole feature.
+	static const uint16_t kAllFingersMask = 0x03FF;
+
+	// POD payload for RequestSetFingerSmoothing. Plain values + flag so the
+	// struct is trivially memcpy-safe across the pipe with no marshalling.
+	// Default-constructed instance encodes "feature off" (master_enabled = false)
+	// — passthrough behaviour. The hook detour does zero work in that state, so
+	// shipping with this struct in the union has zero performance cost when the
+	// feature is unused.
+	struct FingerSmoothingConfig
+	{
+		// Master kill-switch. When false the IVRDriverInputInternal::
+		// UpdateSkeletonComponent detour forwards bone arrays untouched —
+		// no per-bone slerp, no state lookup. Default false (opt-in).
+		bool     master_enabled;
+
+		// Smoothing strength on a 0..100 scale. 0 = pass-through (alpha=1.0,
+		// each frame snaps to the incoming bones). 100 = heavy smoothing
+		// (alpha clamped near 0, bones lag behind incoming significantly).
+		// Linearly mapped to slerp factor by alpha = 1.0 - (smoothness/100)*0.95
+		// so 100 still has a tiny per-frame nudge (alpha=0.05) — never fully
+		// freezes a finger.
+		uint8_t  smoothness;
+
+		// Per-finger enable bits (see kAllFingersMask above). Disabled fingers
+		// pass through unsmoothed. Bones outside the 5 finger chains
+		// (root, wrist, aux markers) always pass through.
+		uint16_t finger_mask;
+
+		// 1 byte of trailing padding here on x64 to round to the natural
+		// alignment of the struct. Explicit name so a future reader doesn't
+		// mistake it for a meaningful flag — left zero by the overlay; the
+		// driver MUST NOT read it.
+		uint8_t  _reserved;
+	};
+
 	// Per-tracking-system fallback transform. Applied to any device whose tracking
 	// system matches `system_name` and that doesn't currently have an active per-ID
 	// transform. Lets newly connected trackers inherit the calibrated offset
@@ -242,6 +300,12 @@ namespace protocol
 			SetDeviceTransform setDeviceTransform;
 			AlignmentSpeedParams setAlignmentSpeedParams;
 			SetTrackingSystemFallback setTrackingSystemFallback;
+			// v9: finger smoothing. FingerSmoothingConfig is much smaller than
+			// SetDeviceTransform so this addition does not grow the union and
+			// therefore does not change sizeof(Request). The Version bump
+			// is purely to force paired install — the wire layout is otherwise
+			// backwards-compatible.
+			FingerSmoothingConfig setFingerSmoothing;
 		};
 
 		Request() : type(RequestInvalid), setAlignmentSpeedParams({}) { }

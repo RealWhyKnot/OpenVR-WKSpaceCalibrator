@@ -57,6 +57,7 @@ static void DrawTipPanel(ImVec2 panelSize);
 void CCal_BasicInfo();
 void CCal_DrawSettings();
 void CCal_DrawPredictionSuppression();
+void CCal_DrawFingerSmoothing();
 static void OneShot_DrawSettings();
 
 static bool runningInOverlay;
@@ -167,6 +168,10 @@ void BuildMainWindow(bool runningInOverlay_)
 				}
 				if (ImGui::BeginTabItem("Prediction")) {
 					CCal_DrawPredictionSuppression();
+					ImGui::EndTabItem();
+				}
+				if (ImGui::BeginTabItem("Fingers")) {
+					CCal_DrawFingerSmoothing();
 					ImGui::EndTabItem();
 				}
 				if (ImGui::BeginTabItem("Logs")) {
@@ -563,6 +568,11 @@ void BuildContinuousCalDisplay() {
 
 		if (ImGui::BeginTabItem("Prediction")) {
 			CCal_DrawPredictionSuppression();
+			ImGui::EndTabItem();
+		}
+
+		if (ImGui::BeginTabItem("Fingers")) {
+			CCal_DrawFingerSmoothing();
 			ImGui::EndTabItem();
 		}
 
@@ -2677,5 +2687,146 @@ void TextWithWidth(const char *label, const char *text, float width)
 	ImGui::BeginChild(label, ImVec2(width, ImGui::GetTextLineHeightWithSpacing()));
 	ImGui::Text(text);
 	ImGui::EndChild();
+}
+
+// =============================================================================
+// Finger Smoothing tab — Index Knuckles per-bone slerp smoothing.
+//
+// The driver hooks IVRDriverInputInternal::UpdateSkeletonComponent (a private
+// Valve interface, reachable via GetGenericInterface; layout recovered by
+// parsing the public IVRDriverInput pimpl thunks at install time -- see
+// SkeletalHookInjector.cpp). On every UpdateSkeleton call for a recognised
+// /skeleton/hand/{left,right} component, each bone is slerp'd toward the
+// incoming pose by a factor derived from the smoothness slider. Per-finger
+// disable bits let the user isolate one finger if its smoothing produces an
+// artifact without disabling the whole feature.
+//
+// Default-OFF and skip-if-default-on-save: a user who never opens this tab
+// sees byte-identical profile JSON and zero behaviour change.
+// =============================================================================
+// Non-static so Calibration.cpp's InitCalibrator() (and any future caller)
+// can push the current persisted config without going through the slider
+// handler. Forward-declared in Calibration.cpp.
+void SendFingerSmoothingConfig(CalibrationContext &ctx)
+{
+	if (!Driver.IsConnected()) return;
+	protocol::Request req(protocol::RequestSetFingerSmoothing);
+	req.setFingerSmoothing.master_enabled = ctx.fingerSmoothingEnabled;
+	int s = ctx.fingerSmoothingStrength;
+	if (s < 0) s = 0;
+	if (s > 100) s = 100;
+	req.setFingerSmoothing.smoothness = (uint8_t)s;
+	req.setFingerSmoothing.finger_mask = ctx.fingerSmoothingMask;
+	req.setFingerSmoothing._reserved = 0;
+	try {
+		Driver.SendBlocking(req);
+	} catch (const std::exception &e) {
+		std::cerr << "[FingerSmoothing] IPC send failed: " << e.what() << std::endl;
+	}
+}
+
+void CCal_DrawFingerSmoothing()
+{
+	auto &ctx = CalCtx;
+
+	ImGui::Text("Finger smoothing");
+	ImGui::TextDisabled("(Index Knuckles only — smooths per-frame finger bone updates before VRChat sees them.)");
+	ImGui::Spacing();
+
+	bool dirty = false;
+
+	bool master = ctx.fingerSmoothingEnabled;
+	if (ImGui::Checkbox("Enable finger smoothing", &master)) {
+		ctx.fingerSmoothingEnabled = master;
+		dirty = true;
+	}
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip(
+			"Master kill switch. When off, the driver passes Knuckles bone\n"
+			"arrays through untouched -- exactly the same behaviour as a build\n"
+			"without the finger-smoothing feature compiled in.");
+	}
+
+	ImGui::Spacing();
+	ImGui::BeginDisabled(!ctx.fingerSmoothingEnabled);
+
+	int strength = ctx.fingerSmoothingStrength;
+	if (ImGui::SliderInt("Strength##fingers", &strength, 0, 100, "%d%%")) {
+		if (strength < 0) strength = 0;
+		if (strength > 100) strength = 100;
+		ctx.fingerSmoothingStrength = strength;
+		dirty = true;
+	}
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip(
+			"0   = no smoothing (each frame snaps to incoming bones).\n"
+			"50  = moderate (good starting point).\n"
+			"100 = heavy lag (slerp factor 0.05 per frame). Never fully freezes.\n"
+			"Drag the slider live and feel the change immediately in-game.");
+	}
+
+	ImGui::Spacing();
+	ImGui::Text("Per-finger toggles (uncheck to bypass that finger only)");
+	ImGui::TextDisabled("Useful for isolating a finger whose smoothing produces an artifact.");
+
+	const char *fingerLabels[5] = { "Thumb", "Index", "Middle", "Ring", "Pinky" };
+	const char *handLabels[2]   = { "Left", "Right" };
+
+	if (ImGui::BeginTable("fingers_grid", 6, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_BordersInnerV)) {
+		ImGui::TableSetupColumn("Hand");
+		for (int f = 0; f < 5; ++f) ImGui::TableSetupColumn(fingerLabels[f]);
+		ImGui::TableHeadersRow();
+
+		for (int hand = 0; hand < 2; ++hand) {
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn();
+			ImGui::Text("%s", handLabels[hand]);
+			for (int finger = 0; finger < 5; ++finger) {
+				int bit = hand * 5 + finger;
+				ImGui::TableNextColumn();
+				bool enabled = ((ctx.fingerSmoothingMask >> bit) & 1) != 0;
+				ImGui::PushID(bit);
+				if (ImGui::Checkbox("##fingerbit", &enabled)) {
+					if (enabled) ctx.fingerSmoothingMask |= (uint16_t)(1u << bit);
+					else         ctx.fingerSmoothingMask &= (uint16_t)~(1u << bit);
+					dirty = true;
+				}
+				ImGui::PopID();
+			}
+		}
+		ImGui::EndTable();
+	}
+
+	ImGui::Spacing();
+	if (ImGui::Button("Enable all fingers")) {
+		if (ctx.fingerSmoothingMask != protocol::kAllFingersMask) {
+			ctx.fingerSmoothingMask = protocol::kAllFingersMask;
+			dirty = true;
+		}
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Disable all fingers")) {
+		if (ctx.fingerSmoothingMask != 0) {
+			ctx.fingerSmoothingMask = 0;
+			dirty = true;
+		}
+	}
+
+	ImGui::EndDisabled();
+
+	ImGui::Spacing();
+	ImGui::Separator();
+	if (Driver.IsConnected()) {
+		ImGui::TextColored(ImVec4(0.20f, 0.80f, 0.30f, 1.0f),
+			"Driver connected -- changes apply live as you drag the slider.");
+	} else {
+		ImGui::TextColored(ImVec4(0.85f, 0.30f, 0.25f, 1.0f),
+			"Driver not connected. Settings will save locally and apply once SteamVR is running.");
+	}
+
+	if (dirty) {
+		SaveProfile(ctx);
+		SendFingerSmoothingConfig(ctx);
+	}
 }
 

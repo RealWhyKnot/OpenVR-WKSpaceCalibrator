@@ -293,6 +293,23 @@ struct CalibrationContext
 	// map contains a non-zero value, because suppressing them corrupts either
 	// the user's view or the calibration math.
 	std::unordered_map<std::string, int> trackerSmoothness;
+
+	// Finger smoothing for Index Knuckles. Driver hooks the per-frame bone
+	// arrays via IVRDriverInputInternal::UpdateSkeletonComponent and slerps
+	// each bone toward the incoming pose with the configured strength.
+	// Default-OFF so a user who only cares about calibration sees zero
+	// behaviour change. Settings persist across profile clears (they're a
+	// preference, not calibration data tied to a tracker serial).
+	//
+	// fingerSmoothingEnabled: master kill-switch (false = passthrough).
+	// fingerSmoothingStrength: 0..100. 0 = no smoothing; 100 = max
+	//   (slerp factor 0.05, never fully freezes). Linear in between.
+	// fingerSmoothingMask: per-finger enable bits, see protocol::kAllFingersMask.
+	//   Defaults to all 10 fingers enabled.
+	bool     fingerSmoothingEnabled  = false;
+	int      fingerSmoothingStrength = 50;
+	uint16_t fingerSmoothingMask     = 0x03FF;
+
 	// Set by the periodic external-tool detector. Read by the UI (warning
 	// banner). Third-party tools fight our suppression; we don't try to
 	// interop -- we just tell the user to stop the external tool.
