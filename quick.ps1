@@ -15,10 +15,30 @@ param(
     # first. Without -Install, quick.ps1 just builds.
     [switch]$Install,
 
+    # Full deploy: closes Steam (which holds the driver DLL locked while
+    # running), copies the driver DLL into <SteamVR>/drivers, hot-swaps the
+    # overlay (implies -Install), disables the legacy 01fingersmoothing
+    # driver folder if present (its hooks would collide with SC's now that
+    # SC owns the IVRDriverInputInternal hook), then relaunches Steam.
+    # Only needed when iterating on driver-side changes; pure overlay edits
+    # use -Install instead. Self-elevates for the admin operations.
+    [switch]$DeployDriver,
+
     # Where the install lives. Override only if you've installed somewhere
     # non-default (custom NSIS install path, etc.).
-    [string]$InstallPath = "C:\Program Files\SpaceCalibrator"
+    [string]$InstallPath = "C:\Program Files\SpaceCalibrator",
+
+    # Where Steam lives. Required for -DeployDriver so we can locate the
+    # SteamVR drivers folder + the steam.exe to graceful-shutdown / relaunch.
+    [string]$SteamPath = "C:\Program Files (x86)\Steam"
 )
+
+# -DeployDriver implies -Install: keeping overlay and driver out of sync would
+# fail the protocol::Version handshake on the next overlay launch, which is a
+# worse experience than the small extra cost of swapping the overlay too.
+if ($DeployDriver -and -not $Install) {
+    $Install = $true
+}
 
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
@@ -54,8 +74,59 @@ if (-not $Install) {
     Write-Host "  & '$Overlay'" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "Or build + hot-swap into your installed copy in one step:" -ForegroundColor DarkGray
-    Write-Host "  ./quick.ps1 -Install" -ForegroundColor DarkGray
+    Write-Host "  ./quick.ps1 -Install            (overlay only; SteamVR can stay running)" -ForegroundColor DarkGray
+    Write-Host "  ./quick.ps1 -DeployDriver       (overlay + driver; closes Steam, restarts it)" -ForegroundColor DarkGray
     return
+}
+
+# --- DeployDriver pre-flight: close Steam so the driver DLL isn't locked --
+# Steam's driver scanner enumerates SteamVR/drivers/* on startup and holds
+# the manifests + DLLs until Steam itself exits. Closing only SteamVR isn't
+# enough (real-world bite from 2026-05-01: copy succeeded but the OS
+# silently kept the old DLL mapped because steam.exe still had a handle).
+# Documented in reference_install_procedure.md.
+$DriverDll        = Join-Path $PSScriptRoot "bin/driver_01spacecalibrator/bin/win64/driver_01spacecalibrator.dll"
+$SteamExe         = Join-Path $SteamPath "steam.exe"
+$SteamDriversDir  = Join-Path $SteamPath "steamapps/common/SteamVR/drivers"
+$DestDriverDll    = Join-Path $SteamDriversDir "01spacecalibrator/bin/win64/driver_01spacecalibrator.dll"
+$LegacyFsManifest = Join-Path $SteamDriversDir "01fingersmoothing/driver.vrdrivermanifest"
+
+if ($DeployDriver) {
+    if (-not (Test-Path $DriverDll)) {
+        throw "Driver DLL not found at '$DriverDll'. Did the build produce a driver target?"
+    }
+    if (-not (Test-Path $SteamExe)) {
+        throw "Steam not found at '$SteamExe'. Pass -SteamPath '<your Steam dir>' if installed elsewhere."
+    }
+    if (-not (Test-Path $SteamDriversDir)) {
+        throw "SteamVR drivers folder not found at '$SteamDriversDir'. Is SteamVR installed?"
+    }
+
+    $steamRunning = @(Get-Process -Name steam -ErrorAction SilentlyContinue).Count -gt 0
+    if ($steamRunning) {
+        Write-Host ""
+        Write-Host "Sending Steam graceful shutdown..." -ForegroundColor Green
+        & $SteamExe -shutdown | Out-Null
+        # Steam's IPC shutdown is asynchronous: we get an immediate return,
+        # then steam.exe walks its child-process graveyard (VRChat, vrserver,
+        # vrmonitor, etc.) and exits. Real-world wait observed: 2-10s with
+        # SteamVR + a game open. 30s ceiling is generous; force-kill below.
+        $deadline = (Get-Date).AddSeconds(30)
+        while ((Get-Process -Name steam -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 500
+        }
+        if (Get-Process -Name steam -ErrorAction SilentlyContinue) {
+            Write-Host "Steam still up after 30s; force-killing Steam + SteamVR processes..." -ForegroundColor Yellow
+            Stop-Process -Name steam,steamwebhelper,vrserver,vrmonitor,vrwebhelper,vrcompositor,vrstartup -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+        }
+        Write-Host "Steam closed." -ForegroundColor Green
+    } else {
+        Write-Host "Steam not running; skipping shutdown." -ForegroundColor DarkGray
+        # Defensive: if Steam was killed but a SteamVR helper lingered, kill
+        # it now. Their handles on the driver DLL would still block the copy.
+        Stop-Process -Name vrserver,vrmonitor,vrwebhelper,vrcompositor,vrstartup -Force -ErrorAction SilentlyContinue
+    }
 }
 
 # --- Hot-swap install -----------------------------------------------------
@@ -67,6 +138,10 @@ if (-not $Install) {
 # a UAC-elevated PowerShell. Iterating in a non-admin terminal is the
 # common case; making the user spawn an admin shell every time would
 # defeat the "quick" in quick.ps1.
+#
+# When -DeployDriver is on, the elevated block also copies the driver DLL
+# and disables the legacy 01fingersmoothing driver (predecessor to the SC
+# integration; its IVRDriverInputInternal hook would collide with ours).
 
 if (-not (Test-Path $InstallPath)) {
     throw "Install path '$InstallPath' doesn't exist. Either install via the NSIS installer first, or pass -InstallPath '<your path>'."
@@ -89,6 +164,21 @@ $copyCmds = $RuntimeFiles | ForEach-Object {
 $wasRunning = @(Get-Process -Name SpaceCalibrator -ErrorAction SilentlyContinue).Count -gt 0
 $installedExe = Join-Path $InstallPath "SpaceCalibrator.exe"
 
+# Extra steps for -DeployDriver: also baked into the elevated block so
+# everything that needs admin happens in a single UAC prompt. Driver DLL
+# copy goes into <SteamVR>/drivers/01spacecalibrator/bin/win64/. The
+# legacy FingerSmoothing manifest gets renamed (not deleted) so a future
+# rollback is just rename-it-back. Skips both steps cleanly when their
+# prerequisites are missing -- a fresh box without the legacy driver
+# folder is fine.
+$extraCmds = @()
+if ($DeployDriver) {
+    $extraCmds += "Copy-Item -Force -Path '$DriverDll' -Destination '$DestDriverDll'"
+    $extraCmds += "Write-Host 'Copied driver DLL to $DestDriverDll'"
+    $disabledManifest = "$LegacyFsManifest.disabled-by-quick-deploydriver"
+    $extraCmds += "if (Test-Path '$LegacyFsManifest') { Move-Item -Force -Path '$LegacyFsManifest' -Destination '$disabledManifest'; Write-Host 'Disabled legacy 01fingersmoothing driver (renamed manifest).' }"
+}
+
 # Icon-cache refresh runs after the copy. ie4uinit's -show command tells
 # Windows to re-read icon resources for known shortcuts; combined with the
 # fresh EXE's last-write-time, the taskbar's pinned-shortcut icon updates
@@ -97,6 +187,7 @@ $elevatedScript = @"
 Stop-Process -Name SpaceCalibrator -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 500
 $($copyCmds -join "`n")
+$($extraCmds -join "`n")
 Write-Host 'Files copied. Refreshing icon cache...'
 & ie4uinit.exe -show 2>&1 | Out-Null
 Write-Host 'Done. Window will close in 2 seconds.'
@@ -111,13 +202,28 @@ if ($wasRunning) {
 Write-Host "Approve the UAC prompt when it appears." -ForegroundColor DarkGray
 Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile","-Command",$elevatedScript -Wait
 
-# Re-launch the freshly-installed copy if one was running before the swap.
-# Launched unelevated so it inherits the user's normal token (matches what
-# Start-menu / pinned-shortcut launches do). Working directory is the install
-# dir so the manifest path / icon load resolve relative to the install.
-if ($wasRunning -and (Test-Path $installedExe)) {
-    Write-Host "Re-launching $installedExe ..." -ForegroundColor DarkGray
-    Start-Process -FilePath $installedExe -WorkingDirectory $InstallPath
+# Auto-relaunch DISABLED 2026-05-03 after a user report that tracking
+# consistently broke when the script re-launched the overlay, but worked
+# fine when the same EXE was launched from Start menu / pinned shortcut.
+#
+# Same exe, same driver, same loaded profile — only difference is the
+# launcher. Hypothesis: parent process tree / session context affects how
+# SteamVR's overlay registration handshakes the new SC instance. A
+# Start-menu launch comes from explorer.exe; the script's Start-Process
+# inherits the PowerShell -> CI/agent -> ... ancestry, which may produce
+# subtly different IPC behaviour with vrserver. Without a confirmed root
+# cause, the safest action is to not auto-launch and tell the user to do
+# it themselves the way they know works.
+#
+# If you ever want this back, the place to look first is whether
+# `Start-Process explorer.exe -ArgumentList $installedExe` (which makes
+# explorer.exe the spawning parent, mimicking a double-click) reproduces
+# the broken-tracking symptom or not.
+if (-not $DeployDriver -and $wasRunning -and (Test-Path $installedExe)) {
+    Write-Host ""
+    Write-Host "WAS running before the swap, but auto-relaunch is disabled." -ForegroundColor Yellow
+    Write-Host "Launch manually from Start menu / pinned shortcut to avoid the" -ForegroundColor Yellow
+    Write-Host "tracking-breakage that script-launched instances exhibit." -ForegroundColor Yellow
 }
 
 # Sanity-check from the unelevated side: do the install-dir timestamps now
@@ -135,4 +241,27 @@ if (Test-Path $installedExe) {
         Write-Host "  build:     $buildTime"
         Write-Host "  installed: $installedTime"
     }
+}
+
+# Driver-deploy: same timestamp sanity check on the destination DLL, then
+# relaunch Steam (which kicks off SteamVR + auto-launches our overlay if it
+# is registered).
+if ($DeployDriver) {
+    if (Test-Path $DestDriverDll) {
+        $driverBuildTime     = (Get-Item $DriverDll).LastWriteTime
+        $driverInstalledTime = (Get-Item $DestDriverDll).LastWriteTime
+        if ($driverInstalledTime -ge $driverBuildTime.AddSeconds(-2)) {
+            Write-Host "Driver DLL timestamps match build." -ForegroundColor Green
+        } else {
+            Write-Host "WARNING: installed driver DLL older than the build. UAC cancelled, or DLL still locked?" -ForegroundColor Yellow
+            Write-Host "  build:     $driverBuildTime"
+            Write-Host "  installed: $driverInstalledTime"
+        }
+    } else {
+        Write-Host "WARNING: driver DLL not present at $DestDriverDll after install. Check the elevated output." -ForegroundColor Yellow
+    }
+
+    Write-Host ""
+    Write-Host "Relaunching Steam..." -ForegroundColor Green
+    Start-Process -FilePath $SteamExe
 }
