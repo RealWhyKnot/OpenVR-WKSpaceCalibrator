@@ -29,6 +29,7 @@ add_executable(spacecal_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_configuration.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_wedge_detector.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_stall_decisions.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_geometry_shift_detector.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/stubs.cpp
     ${CMAKE_SOURCE_DIR}/src/overlay/CalibrationCalc.cpp
     ${CMAKE_SOURCE_DIR}/src/overlay/Configuration.cpp

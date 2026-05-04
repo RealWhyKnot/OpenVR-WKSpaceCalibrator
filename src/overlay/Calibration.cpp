@@ -6,6 +6,7 @@
 #include "CalibrationCalc.h"
 #include "VRState.h"
 #include "WedgeDetector.h"   // ShouldFireRuntimeWedgeRecovery, kMaxPlausibleCalibrationMagnitudeCm
+#include "GeometryShiftDetector.h"  // IsCurrentErrorSpike, ShouldFireGeometryShiftRecovery
 #include "Wizard.h"          // spacecal::wizard::IsActive — gate the runtime wedge detector
                              // off while the user is mid-setup so it can't disrupt them.
 
@@ -2123,12 +2124,12 @@ void CalibrationTick(double time)
 				std::sort(tail.begin(), tail.end());
 				double median = tail[tail.size() / 2];
 				double current = errSeries[N - 1].second;
-				if (median > 1e-9 && current > 5.0 * median) {
+				if (spacecal::geometry_shift::IsCurrentErrorSpike(current, median)) {
 					s_consecutiveBadTicks++;
 				} else {
 					s_consecutiveBadTicks = 0;
 				}
-				if (s_consecutiveBadTicks >= 3) {
+				if (spacecal::geometry_shift::ShouldFireGeometryShiftRecovery(s_consecutiveBadTicks)) {
 					CalCtx.Log("Tracking geometry shifted — restarting calibration\n");
 					calibration.Clear();
 					ctx.state = CalibrationState::ContinuousStandby;
