@@ -46,9 +46,27 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext *pDriver
 void ServerTrackedDeviceProvider::Cleanup()
 {
 	TRACE("ServerTrackedDeviceProvider::Cleanup()");
+
+	// Order matters. The previous order (server.Stop -> shmem.Close ->
+	// DisableHooks -> VR_CLEANUP) had a fatal race: DisableHooks removes
+	// the MinHook patches but does NOT wait for in-flight detours to
+	// return. SteamVR's pose-update detours fire ~kHz across all tracked
+	// devices, the skeletal detour at ~340Hz/hand, so on every driver
+	// unload there's a window where a detour body is still executing
+	// inside our DLL while we tear down state below it -- and after
+	// Cleanup returns SteamVR unmaps the DLL with that thread mid-call.
+	//
+	// New order:
+	//   1. DisableHooks first -- removes patches AND drains in-flight
+	//      detour callers before returning. After it returns no thread
+	//      is executing inside any of our hook bodies.
+	//   2. server.Stop -- joins the IPC worker thread (its own internal
+	//      drain).
+	//   3. shmem.Close -- safe now because no detour can read it.
+	//   4. VR_CLEANUP_SERVER_DRIVER_CONTEXT -- finalize.
+	DisableHooks();
 	server.Stop();
 	shmem.Close();
-	DisableHooks();
 	VR_CLEANUP_SERVER_DRIVER_CONTEXT();
 }
 
