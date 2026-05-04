@@ -398,6 +398,29 @@ TEST(ConfigurationTest, NormalMagnitudeProfileIsNotCleared) {
 }
 
 // ---------------------------------------------------------------------------
+// Regression guard for the registry-read underflow bug fixed 2026-05-04.
+// RegGetValueA can return size==0 for an empty/malformed REG_SZ; the original
+// code did `str.resize(size - 1)` which underflowed to 0xFFFFFFFF and threw
+// std::bad_alloc, crashing the overlay before ParseProfile could run. Pinned
+// behavior: size==0 input maps to size==0 output (caller treats as "no
+// profile"); positive input maps to input-1 (strip the null terminator).
+// ---------------------------------------------------------------------------
+#ifdef _WIN32
+TEST(ConfigurationTest, Regression_StripRegistryNullTerminator_HandlesZero) {
+    EXPECT_EQ(StripRegistryNullTerminator(0), 0u)
+        << "size==0 must NOT underflow — caller short-circuits to empty string";
+}
+
+TEST(ConfigurationTest, Regression_StripRegistryNullTerminator_StripsOne) {
+    EXPECT_EQ(StripRegistryNullTerminator(1), 0u)
+        << "size==1 (just a null byte) maps to empty string";
+    EXPECT_EQ(StripRegistryNullTerminator(2), 1u);
+    EXPECT_EQ(StripRegistryNullTerminator(10), 9u);
+    EXPECT_EQ(StripRegistryNullTerminator(0xFFFF), 0xFFFEu);
+}
+#endif
+
+// ---------------------------------------------------------------------------
 // Save always stamps the current schema_version. Future reads (on the same
 // or later builds) need that key present; without it, even today's load
 // path treats the profile as v0 and runs the migration steps redundantly.

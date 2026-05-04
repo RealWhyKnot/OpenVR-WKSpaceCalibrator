@@ -767,12 +767,32 @@ static void LogRegistryResult(LSTATUS result)
 
 static const char *RegistryKey = "Software\\OpenVR-SpaceCalibrator";
 
+// Strip the trailing null terminator that RegGetValueA reports as part of
+// the byte count for REG_SZ. Pure for testability — see
+// tests/test_configuration.cpp::ReadRegistryKey_StripNullTerminator_*.
+//
+// The reported `size` may legitimately be 0 if the registry value exists
+// but is empty (or in a malformed/tampered state). Without this guard,
+// the original code did `str.resize(size - 1)` which underflowed to
+// (DWORD)0xFFFFFFFF and the resize threw std::bad_alloc, propagating up
+// through LoadProfile and crashing the overlay before ParseProfile could
+// even run. Returns 0 on size==0 (caller treats as "no profile, bootstrap
+// fresh"); otherwise returns size-1 (drop the null).
+size_t StripRegistryNullTerminator(DWORD reportedSize) {
+	return reportedSize > 0 ? (size_t)reportedSize - 1 : 0;
+}
+
 static std::string ReadRegistryKey()
 {
 	DWORD size = 0;
 	auto result = RegGetValueA(HKEY_CURRENT_USER_LOCAL_SETTINGS, RegistryKey, "Config", RRF_RT_REG_SZ, 0, 0, &size);
 	if (result != ERROR_SUCCESS) {
 		LogRegistryResult(result);
+		return "";
+	}
+
+	// Empty / malformed registry value: short-circuit before allocating.
+	if (size == 0) {
 		return "";
 	}
 
@@ -784,8 +804,10 @@ static std::string ReadRegistryKey()
 		LogRegistryResult(result);
 		return "";
 	}
-	
-	str.resize(size - 1);
+
+	// `size` is re-populated by the data-fetch call. Use the helper so
+	// the truncation logic stays unit-testable.
+	str.resize(StripRegistryNullTerminator(size));
 	return str;
 }
 
