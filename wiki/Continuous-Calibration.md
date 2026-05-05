@@ -19,13 +19,13 @@ Accept thresholds:
 
 Used when motion data is available. Solves rotation and translation separately:
 
-- **Rotation.** Differential rotation axes between sample pairs are extracted, then a 2D Kabsch SVD is run on the (x, z) components — only yaw is recovered, since the assumption is that gravity has been calibrated by the underlying tracking systems and the only freedom is rotation around the up axis.
+- **Rotation.** Differential rotation axes between sample pairs are extracted, then a 2D Kabsch SVD is run on the (x, z) components -- only yaw is recovered, since the assumption is that gravity has been calibrated by the underlying tracking systems and the only freedom is rotation around the up axis.
 - **Translation.** Stacked least-squares with `BDCSVD`, weighted by `√min(refRotMag, targetRotMag)` per sample pair. Pairs with tiny rotation contribute mostly noise to the translation solve and so are weighted down.
 
 Accept thresholds:
 - RMS error must beat the prior calibration's RMS by `1.5x` (`continuousCalibrationThreshold`).
 - Quaternion-PCA axis variance (`ComputeAxisVariance`) must be ≥ `AxisVarianceThreshold = 0.001`. Otherwise the motion didn't span enough rotation axes.
-- 2D Kabsch min/max singular value ratio must be ≥ `0.05`. Otherwise the motion was effectively single-axis (e.g. user moved on Y only). Below this, rotation is held — the prior solution stays in effect.
+- 2D Kabsch min/max singular value ratio must be ≥ `0.05`. Otherwise the motion was effectively single-axis (e.g. user moved on Y only). Below this, rotation is held -- the prior solution stays in effect.
 
 ## State machine
 
@@ -50,7 +50,7 @@ None ── trigger ──> Begin ── samples valid ──> Continuous
 
 When you power on a tracker mid-session, two things make sure it picks up the existing offset within ~1 second:
 
-1. **Overlay-side scan.** `ScanAndApplyProfile` runs every 1 s in any state where a profile is loaded — including active continuous mode. It enumerates every OpenVR device, matches their tracking-system name against the calibrated `targetTrackingSystem`, and sends per-ID `SetDeviceTransform` IPC messages. Per-ID payloads are deduped (by hashing the message) so this isn't a thousand redundant writes per second; it only sends when something changed.
+1. **Overlay-side scan.** `ScanAndApplyProfile` runs every 1 s in any state where a profile is loaded -- including active continuous mode. It enumerates every OpenVR device, matches their tracking-system name against the calibrated `targetTrackingSystem`, and sends per-ID `SetDeviceTransform` IPC messages. Per-ID payloads are deduped (by hashing the message) so this isn't a thousand redundant writes per second; it only sends when something changed.
 
 2. **Driver-side fallback.** The overlay also sends a per-tracking-system fallback transform (`SetTrackingSystemFallback`). The driver maintains a `systemFallbacks[name]` map; when a pose update arrives for a device whose per-ID slot is disabled, the driver looks the device's tracking system up in the map and applies the fallback through the same blend state. This covers the gap between "device sends first pose update" and "next overlay scan tick".
 
@@ -60,30 +60,58 @@ Together: a fresh tracker gets the offset on its very first pose update via the 
 
 The biggest historical pain point with continuous calibration is getting stuck in a bad fixpoint: the calibration is wrong but the 1.5x threshold gate prevents better estimates from displacing it. Four watchdogs keep this from being terminal:
 
-- **Stuck-loop watchdog.** `ComputeIncremental` counts consecutive rejections. After 50 rejections (~25 s with a full sample buffer), `m_isValid` is forced false, the buffer is cleared, and the overlay drops to `ContinuousStandby` to re-acquire from scratch. Logs `"Continuous calibration appears stuck — recollecting samples"`.
-- **Sudden-tracking-shift watchdog.** Lives in the overlay (not `CalibrationCalc`) and reacts much faster than the 50-rejection counter. Watches the recent `error_currentCal` time series: when the latest error sample is more than 5× the 30-tick rolling median for 3 consecutive ticks, the calibration is almost certainly invalid even if `CalibrationCalc` still considers it valid. Forces `Clear()` and demotes to `ContinuousStandby`. This catches catastrophic geometry shifts (a lighthouse gets bumped, a tracker goes through a portal, the user resets a slime cluster) where the 50-rejection window is too slow. Logs `"Tracking geometry shifted — restarting calibration"`.
-- **HMD-stall watchdog.** If the HMD's reported position doesn't change for 30 consecutive ticks (~1.5 s), the sample buffer is purged and continuous mode demotes to standby. Without this, samples from before the stall would mix with samples from after, producing a permanently-skewed calibration.
+- **Stuck-loop watchdog.** `ComputeIncremental` counts consecutive rejections. After 50 rejections (~25 s with a full sample buffer), `m_isValid` is forced false, the buffer is cleared, and the overlay drops to `ContinuousStandby` to re-acquire from scratch. Logs `"Continuous calibration appears stuck -- recollecting samples"`.
+- **Sudden-tracking-shift watchdog.** Lives in the overlay (not `CalibrationCalc`) and reacts much faster than the 50-rejection counter. Watches the recent `error_currentCal` time series: when the latest error sample is more than 5× the 30-tick rolling median for 3 consecutive ticks, the calibration is almost certainly invalid even if `CalibrationCalc` still considers it valid. Forces `Clear()` and demotes to `ContinuousStandby`. This catches catastrophic geometry shifts (a lighthouse gets bumped, a tracker goes through a portal, the user resets a slime cluster) where the 50-rejection window is too slow. Logs `"Tracking geometry shifted -- restarting calibration"`.
+- **HMD-stall watchdog REMOVED 2026-05-04.** Previously, after 30 consecutive stalled HMD ticks, the buffer was purged and continuous mode demoted to standby. This caused 7-9 cm Z-shifts on every HMD off/on cycle: the buffer-purge re-anchored against a stale `refToTargetPose` constraint after Quest's small internal re-anchor on HMD-on, and the cycle compounded across many off/on events. Reverted to upstream's just-return behavior in commit `8e5e111`. When HMD pose stops updating, the tick is just skipped; the rolling sample buffer ages stale data out naturally on recovery.
 - **Driver-side state hygiene.** Every `SetDeviceTransform` resets the driver's `lastPoll` timestamp and snaps `transform = targetTransform` on enable transitions. Without this, a tracker that went offline for 10 seconds would on its next pose update compute a saturated lerp factor and visibly jump to the new offset instead of smoothly arriving at it. The matching cleanup on disable transitions prevents stale `targetTransform` values from bleeding into the next enable.
 
 ## Output smoothing
 
 Accepted continuous updates pass through a single-step EMA on the published transform: `α = 0.3` for the new estimate, `0.7` retained from the prior. This is skipped for first calibration (snap to the only thing we have) and for rapid-correct (the relative-pose path is supposed to snap to a known-better solution, not be smoothed). The 1.5x rejection gate already filters most bad updates; the EMA softens the per-tick wobble that survives the gate.
 
-## Recalibrate on movement
+## Motion-gate floor (smart by correction size)
 
-The driver-side `BlendTransform` advances the active offset toward the latest target every tick. By default that progress is gated by per-frame motion magnitude — a stationary device gets ~zero blend progress; a moving one gets the full time-based rate. The result: a user lying still won't see calibration drift even when the math is updating; the catch-up happens during their next natural motion, hidden by the movement instead of looking like phantom body shifts.
+The driver-side `BlendTransform` advances the active offset toward
+the latest target every tick. With `recalibrateOnMovement` enabled
+(default), the lerp rate is now `max(motionGate, regimeFloor)`
+where regimeFloor depends on the pending correction's magnitude:
 
-Threshold: each pose update computes the position delta and rotation delta from the previous frame. The "fully-moving" thresholds are 5 mm position OR ~1° rotation per frame. Below those, the gate is proportional (small jitter still produces small blend progress so the offset doesn't get permanently stuck); at or above, the gate is 1 (full convergence rate).
+| Regime | Trigger | Still-floor | Behaviour |
+|---|---|---|---|
+| Tiny | <= 1 mm pos OR <= 0.05 deg rot | 10% | drifts slowly, won't fight noise |
+| Normal | in between | 50% | steady mm-scale convergence |
+| Large | > 5 mm pos OR > 0.5 deg rot | 90% | effectively snaps |
 
-Toggleable from the Continuous Calibration → Settings panel ("Recalibrate on movement"). Default **on**. Turning it off restores the pre-feature behaviour: the lerp advances purely on elapsed time, regardless of whether the device is moving — useful if you specifically want instantaneous corrections while stationary, or if the motion gate is stalling convergence on a tracker with unusually low natural motion.
+When you're moving, motionGate dominates (~1, full speed). When
+you're still, regimeFloor sets the floor based on how big the
+correction is. Sub-mm corrections drift slowly; recovery-event
+cm-scale corrections snap.
+
+The previous behavior (pre-2026-05-04) multiplied bare motionGate
+into the lerp -- when motionGate was zero, the lerp froze. The
+"wave a controller to unfreeze" symptom this fixes.
+
+Auto-recovery events (Quest re-localization etc.) skip the blend
+entirely on the very next ScanAndApplyProfile cycle via the
+one-shot `g_snapNextProfileApply` flag. The recovery's brand-new
+cal lands as a discontinuity rather than getting smoothed through
+the wedged steady-state.
+
+Toggleable from Continuous Calibration -> Settings ("Recalibrate
+on movement"). Default on. Off restores upstream's pure
+elapsed-time blend regardless of motion.
+
+Implementation: `spacecal::motiongate::ClassifyCorrection` +
+`StillFloor` in [src/common/MotionGate.h](../src/common/MotionGate.h).
+Pure constexpr; pinned by 14 unit tests + 6 static_asserts.
 
 ## Inter-system latency offset (manual)
 
-Different tracking systems have different end-to-end latencies — a wireless tracker (Slime IMU, Oculus Quest tracker) typically lags a Lighthouse reference by 10–30 ms. During quick motion this lag manifests as motion-correlated calibration error: every collected sample pair is taken at slightly different effective times, and the difference shows up as a position error proportional to velocity.
+Different tracking systems have different end-to-end latencies -- a wireless tracker (Slime IMU, Oculus Quest tracker) typically lags a Lighthouse reference by 10-30 ms. During quick motion this lag manifests as motion-correlated calibration error: every collected sample pair is taken at slightly different effective times, and the difference shows up as a position error proportional to velocity.
 
-The **Target latency offset (ms)** slider in the Continuous Calibration panel exposes a per-target-system offset (range ±100 ms, default 0). When non-zero, `CollectSample` shifts the reference pose along its velocity vector at the time of sample collection so it lines up with the target's effective timestamp. The shift is computed as `(targetSampleTime - referenceSampleTime) - targetLatencyOffsetMs / 1000` seconds (positive means extrapolate the reference forward) and applied via `pose.vecPosition += vecVelocity * dt` plus an axis-angle rotation built from `vecAngularVelocity` — both in the driver-local frame, so `qWorldFromDriverRotation` handles the projection into world space downstream. If the velocity data isn't finite or is implausibly large (NaN, infinite, > 50 m/s, > 50 rad/s — typically a momentary tracking glitch), the un-extrapolated reference pose is used for that tick rather than throwing.
+The **Target latency offset (ms)** slider in the Continuous Calibration panel exposes a per-target-system offset (range ±100 ms, default 0). When non-zero, `CollectSample` shifts the reference pose along its velocity vector at the time of sample collection so it lines up with the target's effective timestamp. The shift is computed as `(targetSampleTime - referenceSampleTime) - targetLatencyOffsetMs / 1000` seconds (positive means extrapolate the reference forward) and applied via `pose.vecPosition += vecVelocity * dt` plus an axis-angle rotation built from `vecAngularVelocity` -- both in the driver-local frame, so `qWorldFromDriverRotation` handles the projection into world space downstream. If the velocity data isn't finite or is implausibly large (NaN, infinite, > 50 m/s, > 50 rad/s -- typically a momentary tracking glitch), the un-extrapolated reference pose is used for that tick rather than throwing.
 
-Default 0 produces bit-for-bit identical behaviour to before the feature existed — the conditional that gates the extrapolation never triggers.
+Default 0 produces bit-for-bit identical behaviour to before the feature existed -- the conditional that gates the extrapolation never triggers.
 
 ## Inter-system latency offset (auto)
 

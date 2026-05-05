@@ -4,6 +4,10 @@
 - [Architecture](Architecture)
 - [Continuous Calibration](Continuous-Calibration)
 
+**Recovery + smoothing**
+- [Auto Recovery](Auto-Recovery)
+- [Finger Smoothing](Finger-Smoothing)
+
 **Reference**
 - [Settings Reference](Settings-Reference)
 - [Multi-Ecosystem](Multi-Ecosystem)

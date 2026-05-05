@@ -8,11 +8,11 @@ This page documents what the updater does, what it deliberately does *not* do, a
 
 On startup the overlay quietly hits `https://api.github.com/repos/RealWhyKnot/OpenVR-SpaceCalibrator/releases/latest` on a worker thread. If the response's `tag_name` parses as a `YYYY.M.D.N` stamp greater than the local build's stamp, a banner appears at the top of the main window:
 
-> **Update available: v2026.5.1.0 (current: 2026.4.28.1)** — [Update now] [Release notes] [Dismiss]
+> **Update available: v2026.5.1.0 (current: 2026.4.28.1)** -- [Update now] [Release notes] [Dismiss]
 
-- **Update now** — downloads the asset whose name ends in `.exe` (the NSIS installer), SHA-256 verifies it, strips Mark-of-the-Web, and `ShellExecute`s it. The overlay then exits so the installer's file-replacement step doesn't fight running-EXE locks.
-- **Release notes** — opens the release's GitHub page in the user's default browser.
-- **Dismiss** — hides the banner for the rest of the session. Reappears on next launch.
+- **Update now** -- downloads the asset whose name ends in `.exe` (the NSIS installer), SHA-256 verifies it, strips Mark-of-the-Web, and `ShellExecute`s it. The overlay then exits so the installer's file-replacement step doesn't fight running-EXE locks.
+- **Release notes** -- opens the release's GitHub page in the user's default browser.
+- **Dismiss** -- hides the banner for the rest of the session. Reappears on next launch.
 
 If the download fails (network, hash mismatch, SmartScreen block), the banner shows the error and offers **Retry** / **Open release page** / **Dismiss**.
 
@@ -20,18 +20,18 @@ If the download fails (network, hash mismatch, SmartScreen block), the banner sh
 
 - **Channel gate.** Only release builds (built with `build.ps1 -Version <tag>`) check for updates. Dev builds (`build.ps1` with no `-Version` arg) get `SPACECAL_BUILD_CHANNEL=dev` baked into `BuildStamp.h` and skip the check entirely. Otherwise local iteration would constantly nag the developer to "downgrade" to the published release.
 - **SHA-256 verification.** Every modern GitHub Release returns a `digest: "sha256:<hex>"` field on each asset; the updater extracts it, hashes the downloaded file via BCrypt, and aborts if they disagree. The hash check fires *before* MOTW stripping and `ShellExecute`, so a corrupt or tampered installer can't run.
-- **No SHA → warning.** Older releases (pre-`digest`) still install, but the banner shows a yellow "no SHA published — verify manually" line so the user knows verification was skipped.
+- **No SHA → warning.** Older releases (pre-`digest`) still install, but the banner shows a yellow "no SHA published -- verify manually" line so the user knows verification was skipped.
 - **Path-traversal sanitization.** The asset filename comes from GitHub but the updater rejects any name containing `\`, `/`, `:`, or `\0` before opening the local file. We control the source repo, but defense-in-depth costs nothing.
-- **Process exit ordering.** The "Done" branch sets `glfwSetWindowShouldClose(...)` *after* `ShellExecute` returns success. The installer is responsible for waiting for the overlay to exit before overwriting `SpaceCalibrator.exe` — NSIS does this automatically via the `RequestExecutionLevel admin` manifest.
+- **Process exit ordering.** The "Done" branch sets `glfwSetWindowShouldClose(...)` *after* `ShellExecute` returns success. The installer is responsible for waiting for the overlay to exit before overwriting `SpaceCalibrator.exe` -- NSIS does this automatically via the `RequestExecutionLevel admin` manifest.
 
 ## What it deliberately does *not* do
 
 - **No silent install.** The user always confirms via UAC; we never pass `/S` to the installer.
 - **No background download.** Bytes only move when the user clicks **Update now**. The version check itself is a single ~5 KB JSON GET on startup.
 - **No telemetry.** The GitHub API request goes only to `api.github.com`. No usage data is sent.
-- **No update for dev builds.** See above — channel-gated by `BuildStamp.h`.
+- **No update for dev builds.** See above -- channel-gated by `BuildStamp.h`.
 - **No auto-elevation prompt loop.** If `ShellExecute("open", ...)` fails (typical SmartScreen block), the updater retries once with verb `runas` and stops. Two clicks max.
-- **No rollback.** If the installer fails after the overlay has exited, the user has whatever state the installer left behind. The previous installation should still work — NSIS uninstalls the old version before installing the new one.
+- **No rollback.** If the installer fails after the overlay has exited, the user has whatever state the installer left behind. The previous installation should still work -- NSIS uninstalls the old version before installing the new one.
 
 ## How the version comparison works
 
@@ -43,7 +43,7 @@ v2026.5.1.0
 v2026.5.1.0-AB12   # dev suffix is ignored for comparison
 ```
 
-It produces a 4-tuple `(year, month, day, iteration)` and compares lexicographically. Anything that doesn't parse to four numbers separated by dots is rejected — `IsRemoteNewer` returns `false`, and the banner stays hidden. So a malformed remote tag is a no-op, not a misleading "you're up to date" claim.
+It produces a 4-tuple `(year, month, day, iteration)` and compares lexicographically. Anything that doesn't parse to four numbers separated by dots is rejected -- `IsRemoteNewer` returns `false`, and the banner stays hidden. So a malformed remote tag is a no-op, not a misleading "you're up to date" claim.
 
 The local stamp comes from `SPACECAL_BUILD_STAMP` in `src/overlay/BuildStamp.h`, generated by `build.ps1` at every build. The header is gitignored; CMake writes a placeholder (`0.0.0.0-DEV`) when the file is missing so direct `cmake` invocations (CI, IDE configures) don't fail on the include.
 
@@ -65,12 +65,12 @@ The updater itself needs no manual involvement at release time. The release pipe
 
 GitHub auto-populates the `digest` field on each uploaded asset. Once the release is published, every running release-build copy of Space Calibrator notices on next launch.
 
-If you want to force a one-off check without restarting the overlay, there's no UI for it — close and re-open. The check is cheap enough on startup that adding a "Check now" button hasn't been worth the screen real estate.
+If you want to force a one-off check without restarting the overlay, there's no UI for it -- close and re-open. The check is cheap enough on startup that adding a "Check now" button hasn't been worth the screen real estate.
 
 ## Files involved
 
-- `src/overlay/UpdateChecker.h/.cpp` — async GitHub API client. `CheckAsync()` kicks a worker thread; `GetState()` and `GetResult()` are thread-safe snapshots.
-- `src/overlay/Updater.h/.cpp` — async download / verify / launch state machine. `DownloadAndLaunch(url, sha, name)` kicks a worker thread; `GetProgress()` is the per-frame snapshot the UI reads.
-- `src/overlay/UserInterface.cpp` `DrawUpdateBanner()` — the banner. Skips entirely on dev builds. Polls both above objects every frame; takes no locks unless the worker has actually published a new state.
-- `src/overlay/BuildStamp.h` — generated by `build.ps1` (gitignored). `SPACECAL_BUILD_STAMP` and `SPACECAL_BUILD_CHANNEL` defines.
-- `src/overlay/CMakeLists.txt` — links `winhttp.lib` and `bcrypt.lib`; generates the placeholder `BuildStamp.h` when missing.
+- `src/overlay/UpdateChecker.h/.cpp` -- async GitHub API client. `CheckAsync()` kicks a worker thread; `GetState()` and `GetResult()` are thread-safe snapshots.
+- `src/overlay/Updater.h/.cpp` -- async download / verify / launch state machine. `DownloadAndLaunch(url, sha, name)` kicks a worker thread; `GetProgress()` is the per-frame snapshot the UI reads.
+- `src/overlay/UserInterface.cpp` `DrawUpdateBanner()` -- the banner. Skips entirely on dev builds. Polls both above objects every frame; takes no locks unless the worker has actually published a new state.
+- `src/overlay/BuildStamp.h` -- generated by `build.ps1` (gitignored). `SPACECAL_BUILD_STAMP` and `SPACECAL_BUILD_CHANNEL` defines.
+- `src/overlay/CMakeLists.txt` -- links `winhttp.lib` and `bcrypt.lib`; generates the placeholder `BuildStamp.h` when missing.
