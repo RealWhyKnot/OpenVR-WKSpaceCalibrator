@@ -2706,42 +2706,13 @@ void CalibrationTick(double time)
 
 		CalCtx.Log("Finished calibration, profile saved\n");
 
-		// Runtime wedge detector. If continuous-cal converges to (or hunts
-		// into) a calibration whose translation magnitude exceeds the
-		// plausibility bound for at least kRuntimeWedgeDebounceSec
-		// uninterrupted seconds, treat it as a runtime wedge: silently wipe
-		// + restart cold. Mirrors the load-time guard in ParseProfile and
-		// the Quest re-localization auto-recovery in TickHmdRelocalizationDetector.
-		//
-		// Gates (per 2026-05-04 plan greenlight):
-		//   - Continuous state only (NOT ContinuousStandby — its calibratedTranslation
-		//     is stale and not actionable).
-		//   - Wizard not active — don't disrupt setup.
-		//
-		// Per feedback_no_button_to_recover_broken_tracking.md (memory):
-		// no banner, no prompt, silent log line is the only user-facing
-		// trace. The user might never know it fired; their trackers come
-		// back to truth via the post-restart re-convergence.
-		if (CalCtx.state == CalibrationState::Continuous
-			&& !spacecal::wizard::IsActive()) {
-			const double magCm = ctx.calibratedTranslation.norm();
-			const double now = glfwGetTime();
-			if (spacecal::wedge::ShouldFireRuntimeWedgeRecovery(
-					magCm, now, g_runtimeWedgeSince)) {
-				char rtbuf[256];
-				snprintf(rtbuf, sizeof rtbuf,
-					"wedged_profile_guard_cleared: runtime magnitude=%.3f cm sustained=%.1fs threshold=%.3f cm; clearing + restarting continuous-cal cold",
-					magCm, spacecal::wedge::kRuntimeWedgeDebounceSec,
-					spacecal::wedge::kMaxPlausibleCalibrationMagnitudeCm);
-				Metrics::WriteLogAnnotation(rtbuf);
-				// nullptr message — silent recovery per the user's
-				// "user notices nothing" directive. The post-restart
-				// reconvergence is visible to the user as their tracker
-				// positions briefly snap to native then walk into the
-				// new fit; no overlay text.
-				RecoverFromWedgedCalibration(/*userFacingMessage=*/nullptr);
-			}
-		}
+		// Runtime wedge detector REMOVED 2026-05-05 — fired in a 3-fire
+		// reset loop on the user's Quest+Lighthouse setup whose legitimate
+		// continuous-cal convergence values (~265-295 cm) sit above any
+		// fixed magnitude threshold we picked. See
+		// project_wedge_guard_removed_2026-05-05.md (memory). Quest
+		// re-localization auto-recovery in TickHmdRelocalizationDetector
+		// (HMD-jump signal, not magnitude) is unchanged and still active.
 	} else {
 		CalCtx.Log("Calibration failed.\n");
 	}
