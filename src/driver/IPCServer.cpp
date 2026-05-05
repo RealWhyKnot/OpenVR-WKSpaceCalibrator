@@ -135,6 +135,14 @@ void IPCServer::RunThread(IPCServer *_this)
 				if (!success)
 				{
 					LOG("GetOverlappedResult failed in RunThread. Error: %d", GetLastError());
+					// Close the still-pending pipe handle before bailing —
+					// neither CreatePipeInstance (which would have taken
+					// ownership) nor any other path runs on this branch.
+					// Without this, the kernel handle leaks every time the
+					// overlapped wait fails (rare in practice but the leak
+					// is cumulative across the driver's entire load lifetime).
+					CloseHandle(nextPipe);
+					nextPipe = INVALID_HANDLE_VALUE;
 					return;
 				}
 			}

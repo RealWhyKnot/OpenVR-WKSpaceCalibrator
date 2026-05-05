@@ -61,16 +61,22 @@ static Hook<void(*)(vr::IVRServerDriverHost *, uint32_t, const vr::DriverPose_t 
 static void DetourTrackedDevicePoseUpdated005(vr::IVRServerDriverHost *_this, uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
 	InterfaceHooks::DetourScope _scope;
-	//TRACE("ServerTrackedDeviceProvider::DetourTrackedDevicePoseUpdated(%d)", unWhichDevice);
-	const vr::DriverPose_t* pNewPose = &newPose; // somehow newPose is nullptr sometimes??????
-	if (pNewPose && unPoseStructSize == sizeof(vr::DriverPose_t)) {
+	// Inherited from upstream: only run our HandleDevicePoseUpdated when the
+	// pose struct size matches the version we expect. If a future SteamVR
+	// runtime extends the struct, fall through to the original without
+	// touching the pose ourselves rather than risk reading off the end of
+	// a smaller-than-expected struct or writing past the end of a larger
+	// one. The cleanup vs upstream: dropped a `pNewPose = &newPose; if
+	// (pNewPose ...)` indirection that was a dead null-check — references
+	// can't be null in well-formed code, and address-of-reference does
+	// nothing the size check doesn't already.
+	if (unPoseStructSize == sizeof(vr::DriverPose_t)) {
 		auto pose = newPose;
 		if (Driver->HandleDevicePoseUpdated(unWhichDevice, pose))
 		{
 			TrackedDevicePoseUpdatedHook005.originalFunc(_this, unWhichDevice, pose, unPoseStructSize);
 		}
 	} else {
-		// i think this would also cause issues
 		TrackedDevicePoseUpdatedHook005.originalFunc(_this, unWhichDevice, newPose, unPoseStructSize);
 	}
 }
@@ -78,9 +84,9 @@ static void DetourTrackedDevicePoseUpdated005(vr::IVRServerDriverHost *_this, ui
 static void DetourTrackedDevicePoseUpdated006(vr::IVRServerDriverHost *_this, uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
 	InterfaceHooks::DetourScope _scope;
-	//TRACE("ServerTrackedDeviceProvider::DetourTrackedDevicePoseUpdated(%d)", unWhichDevice);
-	const vr::DriverPose_t* pNewPose = &newPose; // somehow newPose is nullptr sometimes??????
-	if (pNewPose && unPoseStructSize == sizeof(vr::DriverPose_t)) {
+	// See DetourTrackedDevicePoseUpdated005 above for the rationale —
+	// same cleanup applied here.
+	if (unPoseStructSize == sizeof(vr::DriverPose_t)) {
 		auto pose = newPose;
 		if (Driver->HandleDevicePoseUpdated(unWhichDevice, pose))
 		{
@@ -88,7 +94,6 @@ static void DetourTrackedDevicePoseUpdated006(vr::IVRServerDriverHost *_this, ui
 		}
 	}
 	else {
-		// i think this would also cause issues in steamvr tho
 		TrackedDevicePoseUpdatedHook006.originalFunc(_this, unWhichDevice, newPose, unPoseStructSize);
 	}
 }
