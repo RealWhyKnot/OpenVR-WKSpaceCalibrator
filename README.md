@@ -1,73 +1,137 @@
-# OpenVR-SpaceCalibrator (WhyKnot fork)
+# OpenVR-SpaceCalibrator
 
-This is the **WhyKnot fork** of [hyblocker's OpenVR-SpaceCalibrator](https://github.com/hyblocker/OpenVR-SpaceCalibrator), which itself forks [pushrax's original](https://github.com/pushrax/OpenVR-SpaceCalibrator). Space Calibrator aligns the coordinate frames of two SteamVR tracking systems — for example a Quest headset with SlimeVR body trackers, or a Lighthouse HMD with Quest controllers — so devices from one system show up in the right place in the other system's playspace.
+Run two VR tracking systems together, get their coordinate frames aligned.
+Quest HMD + Vive trackers. Pico HMD + Lighthouse base stations. Knuckles
+controllers on a Quest setup. Mix the gear, calibrate once, all the
+trackers show up where they actually are.
 
-This fork focuses on **getting users running quickly** (a first-run wizard does the setup for you) and on **calibration robustness** — auto-detecting rigid attachments, surviving stuck-state edge cases, and supporting setups with three or more tracking systems running in parallel.
+This is the WhyKnot fork. Built on
+[hyblocker/OpenVR-SpaceCalibrator](https://github.com/hyblocker/OpenVR-SpaceCalibrator)
+which is built on [pushrax's original](https://github.com/pushrax/OpenVR-SpaceCalibrator).
 
-## What's different in this fork
+## What it does
 
-- **First-run setup wizard.** New installs auto-launch a wizard that detects your tracking systems and walks you through aligning each non-HMD system to your headset. No more "what do I click first" — the wizard does the device picking, kicks off continuous calibration, and saves a working profile. See the [Setup Wizard](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Setup-Wizard) wiki page.
-- **Multi-ecosystem calibration.** Three or more tracking systems are aligned in parallel — each non-HMD system runs its own continuous calibration loop against the HMD as the shared reference. Useful when you have, e.g., a Quest HMD + SlimeVR body trackers + a Vive lighthouse tracker glued to your headset. See [Multi-Ecosystem](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Multi-Ecosystem).
-- **Auto-detect rigid attachment.** "Lock relative position" is a tristate (Off / On / **Auto**). Auto observes the relative pose between reference and target devices and locks automatically when it sees them moving together (tracker glued to HMD, taped to a controller, etc.). Most users don't know whether their target is rigidly attached; the detector picks the right answer from observation.
-- **Auto-adopt for newly connected trackers.** A tracker powered on after calibration completes inherits the offset on its very first pose update via per-tracking-system fallback transforms.
-- **Stuck-state watchdogs with healthy-skip.** A 50-rejection consecutive watchdog forces sample re-collection when the math is genuinely stuck — but it now skips firing when the prior calibration is already healthy (sub-10 mm error). Symptom this fixes: previously, sub-mm calibrations would hit the rejection counter every ~25 s and the watchdog would clear a perfectly good calibration.
-- **Recalibrate on movement.** The driver-side blend toward a new offset only advances while you're physically moving. Stationary users (lying down, sitting still) don't see "phantom body shifts" when the math updates; the catch-up happens during natural motion. See [Settings Reference](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Settings-Reference#recalibrate-on-movement).
-- **Per-tracker prediction smoothness slider (0-100).** Replaces the old binary on/off. Trade response for jitter on a per-device basis; HMD and active calibration ref/target are hard-blocked at 0 (suppressing them would corrupt either your view or the math). External smoothing tools like OVR-SmoothTracking are detected and the user is warned to stop them — we don't try to interop. See [Prediction Suppression](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Prediction-Suppression).
-- **AUTO calibration speed.** Picks Fast / Slow / Very Slow from observed jitter; the user no longer has to know what speed to pick.
-- **In-app updater.** Release builds notice new GitHub releases on launch and offer a one-click upgrade with SHA-256 verification before launching the installer. Dev builds skip the check. See [In-App Updater](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/In-App-Updater).
-- **Math improvements.** SO(3) Kabsch + Rodrigues yaw projection, IRLS with Cauchy weighting on translation, condition-ratio guards, rejection-floor at 5 mm so sub-mm convergence doesn't trip the watchdog, single-step EMA on the published transform.
-- **Settings persistence redesigned.** Profile JSON v3: skip-if-default save (settings that match the in-code defaults aren't written) means adding a new option no longer needs migration code. Schema versioning is reserved for the rare breaking change.
-- **Build pipeline.** A reproducible `build.ps1`, `quick.ps1` for fast inner-loop iteration, `deploy-test.ps1` for hot-swapping into the install directory, `.githooks/` for version stamping, fork CI workflows, and release-zip generation. Driver and overlay are version-stamped so a mismatched pair fails fast at handshake (current protocol: v8).
-- **Source-controlled wiki.** The wiki lives in `wiki/` in this repo and is mirrored to the GitHub wiki by CI, so documentation changes flow through code review like everything else.
+- Reads pose data from every connected SteamVR device.
+- Solves for the 6-DoF rigid transform between any two tracking systems.
+- Applies the offset inside SteamVR's driver layer, so trackers from
+  the secondary system show up in the right place to every VR app.
+- Re-solves continuously while you play, so small drift between the
+  systems doesn't accumulate over a long session.
 
-## Quick start (end users)
+Typical use: HMD on one system (Quest, Pico, Index), body trackers
+on another (Vive, SlimeVR via Lighthouse), and you want all of it
+in one playspace for VRChat / Resonite / iRacing / etc.
 
-1. Grab the latest installer from the [Releases page](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/releases) (`OpenVR-SpaceCalibrator-<version>-Setup.exe`). Or grab the drop-in zip if you'd rather install manually.
-2. Run the installer. It registers the SteamVR overlay and drops the driver into your SteamVR runtime's `drivers/` folder automatically.
-3. Start SteamVR. Open the Space Calibrator overlay from the dashboard.
-4. **The setup wizard launches the first time.** It detects your tracking systems and walks you through calibrating each one. ~30 seconds per non-HMD system; you click Start, move around naturally, click Done. That's it.
+## Get it
 
-If you'd rather configure things yourself, hit Skip on the wizard and the existing tabs are right there. The [Settings Reference](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Settings-Reference) wiki page explains every toggle in plain language.
+[Latest release](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/releases/latest)
+ships an installer (`OpenVR-SpaceCalibrator-<version>-Setup.exe`) and
+a portable zip. Installer registers the SteamVR overlay and drops the
+driver into the SteamVR `drivers/` folder. SteamVR must restart once
+after install for the driver to load.
+
+## What this fork adds on top of upstream
+
+- **Finger smoothing for Index Knuckles** on Quest setups. Hooks the
+  public `IVRDriverInput` vtable (slots 5/6) to slerp per-bone rotations
+  with 0..100 strength. Default OFF, opt-in via the Fingers tab.
+- **Auto-recovery when the HMD drops tracking.** Detects a 30+ cm jump
+  in HMD pose between consecutive ticks (Quest re-localization, sleep/wake,
+  USB reset), wipes the calibration, restarts continuous-cal cold so
+  trackers walk back to the right place over the next ~30 seconds. No
+  manual reset button.
+- **Smart motion-gate floor.** When you stand still, calibration drifts
+  toward truth at 10% rate for sub-mm noise corrections, 50% for normal
+  corrections, 90% (effectively snap) for cm-scale corrections from
+  recovery events. Old behavior froze the lerp at zero when you weren't
+  moving, forcing you to wave a controller before convergence resumed.
+- **First-run setup wizard.** Detects your tracking systems, walks you
+  through aligning each non-HMD system to your headset. Roughly 30 seconds
+  per system. Skip the wizard if you'd rather configure manually.
+- **Multi-ecosystem.** Three or more tracking systems in parallel, each
+  with its own continuous-calibration loop against the HMD as the shared
+  reference. Useful for Quest + SlimeVR + a Vive tracker on a prop.
+- **AUTO calibration speed.** Picks Fast / Slow / Very Slow from observed
+  jitter. You don't need to know what to set.
+- **Auto-detect rigid attachment.** When a tracker is glued/taped to the
+  HMD, locks the relative pose automatically; otherwise leaves it free.
+- **Per-tracker prediction smoothness slider** (0..100). HMD and active
+  cal devices are hard-blocked at 0 to keep the math honest.
+- **In-app updater.** Release builds notice new GitHub releases on launch
+  and offer a one-click upgrade with SHA-256 verification.
+- **92 unit tests + compile-time pins** on the math, profile schema,
+  state-machine transitions, and the recovery decision functions.
+
+## Quick start
+
+1. Grab the installer from
+   [Releases](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/releases),
+   run it. Restart SteamVR.
+2. Open Space Calibrator from the SteamVR dashboard. The setup wizard
+   pops up on first launch.
+3. Pick your reference tracking system (usually your HMD's). Pick the
+   target system (the one whose trackers are showing up wrong).
+4. Hit Start. Move around naturally for ~30 seconds. The wizard tells
+   you when it's done.
+5. Body trackers should now show up in the right place. If they drift
+   over time, leave continuous calibration on (the default) and they
+   correct themselves while you move.
+
+The Wiki has step-by-step screenshots:
+[Setup Wizard](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Setup-Wizard).
+
+## What it doesn't do
+
+- Doesn't fix bad room setup. If your Lighthouse base stations have line-of-sight
+  problems or your Quest guardian is drifting, calibration can only do so much.
+  It aligns two systems against each other; it doesn't fix the underlying tracking.
+- Doesn't pre-detect every wedge case. The math can converge to a self-consistent
+  fit that's physically wrong (rare on healthy hardware). If your trackers look
+  off after a long session, leave continuous calibration running -- it walks
+  back to truth on its own as you move. Sudden tracking jumps (HMD reset, big
+  controller bump) are caught by the auto-recovery detector without you doing
+  anything. There's no one-click rescue button mid-session by design: when
+  calibration is broken, your controllers are exactly the tool that's broken,
+  so any UI that requires aiming them is a trap.
+- Quest+Lighthouse is the most-tested combination. Pico, Varjo, and
+  WMR setups have been reported working but receive less testing.
+- Driver swaps need Steam fully closed (not just SteamVR). The installer
+  handles this for you; manual swaps via `quick.ps1 -DeployDriver` close
+  Steam automatically.
 
 ## Build from source
-
-See the [Building wiki page](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Building) for the full walkthrough (toolchain, MSVC version, signing). The short version, after cloning:
 
 ```
 git submodule update --init --recursive
 powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 
-The script handles version stamping and produces both the driver and overlay binaries plus a release zip.
+Full toolchain notes (MSVC, signing, version stamping) are in the
+[Building](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Building)
+wiki page.
 
-For inner-loop iteration:
-- `quick.ps1` — wraps `build.ps1 -SkipConfigure -SkipZip` for fast rebuilds.
-- `deploy-test.ps1` — builds, hot-swaps the EXE into your install dir, relaunches. Pass `-KillSteamVR` if a driver-DLL swap is needed (when the IPC protocol bumps).
+For inner-loop iteration: `quick.ps1 -Install` rebuilds and hot-swaps
+the overlay. `quick.ps1 -DeployDriver` does the full driver+overlay
+swap (closes Steam, copies the DLL, relaunches Steam).
 
 ## Documentation
 
-The wiki is the long-form reference; the README is just the front door.
+Full docs in the [Wiki](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki).
+Notable pages:
 
-- [Wiki home](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki) — landing page and orientation
-- [Setup Wizard](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Setup-Wizard) — what the first-run wizard does, when to re-run
-- [Settings Reference](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Settings-Reference) — plain-language explanation of every UI toggle
-- [Architecture](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Architecture) — how the overlay and driver fit together
-- [Continuous Calibration](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Continuous-Calibration) — the math, the watchdogs, the auto-adopt path
-- [Multi-Ecosystem](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Multi-Ecosystem) — calibrating 3+ tracking systems in parallel
-- [Prediction Suppression](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Prediction-Suppression) — per-tracker smoothness slider, hard-blocked devices, external-tool detection
-- [Driver Protocol](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Driver-Protocol) — IPC protocol versions and message types
-- [In-App Updater](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/In-App-Updater) — auto-update flow, threat model
-- [Building](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Building) — submodules, `build.ps1`, version stamping
-- [Troubleshooting](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Troubleshooting) — common failure modes and what to check
+- [Setup Wizard](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Setup-Wizard)
+- [Continuous Calibration](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Continuous-Calibration)
+- [Settings Reference](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Settings-Reference)
+- [Troubleshooting](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Troubleshooting)
+- [Architecture](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Architecture) (for contributors)
 
 ## Credits
 
-- **[pushrax](https://github.com/pushrax/OpenVR-SpaceCalibrator)** — original author of OpenVR-SpaceCalibrator, including the static calibration solver and SteamVR driver architecture this fork still rests on.
-- **[hyblocker](https://github.com/hyblocker/OpenVR-SpaceCalibrator)** — the fork this branch is based on; introduced continuous calibration and the modern UI.
-- **All upstream contributors** — see the commit history of both upstream repositories for the long list of people who shaped this codebase.
-
-This fork (WhyKnot) layers the first-run wizard, multi-ecosystem support, the v8 driver protocol, the math-robustness fixes, and the build/CI pipeline on top of that foundation.
+[pushrax](https://github.com/pushrax/OpenVR-SpaceCalibrator) wrote the
+original calibration solver and SteamVR driver. [hyblocker](https://github.com/hyblocker/OpenVR-SpaceCalibrator)
+added continuous calibration and the modern UI. This fork adds the
+items in the list above.
 
 ## License
 
-Same as upstream. See [LICENSE](LICENSE) for the full terms.
+Same as upstream. See [LICENSE](LICENSE).
