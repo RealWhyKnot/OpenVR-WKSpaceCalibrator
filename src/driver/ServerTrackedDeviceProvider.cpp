@@ -2,9 +2,14 @@
 #include "Logging.h"
 #include "InterfaceHookInjector.h"
 #include "IsometryTransform.h"
+#include "MotionGate.h"  // ClassifyCorrection / StillFloor — option 3 per user 2026-05-04
 
 #include <cstring>
 #include <random>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext *pDriverContext)
 {
@@ -175,6 +180,15 @@ double ServerTrackedDeviceProvider::GetTransformRate(DeltaSize delta) const {
  * moving one gets the full time-based rate. This hides calibration shifts in
  * the user's natural motion instead of producing visible "phantom drift" while
  * the user is still (a noticeable issue when lying down).
+ *
+ * 2026-05-04: per option 3 of feedback_calibration_blending_request.md, the
+ * gate is now max(motionGate, regimeFloor) where regimeFloor depends on the
+ * pending correction size (|targetTransform - transform|). This unfreezes
+ * the lerp when the user is still — small corrections drift slowly (10%
+ * floor), normal corrections at moderate speed (50%), and catastrophic
+ * corrections (post-stall, Quest re-localization) effectively snap (90%).
+ * Previously the lerp froze at 0 when the user wasn't moving and they had
+ * to wave a controller before convergence resumed.
  */
 void ServerTrackedDeviceProvider::BlendTransform(DeviceTransform& device, const IsoTransform &deviceWorldPose) const {
 	LARGE_INTEGER timestamp;
@@ -204,11 +218,30 @@ void ServerTrackedDeviceProvider::BlendTransform(DeviceTransform& device, const 
 			// natural motion produces gate=1 (full time-based rate).
 			constexpr double kPosFullScale = 0.005;   // 5 mm
 			constexpr double kRotFullScale = 0.0175;  // ~1 deg in radians
-			const double posDelta = (deviceWorldPose.translation - device.lastBlendWorldPos).norm();
-			const double rotDelta = deviceWorldPose.rotation.angularDistance(device.lastBlendWorldRot);
+			const double devPosDelta = (deviceWorldPose.translation - device.lastBlendWorldPos).norm();
+			const double devRotDelta = deviceWorldPose.rotation.angularDistance(device.lastBlendWorldRot);
 			const double motionGate = std::min(1.0,
-				std::max(posDelta / kPosFullScale, rotDelta / kRotFullScale));
-			lerp *= motionGate;
+				std::max(devPosDelta / kPosFullScale, devRotDelta / kRotFullScale));
+
+			// Correction magnitude — how far the active transform has to travel
+			// to reach the target. Distinct from the device-motion deltas above:
+			// motionGate asks "is the user moving?", regime asks "how big is the
+			// pending shift?". Convert to mm + degrees to match the thresholds
+			// in MotionGate.h.
+			const double correctionPosMm =
+				(device.targetTransform.translation - device.transform.translation).norm() * 1000.0;
+			const double correctionRotDeg =
+				device.targetTransform.rotation.angularDistance(device.transform.rotation) * 180.0 / M_PI;
+			const auto regime = spacecal::motiongate::ClassifyCorrection(
+				correctionPosMm, correctionRotDeg);
+			const double regimeFloor = spacecal::motiongate::StillFloor(regime);
+
+			// Effective gate: take whichever is higher. When moving, motionGate
+			// dominates (≈1); when still, regimeFloor sets the minimum so the
+			// lerp doesn't freeze at 0.
+			const double effectiveGate = std::max(motionGate, regimeFloor);
+			lerp *= effectiveGate;
+
 			device.lastBlendWorldPos = deviceWorldPose.translation;
 			device.lastBlendWorldRot = deviceWorldPose.rotation;
 		}

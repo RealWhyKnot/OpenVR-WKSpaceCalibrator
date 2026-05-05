@@ -7,6 +7,7 @@
 #include "VRState.h"
 #include "WedgeDetector.h"   // ShouldFireRuntimeWedgeRecovery, kMaxPlausibleCalibrationMagnitudeCm
 #include "GeometryShiftDetector.h"  // IsCurrentErrorSpike, ShouldFireGeometryShiftRecovery
+#include "MotionGate.h"      // ShouldBlendCycle — auto-recovery snap decision
 #include "Wizard.h"          // spacecal::wizard::IsActive — gate the runtime wedge detector
                              // off while the user is mid-setup so it can't disrupt them.
 
@@ -46,6 +47,22 @@ static void RecoverFromWedgedCalibration(const char* userFacingMessage);
 // File scope (not anonymous namespace) so CalibrationTick can read+write it
 // directly from earlier in the translation unit.
 static double g_runtimeWedgeSince = -1.0;
+
+// Auto-recovery snap flag (option-3 bundle, 2026-05-04). Set true by
+// RecoverFromWedgedCalibration so the next ScanAndApplyProfile cycle sends
+// every device transform with payload.lerp=false, which routes through the
+// driver's existing snap path in SetDeviceTransform (transform := target,
+// no blending). Without this, the post-recovery cal would be smoothly
+// interpolated through whatever wrong steady-state the driver had cached
+// — defeating the point of recovery.
+//
+// Rationale (per feedback_calibration_blending_request.md): blending is
+// for smooth steady-state convergence. Recovery events are catastrophic
+// state changes — smoothing them is wrong. Snap on the next tick, then
+// resume normal blending.
+//
+// Cleared by ScanAndApplyProfile after consuming. One-shot.
+static bool g_snapNextProfileApply = false;
 
 // AdditionalCalibration's special members live inline in the header now --
 // CalibrationCalc is complete at the include point, so the implicitly-defined
@@ -1723,6 +1740,16 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 	char* buffer = buffer_array.get();
 	ctx.enabled = ctx.validProfile;
 
+	// Auto-recovery snap (option-3 bundle, 2026-05-04). RecoverFromWedgedCalibration
+	// sets g_snapNextProfileApply=true so the very next profile-apply cycle sends
+	// every per-ID payload with lerp=false (driver snaps transform := target rather
+	// than smoothly interpolating). Fallback payloads have no lerp field so they
+	// can't snap directly — but in practice every device that needs the cal has a
+	// per-ID slot by the time recovery fires, so per-ID snap covers the user-visible
+	// case. Captured at the top of the function and consumed at the end so all
+	// per-ID sends in this cycle see the same value.
+	const bool snapThisCycle = g_snapNextProfileApply;
+
 	// Snapshot of which IDs got adopted this scan and what serial/model they had.
 	// Compared against g_lastAdoptedTrackers below to log new-adoption / disconnect events.
 	std::map<uint32_t, AdoptedTracker> currentAdopted;
@@ -1935,8 +1962,15 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		// During continuous calibration, lerp toward the smoothly-updating target so
 		// the active offset doesn't snap on every cycle. EXCEPT when this is a freshly
 		// adopted device — those need to snap into place rather than ramping in from
-		// identity, which would look like a slow drift to the user.
-		payload.lerp = (CalCtx.state == CalibrationState::Continuous) && !isFreshlyAdopted;
+		// identity, which would look like a slow drift to the user. ALSO except when
+		// auto-recovery just fired (snapThisCycle): the recovery's brand-new cal must
+		// land discontinuously, blending it would defeat the recovery.
+		// Decision routed through the pure helper so test_motion_gate.cpp pins
+		// the contract.
+		payload.lerp = spacecal::motiongate::ShouldBlendCycle(
+			/*inContinuousState=*/CalCtx.state == CalibrationState::Continuous,
+			/*isFreshlyAdopted=*/isFreshlyAdopted,
+			/*snapThisCycle=*/snapThisCycle);
 		payload.quash = CalCtx.state == CalibrationState::Continuous && id == CalCtx.targetID && CalCtx.quashTargetInContinuous;
 		SetTargetSystemField(payload, ctx.targetTrackingSystem);
 
@@ -2022,6 +2056,14 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		{
 			ApplyChaperoneBounds();
 		}
+	}
+
+	// Consume the one-shot auto-recovery snap flag — only after every per-ID
+	// payload in this cycle has been sent, so the snap reaches all devices.
+	// Subsequent cycles return to normal lerp behaviour.
+	if (snapThisCycle) {
+		g_snapNextProfileApply = false;
+		Metrics::WriteLogAnnotation("auto_recovery_snap_consumed: post-recovery profile sent with payload.lerp=false");
 	}
 }
 
@@ -2910,6 +2952,14 @@ static void RecoverFromWedgedCalibration(const char* userFacingMessage) {
 	CalCtx.hasAppliedCalibrationResult = false;
 	CalCtx.calibratedTranslation       = Eigen::Vector3d::Zero();
 	CalCtx.calibratedRotation          = Eigen::Vector3d::Zero();
+
+	// Snap the next ScanAndApplyProfile send (one-shot). The driver's
+	// SetDeviceTransform handler will see payload.lerp=false and assign
+	// transform := targetTransform directly, bypassing BlendTransform.
+	// Without this, the recovery's brand-new cal would be smoothly
+	// interpolated through the driver's stale cached transform — which
+	// defeats the point of recovery (we WANT a discontinuity here).
+	g_snapNextProfileApply = true;
 
 	StartContinuousCalibration();
 
