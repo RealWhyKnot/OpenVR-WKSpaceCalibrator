@@ -26,15 +26,33 @@ namespace spacecal::wedge {
 // Anything above this on load OR on a sustained runtime tick is treated as
 // the wedge case and silently cleared.
 //
-// Threshold rationale: 200 cm. The user's reported wedge measured 295 cm;
-// their healthy converged fit was 127 cm. 200 cm catches the wedge with
-// margin and clears any room-scale Quest+Lighthouse setup whose physical
-// origin separation falls in the typical 1.0–1.5 m band. Setups whose
-// origin separation legitimately exceeds 2 m would trip this on every load
-// — if that pattern shows up in the wild, raise this constant or move it
-// behind a setting. Don't tighten without checking
-// `feedback_dont_break_existing_calibrations.md`.
-constexpr double kMaxPlausibleCalibrationMagnitudeCm = 200.0;
+// Threshold rationale (2026-05-05 update): RAISED from 200 cm to 500 cm
+// after a reset-loop incident. The original 200 cm was based on a single
+// session log where the user's healthy converged fit was 127 cm. A later
+// session showed continuous-cal repeatedly converging to 265-295 cm —
+// legitimate values for that user's Quest+Lighthouse setup, where the
+// physical origin separation between the two tracking systems IS that
+// large. The 200 cm bound caused the runtime detector to fire on every
+// natural convergence, producing the user-visible "keeps resetting my
+// position over and over" reset loop (3 fires in 3 minutes, log
+// `spacecal_log.2026-05-05T03-17-26.txt`).
+//
+// 500 cm = 5 m: roughly the diagonal of a generous room-scale setup. A
+// truly wedged cal jumps far beyond this (the original triggering case
+// was 295 cm but that was on the SAME user's setup that now legitimately
+// hits 295 cm — so even the original "wedge" may have been mis-classified
+// noise). Raising the threshold here trades coverage of small wedges for
+// freedom from false positives. The watchdog (CalibrationCalc.cpp) and
+// the geometry-shift detector (Calibration.cpp:2098) still backstop
+// genuine catastrophic events through other signals.
+//
+// If a future user reports wedges in the 200-500 cm band that go
+// unrecovered, revisit — likely needs a per-setup configuration or a
+// disagreement-based detector (currentCal vs byRelPose), not a fixed
+// magnitude floor. Don't tighten without checking
+// `feedback_dont_break_existing_calibrations.md` AND
+// `spacecal_log.2026-05-05T03-17-26.txt`.
+constexpr double kMaxPlausibleCalibrationMagnitudeCm = 500.0;
 
 // Runtime debounce window (s). The runtime detector only fires after the
 // magnitude has stayed above the bound for this long uninterrupted —

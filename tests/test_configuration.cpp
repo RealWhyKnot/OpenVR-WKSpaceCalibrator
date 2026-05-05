@@ -1,4 +1,4 @@
-// Tests for the profile JSON load/save round-trip and the schema migration
+﻿// Tests for the profile JSON load/save round-trip and the schema migration
 // pipeline. The production code routes through Windows registry I/O (Load-
 // Profile / SaveProfile in Configuration.cpp), but the underlying parsing
 // and serialization is exposed via ParseProfile / WriteProfile, which take
@@ -223,179 +223,13 @@ TEST(ConfigurationTest, InCodeDefaultsArePinned) {
 }
 
 // ---------------------------------------------------------------------------
-// Wedged-profile guard: a saved cal whose translation magnitude exceeds the
-// plausibility bound (200 cm) loads as zeroed translation/rotation, so
-// continuous-cal next session starts cold instead of inheriting the wedge.
-// Mirrors the ParseProfile path described in
-// project_watchdog_wedged_cal_limitation.md (memory).
+// Wedge-guard tests removed 2026-05-05. The load-time wedge guard in
+// ParseProfile and the runtime detector in CalibrationTick are both
+// disabled in production — they were causing a reset loop on the user's
+// Quest+Lighthouse setup whose legitimate convergence values exceed any
+// fixed magnitude bound. See project_wedge_guard_removed_2026-05-05.md.
 // ---------------------------------------------------------------------------
-TEST(ConfigurationTest, WedgedProfileMagnitudeIsZeroedOnLoad) {
-    // Use the exact wedged values from the user's 2026-05-04 reproduction
-    // (spacecal_log.2026-05-04T17-14-50.txt): t=(-168, 215, -112) cm,
-    // magnitude ≈ 295 cm. Solidly above the 200 cm bound; the guard must
-    // zero translation+rotation. The rest of the profile (e.g. tracking-
-    // system names) must still load.
-    std::string wedgedJson = MakeMinimalProfile(/*schemaVersion=*/3);
-    // Replace the zero translation in the minimal payload with the wedged
-    // magnitude. Easier than building a custom profile from scratch.
-    auto pos = wedgedJson.find("\"x\":0.0,\"y\":0.0,\"z\":0.0");
-    ASSERT_NE(pos, std::string::npos);
-    wedgedJson.replace(pos, std::strlen("\"x\":0.0,\"y\":0.0,\"z\":0.0"),
-                       "\"x\":-168.0,\"y\":215.0,\"z\":-112.0");
 
-    CalibrationContext ctx;
-    std::stringstream io(wedgedJson);
-    ParseProfile(ctx, io);
-
-    EXPECT_DOUBLE_EQ(ctx.calibratedTranslation.x(), 0.0);
-    EXPECT_DOUBLE_EQ(ctx.calibratedTranslation.y(), 0.0);
-    EXPECT_DOUBLE_EQ(ctx.calibratedTranslation.z(), 0.0);
-    EXPECT_DOUBLE_EQ(ctx.calibratedRotation.x(), 0.0);
-    EXPECT_DOUBLE_EQ(ctx.calibratedRotation.y(), 0.0);
-    EXPECT_DOUBLE_EQ(ctx.calibratedRotation.z(), 0.0);
-    EXPECT_FALSE(ctx.relativePosCalibrated);
-    EXPECT_TRUE(ctx.validProfile)
-        << "Guard zeroes the cal but keeps the profile loaded -- the user's "
-           "settings (tracking-system names, calibration speed, etc.) should "
-           "survive so they don't have to reconfigure on top of recalibrating";
-    EXPECT_EQ(ctx.referenceTrackingSystem, "lighthouse");
-    EXPECT_EQ(ctx.targetTrackingSystem, "oculus");
-}
-
-// ---------------------------------------------------------------------------
-// Wedged-profile guard variant: just-over-threshold (201 cm). Verifies the
-// boundary is exclusive of equality on the safe side: anything strictly
-// greater than 200 cm gets cleared. A user whose legitimate setup magnitudes
-// land at 201+ cm would also trip this — that's why
-// kMaxPlausibleCalibrationMagnitudeCm is greenlit at 200 not lower.
-// ---------------------------------------------------------------------------
-TEST(ConfigurationTest, WedgedProfileJustOverThresholdIsCleared) {
-    // x=201 cm → magnitude=201 cm, which is > 200 cm bound.
-    std::string json = MakeMinimalProfile(/*schemaVersion=*/3);
-    auto pos = json.find("\"x\":0.0,\"y\":0.0,\"z\":0.0");
-    ASSERT_NE(pos, std::string::npos);
-    json.replace(pos, std::strlen("\"x\":0.0,\"y\":0.0,\"z\":0.0"),
-                 "\"x\":201.0,\"y\":0.0,\"z\":0.0");
-
-    CalibrationContext ctx;
-    std::stringstream io(json);
-    ParseProfile(ctx, io);
-
-    EXPECT_DOUBLE_EQ(ctx.calibratedTranslation.x(), 0.0)
-        << "201 cm magnitude must be cleared (strictly > 200 cm bound)";
-    EXPECT_DOUBLE_EQ(ctx.calibratedTranslation.y(), 0.0);
-    EXPECT_DOUBLE_EQ(ctx.calibratedTranslation.z(), 0.0);
-}
-
-// ---------------------------------------------------------------------------
-// Wedged-profile guard variant: just-under-threshold (199 cm). Verifies the
-// boundary doesn't accidentally fire on cals that are unusual but plausible.
-// Setups whose origin separation legitimately approaches 2 m (e.g. a Quest
-// origin at one corner of a large room with Lighthouse origin at the other)
-// must NOT be clobbered.
-// ---------------------------------------------------------------------------
-TEST(ConfigurationTest, WedgedProfileJustUnderThresholdIsKept) {
-    // x=199 cm → magnitude=199 cm, which is < 200 cm bound.
-    CalibrationContext src;
-    src.referenceTrackingSystem = "lighthouse";
-    src.targetTrackingSystem = "oculus";
-    src.calibratedTranslation = Eigen::Vector3d(199.0, 0.0, 0.0);
-    src.calibratedRotation = Eigen::Vector3d(0.0, 0.0, 0.0);
-    src.validProfile = true;
-
-    std::stringstream io;
-    WriteProfile(src, io);
-
-    CalibrationContext dst;
-    ParseProfile(dst, io);
-
-    EXPECT_DOUBLE_EQ(dst.calibratedTranslation.x(), 199.0)
-        << "199 cm magnitude is below the 200 cm bound and must round-trip "
-           "intact — large-room setups must keep their cals";
-}
-
-// ---------------------------------------------------------------------------
-// Wedged-profile guard variant: rotation alone is irrelevant. The guard
-// gates only on translation magnitude. A profile with extreme rotation
-// values (180°+ on every axis) but small translation must NOT be cleared —
-// rotation values are radians-or-degrees but the user's frame relationship
-// might genuinely require any orientation.
-// ---------------------------------------------------------------------------
-TEST(ConfigurationTest, WedgedProfileLargeRotationSmallTranslationIsKept) {
-    CalibrationContext src;
-    src.referenceTrackingSystem = "lighthouse";
-    src.targetTrackingSystem = "oculus";
-    src.calibratedTranslation = Eigen::Vector3d(50.0, 50.0, 50.0);  // ~87 cm magnitude
-    // Pretty much any rotation values are physically valid for a refToTarget
-    // frame relationship; pin that the guard doesn't second-guess them.
-    src.calibratedRotation = Eigen::Vector3d(180.0, -135.0, 90.0);
-    src.validProfile = true;
-
-    std::stringstream io;
-    WriteProfile(src, io);
-
-    CalibrationContext dst;
-    ParseProfile(dst, io);
-
-    EXPECT_DOUBLE_EQ(dst.calibratedTranslation.x(), 50.0);
-    EXPECT_DOUBLE_EQ(dst.calibratedRotation.x(), 180.0)
-        << "Guard must not gate on rotation magnitude — only translation";
-    EXPECT_DOUBLE_EQ(dst.calibratedRotation.y(), -135.0);
-    EXPECT_DOUBLE_EQ(dst.calibratedRotation.z(), 90.0);
-}
-
-// ---------------------------------------------------------------------------
-// Wedged-profile guard variant: extreme magnitude (registry-observed 254 cm
-// from the user's actual saved profile on 2026-05-04). Pinned to the exact
-// values read from HKCU at audit time so a future change can't silently
-// break the user's known reproduction.
-// ---------------------------------------------------------------------------
-TEST(ConfigurationTest, WedgedProfileFromUserReproductionIsCleared) {
-    // From `HKCU:\Software\Classes\Local Settings\Software\OpenVR-SpaceCalibrator`
-    // read 2026-05-04 during the HMD-on/off-drift diagnosis: t=(-251.6, -36.3, -4.6),
-    // magnitude≈254.2 cm. This is the cal that motivated the entire wedge guard.
-    std::string json = MakeMinimalProfile(/*schemaVersion=*/3);
-    auto pos = json.find("\"x\":0.0,\"y\":0.0,\"z\":0.0");
-    ASSERT_NE(pos, std::string::npos);
-    json.replace(pos, std::strlen("\"x\":0.0,\"y\":0.0,\"z\":0.0"),
-                 "\"x\":-251.55873114202993,\"y\":-36.317712345397368,\"z\":-4.6416934383008508");
-
-    CalibrationContext ctx;
-    std::stringstream io(json);
-    ParseProfile(ctx, io);
-
-    EXPECT_DOUBLE_EQ(ctx.calibratedTranslation.x(), 0.0)
-        << "The user's actual 2026-05-04 wedge values must be cleared on load";
-    EXPECT_DOUBLE_EQ(ctx.calibratedTranslation.y(), 0.0);
-    EXPECT_DOUBLE_EQ(ctx.calibratedTranslation.z(), 0.0);
-}
-
-// ---------------------------------------------------------------------------
-// Wedged-profile guard: a normal-magnitude cal (well under 200 cm) round-
-// trips unchanged. Pinned so a future tightening of the bound doesn't
-// silently break healthy cals.
-// ---------------------------------------------------------------------------
-TEST(ConfigurationTest, NormalMagnitudeProfileIsNotCleared) {
-    // 127 cm magnitude (the user's converged-healthy fit from the same log).
-    // Any future bound-tightening must keep this case loading verbatim.
-    CalibrationContext src;
-    src.referenceTrackingSystem = "lighthouse";
-    src.targetTrackingSystem = "oculus";
-    src.calibratedTranslation = Eigen::Vector3d(-0.8, 122.5, -34.8);
-    src.calibratedRotation = Eigen::Vector3d(0.0, -110.9, 0.0);
-    src.validProfile = true;
-
-    std::stringstream io;
-    WriteProfile(src, io);
-
-    CalibrationContext dst;
-    ParseProfile(dst, io);
-
-    EXPECT_DOUBLE_EQ(dst.calibratedTranslation.x(), -0.8);
-    EXPECT_DOUBLE_EQ(dst.calibratedTranslation.y(), 122.5);
-    EXPECT_DOUBLE_EQ(dst.calibratedTranslation.z(), -34.8);
-    EXPECT_DOUBLE_EQ(dst.calibratedRotation.y(), -110.9);
-}
 
 // ---------------------------------------------------------------------------
 // Regression guard for the registry-read underflow bug fixed 2026-05-04.
@@ -408,7 +242,7 @@ TEST(ConfigurationTest, NormalMagnitudeProfileIsNotCleared) {
 #ifdef _WIN32
 TEST(ConfigurationTest, Regression_StripRegistryNullTerminator_HandlesZero) {
     EXPECT_EQ(StripRegistryNullTerminator(0), 0u)
-        << "size==0 must NOT underflow — caller short-circuits to empty string";
+        << "size==0 must NOT underflow â€” caller short-circuits to empty string";
 }
 
 TEST(ConfigurationTest, Regression_StripRegistryNullTerminator_StripsOne) {
@@ -422,16 +256,16 @@ TEST(ConfigurationTest, Regression_StripRegistryNullTerminator_StripsOne) {
 
 // ---------------------------------------------------------------------------
 // SaveProfile-path schema-validation pin (audit follow-up). Every persistence
-// site in the overlay routes through `SaveProfile(ctx)` → `WriteProfile(ctx,
-// stream)` → the `WRITE_IF_CHANGED_*` macros (Configuration.cpp:586-617).
+// site in the overlay routes through `SaveProfile(ctx)` â†’ `WriteProfile(ctx,
+// stream)` â†’ the `WRITE_IF_CHANGED_*` macros (Configuration.cpp:586-617).
 // These tests pin three contracts at the WriteProfile boundary:
 //
-//   1. schema_version is ALWAYS stamped — without it, future loads treat
+//   1. schema_version is ALWAYS stamped â€” without it, future loads treat
 //      the profile as v0 and run all migration steps redundantly.
 //   2. Calibration data (translation, rotation, scale, tracking-system
-//      names, the standby device records) is ALWAYS written — it IS the
+//      names, the standby device records) is ALWAYS written â€” it IS the
 //      calibration, not a tunable.
-//   3. Setting fields are SKIPPED when at default — old profiles that pre-
+//   3. Setting fields are SKIPPED when at default â€” old profiles that pre-
 //      date the field don't accidentally get the field's default value
 //      stamped onto disk on next save (which would block future default-
 //      flips from taking effect on existing user profiles).
@@ -469,7 +303,7 @@ TEST(ConfigurationTest, WriteProfile_SkipsDefaultTunables) {
     // Skip-if-default: tunables left at their CalibrationContext-construction
     // defaults must NOT appear in the JSON. Without this contract, a user's
     // pre-2026 profile would come out of round-trip with new fields baked in
-    // at today's defaults — and any future default flip would have no effect
+    // at today's defaults â€” and any future default flip would have no effect
     // on those profiles.
     CalibrationContext ctx;  // all defaults
     ctx.referenceTrackingSystem = "lighthouse";
@@ -480,14 +314,14 @@ TEST(ConfigurationTest, WriteProfile_SkipsDefaultTunables) {
     WriteProfile(ctx, io);
     const std::string json = io.str();
 
-    // recalibrateOnMovement defaults to true → skip
+    // recalibrateOnMovement defaults to true â†’ skip
     EXPECT_EQ(json.find("recalibrate_on_movement"), std::string::npos)
         << "default-true bool must be skipped on save";
-    // baseStationDriftCorrectionEnabled defaults to true → skip
+    // baseStationDriftCorrectionEnabled defaults to true â†’ skip
     EXPECT_EQ(json.find("base_station_drift_correction"), std::string::npos);
-    // ignoreOutliers defaults to false → skip
+    // ignoreOutliers defaults to false â†’ skip
     EXPECT_EQ(json.find("ignore_outliers"), std::string::npos);
-    // jitterThreshold defaults to 3.0f → skip
+    // jitterThreshold defaults to 3.0f â†’ skip
     EXPECT_EQ(json.find("jitter_threshold"), std::string::npos);
 }
 
@@ -525,7 +359,7 @@ TEST(ConfigurationTest, WriteProfile_InvalidProfileWritesNothing) {
     WriteProfile(ctx, io);
 
     EXPECT_TRUE(io.str().empty())
-        << "WriteProfile must early-return on invalid context — partial JSON "
+        << "WriteProfile must early-return on invalid context â€” partial JSON "
            "would be a silent data-loss bug for the caller";
 }
 

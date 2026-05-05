@@ -256,25 +256,14 @@ void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 			ctx.referenceTrackingSystem.c_str(), ctx.targetTrackingSystem.c_str());
 		Metrics::WriteLogAnnotation(loadbuf);
 
-		// Load-time wedge guard. If the saved translation magnitude is
-		// implausibly large, silently zero the calibration data so the
-		// next continuous-cal session starts cold instead of inheriting
-		// the wedge. No banner — the runtime detector in Calibration.cpp
-		// uses the same threshold via spacecal::wedge::kMaxPlausibleCalibrationMagnitudeCm.
-		// The remainder of the profile (settings, chaperone, etc.) is
-		// left alone — only the calibration values are cleared. The
-		// refToTargetPose / relativePosCalibrated reset is finished
-		// below, after their own JSON read paths run.
-		if (magnitude > spacecal::wedge::kMaxPlausibleCalibrationMagnitudeCm) {
-			char guardbuf[320];
-			snprintf(guardbuf, sizeof guardbuf,
-				"wedged_profile_guard_cleared: load_time magnitude=%.3f cm exceeds bound=%.3f cm; zeroed translation+rotation, continuous-cal will start cold (loaded was t=(%.3f,%.3f,%.3f))",
-				magnitude, spacecal::wedge::kMaxPlausibleCalibrationMagnitudeCm, tx, ty, tz);
-			Metrics::WriteLogAnnotation(guardbuf);
-			ctx.calibratedTranslation = Eigen::Vector3d::Zero();
-			ctx.calibratedRotation    = Eigen::Vector3d::Zero();
-			wedgedProfileCleared = true;
-		}
+		// Load-time wedge guard DISABLED 2026-05-05 — caused reset loops on
+		// the user's Quest+Lighthouse setup where legitimate convergence
+		// values fall above any plausible fixed magnitude bound. See
+		// project_wedge_guard_removed_2026-05-05.md (memory). The clearing
+		// logic and the wedgedProfileCleared cleanup at the bottom of
+		// ParseProfile are inert when this branch is gated false. Quest
+		// re-localization auto-recovery (TickHmdRelocalizationDetector)
+		// remains active — that uses HMD-jump signals, not magnitude.
 	}
 	LoadStandby(ctx.referenceStandby, obj["reference_device"]);
 	LoadStandby(ctx.targetStandby, obj["target_device"]);
