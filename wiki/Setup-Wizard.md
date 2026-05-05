@@ -15,14 +15,14 @@ Once you finish the wizard or click any "Skip" button, `wizardCompleted` flips t
 
 The wizard is one modal dialog with several screens. Each transition is a button click.
 
-### Step 1 — Welcome
+### Step 1 -- Welcome
 
 Brief intro, two buttons:
 
-- **Continue** — proceeds to detection.
-- **Skip wizard** — sets `wizardCompleted = true` and exits. Use this if you know exactly what you want to do and want to drive the existing tabs yourself.
+- **Continue** -- proceeds to detection.
+- **Skip wizard** -- sets `wizardCompleted = true` and exits. Use this if you know exactly what you want to do and want to drive the existing tabs yourself.
 
-### Step 2 — Auto-detection
+### Step 2 -- Auto-detection
 
 The wizard reads the SteamVR device list and groups everything by tracking system name (`oculus`, `lighthouse`, `slimevr`, `tundra`, etc.). It identifies your HMD's tracking system and treats every other detected system as a candidate for calibration.
 
@@ -30,9 +30,9 @@ Three branches based on what's found:
 
 #### One tracking system only
 
-> "Only one tracking system detected (X). All your tracked devices share a single coordinate space already, so calibration would not help and could actually add noise. You can close this app — it is not needed for this setup."
+> "Only one tracking system detected (X). All your tracked devices share a single coordinate space already, so calibration would not help and could actually add noise. You can close this app -- it is not needed for this setup."
 
-This is the lighthouse-only setup case. Vive/Index HMD with Vive lighthouse trackers — everything is already in the same coordinate space, and Space Calibrator would *increase* error by trying to align it to itself. The wizard tells you to close the app and walks away.
+This is the lighthouse-only setup case. Vive/Index HMD with Vive lighthouse trackers -- everything is already in the same coordinate space, and Space Calibrator would *increase* error by trying to align it to itself. The wizard tells you to close the app and walks away.
 
 #### Two tracking systems (the common case)
 
@@ -44,19 +44,19 @@ The wizard moves directly into the per-system flow with one entry to calibrate.
 
 > Quest HMD + SlimeVR + lighthouse, etc.
 
-Same flow as two systems, but after each one finishes you're asked if you want to calibrate the next one. The math runs on each pair (HMD ↔ system N) independently — see [[Multi-Ecosystem]] for the details.
+Same flow as two systems, but after each one finishes you're asked if you want to calibrate the next one. The math runs on each pair (HMD ↔ system N) independently -- see [[Multi-Ecosystem]] for the details.
 
-### Step 3 — Pick a target
+### Step 3 -- Pick a target
 
 For the current pending system, the wizard shows you a list of devices from that system (excluding the HMD). You pick one to use as the calibration target. Buttons:
 
-- **Start calibration** — uses your selected device + the HMD as the calibration pair, kicks off continuous calibration, and moves to the next screen.
-- **Skip this system** — drops the current system from the queue without calibrating it. Useful if you have a system you don't actually wear (e.g. a stale Vive tracker on the shelf).
-- **Skip wizard** — exits the wizard entirely; nothing for this or subsequent systems is calibrated.
+- **Start calibration** -- uses your selected device + the HMD as the calibration pair, kicks off continuous calibration, and moves to the next screen.
+- **Skip this system** -- drops the current system from the queue without calibrating it. Useful if you have a system you don't actually wear (e.g. a stale Vive tracker on the shelf).
+- **Skip wizard** -- exits the wizard entirely; nothing for this or subsequent systems is calibrated.
 
 Why does the wizard ask you to pick *one* tracker per system? Because the per-system fallback transform we calibrate against that one tracker applies to every device from that system. Calibrating a single SlimeVR tracker also aligns all your other SlimeVR trackers, so picking the most-easily-moved one (e.g. one held in your hand, or the hip tracker) is enough.
 
-### Step 4 — Calibrating
+### Step 4 -- Calibrating
 
 Continuous calibration is now running. The screen says:
 
@@ -69,24 +69,24 @@ It also shows a status:
 
 Click **This system is done** when the alignment looks right. Click **Cancel** to bail out (it leaves the calibration running but exits the wizard).
 
-The wizard does *not* auto-detect "calibration is good now" — it leaves that judgement to you. The reasoning: continuous calibration converges asymptotically; there's no clean "done" event. Erring on the side of "let the user decide" is safer than auto-advancing too early.
+The wizard does *not* auto-detect "calibration is good now" -- it leaves that judgement to you. The reasoning: continuous calibration converges asymptotically; there's no clean "done" event. Erring on the side of "let the user decide" is safer than auto-advancing too early.
 
-### Step 5 — System done, more pending?
+### Step 5 -- System done, more pending?
 
 If there are systems still in the queue:
 
 > "Done! We still see Vive Lighthouse waiting to be calibrated. Want to do that next?"
 
-- **Yes, calibrate next** — loops back to step 3 with the next system.
-- **No, finish wizard** — closes the wizard with the queue partially processed.
+- **Yes, calibrate next** -- loops back to step 3 with the next system.
+- **No, finish wizard** -- closes the wizard with the queue partially processed.
 
-### Step 6 — All done
+### Step 6 -- All done
 
 Closing screen. `wizardCompleted` is set to true and the profile is saved.
 
 ## What does the wizard set?
 
-Sane defaults — same as a fresh install:
+Sane defaults -- same as a fresh install:
 
 - `calibrationSpeed = AUTO` (picks Fast/Slow/Very Slow from observed jitter)
 - `recalibrateOnMovement = true` (motion-gated blend, hides drift while stationary)
@@ -100,7 +100,7 @@ If you want different settings (e.g. you taped a tracker to your headset and wan
 
 ## Re-running
 
-Hit **Run setup wizard** on the Advanced tab. The wizard restarts from step 1 with fresh device detection. Any existing calibrations stay applied — re-running doesn't auto-clear them; the wizard just walks you through reconfiguring whichever system you point it at.
+Hit **Run setup wizard** on the Advanced tab. The wizard restarts from step 1 with fresh device detection. Any existing calibrations stay applied -- re-running doesn't auto-clear them; the wizard just walks you through reconfiguring whichever system you point it at.
 
 If you want to start completely fresh, hit **Reset settings** on the Advanced tab first (clears the whole profile), then re-run the wizard.
 

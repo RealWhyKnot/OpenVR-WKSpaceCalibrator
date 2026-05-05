@@ -1,86 +1,134 @@
 # Troubleshooting
 
-## Calibration won't complete
+Symptoms first, then what's likely going on, then what to try.
 
-**Symptom:** the progress bar fills but the result is rejected ("Low-quality calibration result" or similar).
+## Trackers in the wrong place after I put my HMD back on
+
+**Symptom:** body trackers were fine before you took the headset off
+for a sip of water. Putting it back on, they're in the wrong spot.
+
+**What happened:** when a Quest HMD comes out of standby, its inside-out
+SLAM can re-localize the room origin slightly. The body trackers
+(Lighthouse / SlimeVR / etc.) didn't shift, so the calibrated transform
+is now slightly off relative to the new HMD frame.
+
+**What to do:** nothing. Continuous calibration walks the offset back
+to truth as you move. The motion-gate floor (10/50/90 percent based on
+correction size) keeps things drifting toward the right place even
+while you stand still.
+
+If the HMD jump was big enough (30+ cm), the auto-recovery detector
+fires automatically: it wipes the calibration and continuous-cal
+re-acquires from scratch over ~30 seconds. You'll see your trackers
+briefly walk to weird positions, then back to correct. Look for
+`auto_recover_from_relocalization` in the spacecal log to confirm
+this fired.
+
+See [[Auto Recovery]] for what triggers and what to expect.
+
+## Trackers floating off after a long session
+
+**Symptom:** tracking was fine for hours, now your trackers are
+visibly off (5+ cm).
+
+**What happened:** continuous calibration hunts between local minima
+when given long-duration unchanging poses (e.g. you sat still in a
+movie for 30 minutes). The math drifts within the noise floor.
+
+**What to do:**
+1. Move around for ~30 seconds. Continuous-cal has fresh varied poses
+   to fit, the offset re-converges.
+2. If that doesn't help: check that continuous calibration is actually
+   on (top action bar, "Continuous Calibration" button should show
+   "Cancel Continuous Calibration"). One-shot calibration doesn't
+   self-correct; it's frozen at whatever was solved at the moment
+   you ran it.
+3. Last resort: open Settings tab, click "Run setup wizard". This
+   restarts the whole calibration from a clean slate. You need
+   working tracking to do it (the wizard reads poses), so do this
+   while seated with your HMD on and a controller in hand.
+
+There's no "Recalibrate now" rescue button mid-session by design:
+when calibration is broken, your controllers are exactly the tool
+that's broken, so any UI that requires aiming them at a button is
+a trap. Auto-recovery for the catastrophic case + natural-motion
+convergence for the slow case + Run-setup-wizard for the deliberate
+restart covers the design space without that trap.
+
+## Calibration won't complete in the wizard
+
+**Symptom:** the wave step shows "Waiting for first valid
+calibration..." and never advances.
 
 Likely causes:
 
-- **Insufficient motion variety.** The math needs rotation in at least two axes — pure-translation or single-axis rotation gives a degenerate solve. Wave the target tracker so it sees yaw and pitch (or yaw and roll) movement, not just side-to-side. The Debug tab's Axis Variance and rotation-condition-ratio plots will tell you which dimension you're short on.
-- **Bad tracking on either device.** Check the per-device pose-validity panel in the overlay. If `result != Running_OK` (i.e. the device is in extrapolation mode because of occlusion or HMD-lifted), the math rejects those samples but if a majority are bad, the buffer doesn't fill. Make sure both devices have a clean line of sight to their tracking volume.
-- **Jitter too high.** The Reference Jitter and Target Jitter plots show per-axis std-dev. Above `jitterThreshold` (default 3 mm), calibration won't even start. Common cause: a base station that's loose, a Slime IMU that hasn't finished settling, or a tracker that's too close to a base station and getting interference.
+- **Insufficient motion variety.** The math needs rotation in at
+  least two axes. Pure-translation or single-axis rotation gives a
+  degenerate solve. Wave with yaw + pitch (or yaw + roll), not just
+  side-to-side. The Logs tab's Axis Variance plot tells you which
+  dimension you're short on.
+- **Bad tracking on either device.** If `result != Running_OK` on
+  either the reference or the target (occlusion, IMU not settled),
+  the math rejects samples. Quick check: does the device move
+  smoothly in SteamVR's rendered view? If it stutters, calibration
+  won't either.
+- **Jitter too high.** The Reference Jitter and Target Jitter plots
+  show per-axis std-dev. Above the jitter threshold (default 3 mm),
+  calibration won't start. Common cause: a base station that's
+  loose, a SlimeVR IMU that hasn't finished thermal-settling, or a
+  tracker too close to a base station and getting interference.
 
-## Continuous calibration is "stuck"
+## Driver doesn't load after install
 
-**Symptom:** the offset is wrong but the overlay won't accept any new estimate. Restarting the program fixes it.
+**Symptom:** SteamVR starts, the overlay starts, but no offsets
+are ever applied.
 
-This is exactly what the watchdogs are designed to recover from automatically. As of the WhyKnot fork:
-
-- After ~25 seconds of continuous rejections, the stuck-loop watchdog clears the sample buffer and demotes to `ContinuousStandby`. Look for `"Continuous calibration appears stuck — recollecting samples"` in the overlay log.
-- After ~1.5 seconds of stalled HMD tracking, the HMD-stall watchdog purges the buffer.
-
-If you're seeing genuinely stuck behavior (waited > 30 seconds, the watchdog never fired), enable CSV logging via the Debug tab and capture a few minutes of `consecutiveRejections`, `error_currentCal`, `error_rawComputed`. Open an issue with the log file attached.
-
-## I'm not using continuous mode — does anything correct drift for me?
-
-**Symptom:** you ran a one-shot calibration once and don't want continuous mode running, but tracking has drifted over the session.
-
-Currently no. One-shot calibration is fixed at the moment you compute it; if drift accumulates, you need to recalibrate manually (open the menu and click **Recalibrate**). An earlier "passive silent-recal" experiment was removed -- detection of "good moments" doesn't actually constrain the rigid transform without varied motion, so the math fell back to overfitting whatever happened to be in the recent sample buffer. If you want live drift correction, switch to continuous mode.
-
-## My body visibly drifts while I'm lying still
-
-**Symptom:** while stationary (lying down, sitting still in a meditation app, etc.) the calibrated trackers slowly walk to a new position, looking like phantom body movement. Most often noticed shortly after the calibration math has updated or after a watchdog fired.
-
-This is the failure mode the **Recalibrate on movement** option (default on) was added to fix. With it on, the driver only advances the lerp toward a new offset proportional to detected per-frame motion — a stationary device barely moves at all. The catch-up happens during your next natural motion, hidden by the movement.
-
-If you're still seeing drift while still:
-
-1. Open the Continuous Calibration → Settings panel and confirm **Recalibrate on movement** is checked. (Toggling it off then on re-establishes a clean baseline pose for the gate.)
-2. Confirm both your driver and overlay are protocol v7 or newer — the option is a no-op against an older driver. Reinstall the latest release if not.
-3. Check the overlay log for repeated stuck-loop watchdog firings (`"Continuous calibration appears stuck"`) — if the math is constantly resetting, the gate works but every reset re-introduces a target the gate has to catch up to. Underlying instability is causing the resets; investigate that first via `error_currentCal` and `consecutiveRejections` in the Debug tab.
-
-To intentionally restore the pre-feature instant-blend behavior (e.g. you specifically want stationary corrections), uncheck the option.
-
-## Body trackers fly across the room after a recenter
-
-**Symptom:** you press the Quest Home button to recenter your view (or your headset's tracking otherwise re-origins) and your body trackers visibly teleport to the wrong place.
-
-There's currently no automatic recenter compensation. The HMD's reference frame just got re-origined and the body trackers' frame didn't, so the calibrated offset between them is now applying to the wrong relative position. Run a fresh calibration (or, if continuous mode is on, the math will catch up over the next few seconds of motion). An earlier heuristic-based recenter detector was removed because it false-fired on tracking-loss recovery and other big pose jumps, producing more disruption than it prevented.
-
-## Newly connected tracker doesn't pick up the offset
-
-**Symptom:** a tracker powered on after calibration shows up in the wrong position.
-
-As of the WhyKnot fork, this should resolve within ~1 second of the device sending its first pose update — the driver-side per-tracking-system fallback applies immediately, and the overlay's 1 Hz scan promotes it to a per-ID transform on the next tick.
-
-If it doesn't:
-
-1. Confirm the new tracker's tracking-system name matches the calibrated `targetTrackingSystem`. Slime trackers report `"slime"`, Lighthouse devices report `"lighthouse"`, etc. A Pimax Crystal HMD masquerading as `"aapvr"` has special handling in `ScanAndApplyProfile`; see [[Architecture]] for the disambiguation logic.
-2. Check the overlay log for `Reset of stale serial` messages — if the new tracker reused an OpenVR ID that previously belonged to a different physical device, the overlay should detect the serial change and force a clean disable before applying any new transform.
-3. Verify the IPC pipe is alive. Look for `"IPC client connected"` in the SteamVR log file (`vrserver.txt`) right after starting the overlay.
-
-## Driver doesn't load
-
-**Symptom:** SteamVR starts, the overlay starts, but no offsets are ever applied.
-
-- Open SteamVR's web console (`http://localhost:8998` while SteamVR is running) and look for `driver_01spacecalibrator` in the loaded-drivers list. If it's missing, SteamVR didn't find or didn't accept the DLL.
-- Verify the layout: `<drivers>/driver_01spacecalibrator/bin/win64/driver_01spacecalibrator.dll` and `<drivers>/driver_01spacecalibrator/driver.vrdrivermanifest`.
-- Check `vrserver.txt` for load errors. A missing dependency (e.g. wrong VS runtime) shows up here.
+- Open SteamVR's web console at `http://localhost:8998` (while
+  SteamVR is running) and check the loaded-drivers list for
+  `driver_01spacecalibrator`. If it's missing, SteamVR didn't find
+  or didn't accept the DLL.
+- Verify the layout:
+  `<drivers>/driver_01spacecalibrator/bin/win64/driver_01spacecalibrator.dll`
+  +
+  `<drivers>/driver_01spacecalibrator/driver.vrdrivermanifest`.
+- Check `<Steam>/logs/vrserver.txt` for load errors. A missing
+  dependency (wrong VS runtime) shows up here.
 
 ## "Incorrect driver version installed"
 
-**Symptom:** overlay startup throws this error.
+**Symptom:** the overlay throws this on startup.
 
-The overlay and driver were built from different commits (different `protocol::Version`). Reinstall both — the release zip ships them together, so just extract the latest zip into your SteamVR `drivers/` directory and re-run the overlay from the same zip.
+The overlay and driver were built from different commits and their
+IPC protocol versions don't match. Reinstall both -- the release zip
+ships them together. Extract the latest zip into your SteamVR
+`drivers/` directory and re-run the overlay from the same zip.
 
-## Unicode in profile path
+## Finger smoothing doesn't seem to do anything
 
-**Symptom:** profile won't load if your Windows username contains non-ASCII characters.
+**Symptom:** you enabled finger smoothing in the Fingers tab but
+your Knuckles fingers still jitter.
 
-Fixed in commit `e752ea5`. If you're seeing this on a build before that, update.
+- Confirm the driver actually installed the public-vtable hook.
+  Grep `<Logs>/driver_log.<timestamp>.txt` for `installed PUBLIC
+  IVRDriverInput hooks: vtable[5]=Create, vtable[6]=Update`. If
+  this line is missing, the hook didn't take. See [[Finger Smoothing]]
+  section "How to verify".
+- Confirm strength is non-zero. The Fingers tab has a 0..100 slider.
+  At 0, it's passthrough.
+- Confirm SteamVR has been restarted since the install. The driver
+  loads at SteamVR startup; mid-run installs require a Steam
+  shutdown to take effect.
 
 ## Where to look for logs
 
-- **Overlay in-app log.** Bottom of the overlay window. Cleared when calibration starts; shows recent state-machine transitions and watchdog firings.
-- **CSV metric log.** `%LOCALAPPDATA%\Low\SpaceCalibrator\Logs\spacecal_log.<timestamp>.txt`. Enable via the Debug tab toggle. One row per tick; rotates to a new file per overlay session. Old logs > 24h are auto-deleted.
-- **SteamVR vrserver log.** `<Steam>\logs\vrserver.txt`. Driver-side errors and our `printf` debug lines (Pimax universe-switch tracing, etc.).
+- **Overlay in-app log.** Bottom of the overlay window. Cleared
+  when calibration starts; shows recent state-machine transitions
+  and watchdog firings.
+- **CSV metric log.** `%LOCALAPPDATA%\Low\SpaceCalibrator\Logs\spacecal_log.<timestamp>.txt`.
+  Enable via the Logs tab. One row per tick. Rotates per overlay
+  session. Logs older than 24 hours are auto-deleted.
+- **Driver log.** Same directory, `driver_log.<timestamp>.txt`.
+  Driver-side hook installation, IPC handshakes, finger-smoothing
+  state.
+- **SteamVR vrserver log.** `<Steam>/logs/vrserver.txt`. Driver
+  load errors, OpenVR-side issues.

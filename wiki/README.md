@@ -14,7 +14,7 @@ The `.md` files in this folder are the **source of truth** for the GitHub Wiki a
 - Page filename = page name. Spaces become hyphens (`Continuous-Calibration.md` ⇒ "Continuous Calibration" page).
 - Wiki-style links work: `[[Page Name]]` and `[[Page Name|alt text]]`.
 - `_Sidebar.md` is the sidebar (special filename, recognised by GitHub).
-- This `README.md` is **excluded** from the sync — GitHub Wiki uses `Home.md` as the landing page.
+- This `README.md` is **excluded** from the sync -- GitHub Wiki uses `Home.md` as the landing page.
 
 ## One-time bootstrap
 
@@ -22,7 +22,7 @@ The wiki git repo only materialises after a maintainer creates the first page th
 
 ## Pages
 
-- [Home](Home.md) — landing
+- [Home](Home.md) -- landing
 - [Architecture](Architecture.md)
 - [Continuous Calibration](Continuous-Calibration.md)
 - [Driver Protocol](Driver-Protocol.md)

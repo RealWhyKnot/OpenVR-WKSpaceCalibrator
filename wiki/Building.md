@@ -1,11 +1,11 @@
 # Building
 
-OpenVR-SpaceCalibrator builds from source on Windows with Visual Studio 2022 and CMake. The repo's `build.ps1` orchestrates everything: submodule init, version stamping, CMake configure, MSBuild, and zip packaging. Local rebuilds typically take 30–60 seconds (incremental).
+OpenVR-SpaceCalibrator builds from source on Windows with Visual Studio 2022 and CMake. The repo's `build.ps1` orchestrates everything: submodule init, version stamping, CMake configure, MSBuild, and zip packaging. Local rebuilds typically take 30-60 seconds (incremental).
 
 ## Prerequisites
 
 - **Windows 10/11** (the build produces win64 binaries; the SteamVR driver is Windows-only).
-- **Visual Studio 2022** with the *Desktop development with C++* workload. The "C++ build tools" alone is enough — the IDE isn't required for headless builds.
+- **Visual Studio 2022** with the *Desktop development with C++* workload. The "C++ build tools" alone is enough -- the IDE isn't required for headless builds.
 - **CMake ≥ 3.8** (4.x works with `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` for the minhook submodule). Either install the standalone CMake or rely on the one VS bundles.
 - **Git**. Required to fetch submodules. The build also activates the repo's git hooks the first time it runs.
 - **PowerShell 5.1+** (default on Windows 10/11). For running `build.ps1`.
@@ -19,9 +19,9 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 
 This produces:
 
-- `bin/artifacts/Release/SpaceCalibrator.exe` — the overlay app.
-- `bin/driver_01spacecalibrator/bin/win64/driver_01spacecalibrator.dll` — the SteamVR driver.
-- `release/OpenVR-SpaceCalibrator-<version>.zip` — drop-in distribution: extract the `driver_01spacecalibrator/` folder into `<Steam>/steamapps/common/SteamVR/drivers/` and put `SpaceCalibrator.exe` wherever you want.
+- `bin/artifacts/Release/SpaceCalibrator.exe` -- the overlay app.
+- `bin/driver_01spacecalibrator/bin/win64/driver_01spacecalibrator.dll` -- the SteamVR driver.
+- `release/OpenVR-SpaceCalibrator-<version>.zip` -- drop-in distribution: extract the `driver_01spacecalibrator/` folder into `<Steam>/steamapps/common/SteamVR/drivers/` and put `SpaceCalibrator.exe` wherever you want.
 
 Pass `-SkipZip` to skip the release-zip step on rapid local rebuilds.
 
@@ -33,8 +33,8 @@ Pass `-SkipZip` to skip the release-zip step on rapid local rebuilds.
 
 Sets `git config --local core.hooksPath = .githooks` if not already configured. Activates two hooks:
 
-- **`prepare-commit-msg`** — appends the current build version (read from `version.txt`) to the commit subject in parens, e.g. `fix: handle ID reuse (2026.4.27.3-9F2A)`. Skipped for merge/squash messages.
-- **`commit-msg`** — rejects subjects with more than one build-version stamp (catches the editor-template autocomplete footgun where the previous commit's stamp gets autocompleted alongside the fresh one).
+- **`prepare-commit-msg`** -- appends the current build version (read from `version.txt`) to the commit subject in parens, e.g. `fix: handle ID reuse (2026.4.27.3-9F2A)`. Skipped for merge/squash messages.
+- **`commit-msg`** -- rejects subjects with more than one build-version stamp (catches the editor-template autocomplete footgun where the previous commit's stamp gets autocompleted alongside the fresh one).
 
 Bypass either with `--no-verify` if you really need to.
 
@@ -46,8 +46,8 @@ Bypass either with `--no-verify` if you really need to.
 
 Two shapes are accepted:
 
-- **Dev**: `YYYY.M.D.N-XXXX` — `N` is the daily build counter, `XXXX` is a fresh 4-hex GUID prefix per build to disambiguate rebuilds at the same `N`. Local builds always emit this.
-- **Release**: `YYYY.M.D.N` — no suffix. Only emitted when CI passes a tag-derived `-Version` argument.
+- **Dev**: `YYYY.M.D.N-XXXX` -- `N` is the daily build counter, `XXXX` is a fresh 4-hex GUID prefix per build to disambiguate rebuilds at the same `N`. Local builds always emit this.
+- **Release**: `YYYY.M.D.N` -- no suffix. Only emitted when CI passes a tag-derived `-Version` argument.
 
 The version is written to `version.txt` in the repo root. The git `prepare-commit-msg` hook reads from there.
 
@@ -68,11 +68,11 @@ Packages the overlay + driver folder structure into `release/OpenVR-SpaceCalibra
 
 ## Submodules
 
-- **`lib/glfw`** — windowing.
-- **`lib/imgui`** — immediate-mode UI.
-- **`lib/implot`** — plotting in the Debug tab.
-- **`lib/minhook`** — function detour library used by the driver.
-- **`lib/openvr`** — Valve's OpenVR SDK headers and import lib.
+- **`lib/glfw`** -- windowing.
+- **`lib/imgui`** -- immediate-mode UI.
+- **`lib/implot`** -- plotting in the Debug tab.
+- **`lib/minhook`** -- function detour library used by the driver.
+- **`lib/openvr`** -- Valve's OpenVR SDK headers and import lib.
 
 `build.ps1` will refresh these on the first run if they're missing.
 
@@ -84,7 +84,7 @@ The legacy path is the one-line `GenWin64.bat`:
 cmake -G "Visual Studio 17 2022" -A x64 -B bin -S .
 ```
 
-Then open `bin/SpaceCalibrator.sln` in Visual Studio and build the `Release|x64` configuration. This skips version stamping and zip packaging — fine for IDE-driven development, not appropriate for cutting a release.
+Then open `bin/SpaceCalibrator.sln` in Visual Studio and build the `Release|x64` configuration. This skips version stamping and zip packaging -- fine for IDE-driven development, not appropriate for cutting a release.
 
 ## CI
 
