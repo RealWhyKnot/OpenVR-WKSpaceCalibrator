@@ -2,6 +2,7 @@
 
 #include "Protocol.h"
 
+#include <atomic>
 #include <thread>
 #include <set>
 #include <mutex>
@@ -43,8 +44,15 @@ private:
 
 	std::thread mainThread;
 
-	bool running = false;
-	bool stop = false;
+	// Atomic because `stop` is written by the driver-shutdown thread and
+	// read by RunThread on every loop iter; `running` is written by both
+	// threads on lifecycle transitions and inspected by Stop()'s early-
+	// return guard. Bare bool worked in practice on x86 (single-byte R/W
+	// is naturally atomic there) but is technically a data race per the
+	// C++ memory model. Relaxed ordering is sufficient: there's no other
+	// state these flags need to fence against.
+	std::atomic<bool> running { false };
+	std::atomic<bool> stop { false };
 
 	std::set<PipeInstance *> pipes;
 	// Created by RunThread on entry, signalled by Stop() to break the wait,
