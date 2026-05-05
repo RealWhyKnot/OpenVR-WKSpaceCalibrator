@@ -421,6 +421,115 @@ TEST(ConfigurationTest, Regression_StripRegistryNullTerminator_StripsOne) {
 #endif
 
 // ---------------------------------------------------------------------------
+// SaveProfile-path schema-validation pin (audit follow-up). Every persistence
+// site in the overlay routes through `SaveProfile(ctx)` → `WriteProfile(ctx,
+// stream)` → the `WRITE_IF_CHANGED_*` macros (Configuration.cpp:586-617).
+// These tests pin three contracts at the WriteProfile boundary:
+//
+//   1. schema_version is ALWAYS stamped — without it, future loads treat
+//      the profile as v0 and run all migration steps redundantly.
+//   2. Calibration data (translation, rotation, scale, tracking-system
+//      names, the standby device records) is ALWAYS written — it IS the
+//      calibration, not a tunable.
+//   3. Setting fields are SKIPPED when at default — old profiles that pre-
+//      date the field don't accidentally get the field's default value
+//      stamped onto disk on next save (which would block future default-
+//      flips from taking effect on existing user profiles).
+//
+// If anyone adds a new SaveProfile call site that bypasses WriteProfile, or
+// modifies WriteProfile to drop schema_version / change a calibration field
+// to skip-if-default / change a tunable to always-write, one of these
+// expectations fails.
+// ---------------------------------------------------------------------------
+TEST(ConfigurationTest, WriteProfile_AlwaysStampsCalibrationData) {
+    // Calibration data is mandatory on every save. Even a fresh
+    // unconfigured context with default zeros must emit the calibration
+    // keys so a future load always has them.
+    CalibrationContext ctx; // all defaults
+    ctx.referenceTrackingSystem = "lighthouse";
+    ctx.targetTrackingSystem = "oculus";
+    ctx.validProfile = true;
+
+    std::stringstream io;
+    WriteProfile(ctx, io);
+    const std::string json = io.str();
+
+    EXPECT_NE(json.find("\"x\":"),  std::string::npos);
+    EXPECT_NE(json.find("\"y\":"),  std::string::npos);
+    EXPECT_NE(json.find("\"z\":"),  std::string::npos);
+    EXPECT_NE(json.find("\"roll\":"),  std::string::npos);
+    EXPECT_NE(json.find("\"yaw\":"),   std::string::npos);
+    EXPECT_NE(json.find("\"pitch\":"), std::string::npos);
+    EXPECT_NE(json.find("\"scale\":"), std::string::npos);
+    EXPECT_NE(json.find("\"reference_tracking_system\":"), std::string::npos);
+    EXPECT_NE(json.find("\"target_tracking_system\":"),    std::string::npos);
+}
+
+TEST(ConfigurationTest, WriteProfile_SkipsDefaultTunables) {
+    // Skip-if-default: tunables left at their CalibrationContext-construction
+    // defaults must NOT appear in the JSON. Without this contract, a user's
+    // pre-2026 profile would come out of round-trip with new fields baked in
+    // at today's defaults — and any future default flip would have no effect
+    // on those profiles.
+    CalibrationContext ctx;  // all defaults
+    ctx.referenceTrackingSystem = "lighthouse";
+    ctx.targetTrackingSystem = "oculus";
+    ctx.validProfile = true;
+
+    std::stringstream io;
+    WriteProfile(ctx, io);
+    const std::string json = io.str();
+
+    // recalibrateOnMovement defaults to true → skip
+    EXPECT_EQ(json.find("recalibrate_on_movement"), std::string::npos)
+        << "default-true bool must be skipped on save";
+    // baseStationDriftCorrectionEnabled defaults to true → skip
+    EXPECT_EQ(json.find("base_station_drift_correction"), std::string::npos);
+    // ignoreOutliers defaults to false → skip
+    EXPECT_EQ(json.find("ignore_outliers"), std::string::npos);
+    // jitterThreshold defaults to 3.0f → skip
+    EXPECT_EQ(json.find("jitter_threshold"), std::string::npos);
+}
+
+TEST(ConfigurationTest, WriteProfile_StampsNonDefaultTunables) {
+    // The other half of WRITE_IF_CHANGED: tunables flipped away from default
+    // MUST be written. If someone breaks the macro to always-skip, the
+    // user's customisations would silently disappear on next save.
+    CalibrationContext ctx;
+    ctx.referenceTrackingSystem = "lighthouse";
+    ctx.targetTrackingSystem = "oculus";
+    ctx.validProfile = true;
+    ctx.recalibrateOnMovement = false;       // flipped from default true
+    ctx.ignoreOutliers = true;               // flipped from default false
+    ctx.jitterThreshold = 5.5f;              // flipped from default 3.0
+    ctx.baseStationDriftCorrectionEnabled = false; // flipped from default true
+
+    std::stringstream io;
+    WriteProfile(ctx, io);
+    const std::string json = io.str();
+
+    EXPECT_NE(json.find("recalibrate_on_movement"),   std::string::npos);
+    EXPECT_NE(json.find("ignore_outliers"),            std::string::npos);
+    EXPECT_NE(json.find("jitter_threshold"),           std::string::npos);
+    EXPECT_NE(json.find("base_station_drift_correction"), std::string::npos);
+}
+
+TEST(ConfigurationTest, WriteProfile_InvalidProfileWritesNothing) {
+    // Sanity: WriteProfile early-returns on !validProfile (Configuration.cpp:530).
+    // A caller that hands in an unfinished context should produce empty
+    // output, not partial JSON that a re-load would silently truncate.
+    CalibrationContext ctx;
+    ctx.validProfile = false;
+
+    std::stringstream io;
+    WriteProfile(ctx, io);
+
+    EXPECT_TRUE(io.str().empty())
+        << "WriteProfile must early-return on invalid context — partial JSON "
+           "would be a silent data-loss bug for the caller";
+}
+
+// ---------------------------------------------------------------------------
 // Save always stamps the current schema_version. Future reads (on the same
 // or later builds) need that key present; without it, even today's load
 // path treats the profile as v0 and runs the migration steps redundantly.
