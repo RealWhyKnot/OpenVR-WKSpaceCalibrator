@@ -13,3 +13,6 @@
 [submodule "lib/glfw"]
 	path = lib/glfw
 	url = https://github.com/glfw/glfw
+[submodule "lib/OpenVR-PairDriver"]
+	path = lib/OpenVR-PairDriver
+	url = https://github.com/RealWhyKnot/OpenVR-PairDriver.git

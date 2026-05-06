@@ -845,7 +845,7 @@ extern void SendFingerSmoothingConfig(CalibrationContext &ctx);
 void InitCalibrator()
 {
 	Driver.Connect();
-	shmem.Open(OPENVR_SPACECALIBRATOR_SHMEM_NAME);
+	shmem.Open(OPENVR_PAIRDRIVER_SHMEM_NAME);
 	// Push the persisted finger-smoothing config so the driver matches what
 	// the overlay just loaded from registry. Default-constructed FingerCfg in
 	// the driver is "feature off" so this is a no-op for users who haven't
@@ -863,7 +863,7 @@ void ReopenShmem()
 {
 	try {
 		shmem.Close();
-		shmem.Open(OPENVR_SPACECALIBRATOR_SHMEM_NAME);
+		shmem.Open(OPENVR_PAIRDRIVER_SHMEM_NAME);
 	}
 	catch (const std::exception& e) {
 		// Close already happened; leave the segment closed and let the next reconnect retry.

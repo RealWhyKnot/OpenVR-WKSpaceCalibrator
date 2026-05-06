@@ -55,6 +55,10 @@ endif()
 # Add source files
 file(GLOB_RECURSE SOURCES_API ${CMAKE_SOURCE_DIR}/src/overlay "*.c" "*.h" "*.hpp" "*.cpp")
 file(GLOB_RECURSE SOURCES_HEADERS ${CMAKE_SOURCE_DIR}/src/common "*.h" "*.hpp")
+# Protocol.h and MotionGate.h live in the OpenVR-PairDriver submodule. Both
+# the overlay (this target) and the driver (built by the submodule) consume
+# them so the wire layout / motion-gate math stays in lock-step.
+file(GLOB_RECURSE SOURCES_SHARED_HEADERS ${CMAKE_SOURCE_DIR}/lib/OpenVR-PairDriver/src/common "*.h" "*.hpp")
 
 foreach(SOURCE IN ITEMS ${SOURCES_API})
     get_filename_component(SOURCE_PATH "${SOURCE}" PATH)
@@ -67,7 +71,7 @@ set(IMGUI_FILES
     ${CMAKE_SOURCE_DIR}/lib/imgui/backends/imgui_impl_opengl3.cpp
     ${CMAKE_SOURCE_DIR}/lib/imgui/backends/imgui_impl_glfw.cpp)
 
-add_executable(SpaceCalibratorOverlay ${SOURCES_API} ${SOURCES_HEADERS} ${IMGUI_FILES} ${WIN32_RESOURCES})
+add_executable(SpaceCalibratorOverlay ${SOURCES_API} ${SOURCES_HEADERS} ${SOURCES_SHARED_HEADERS} ${IMGUI_FILES} ${WIN32_RESOURCES})
 GroupSourcesByFolder(SpaceCalibratorOverlay)
 # Disable console window
 set_target_properties(SpaceCalibratorOverlay PROPERTIES
@@ -80,6 +84,10 @@ target_include_directories(SpaceCalibratorOverlay
     PUBLIC ${CMAKE_SOURCE_DIR}
     PUBLIC ${CMAKE_SOURCE_DIR}/src/common
     PUBLIC ${CMAKE_SOURCE_DIR}/src/overlay
+    # Pulls in Protocol.h and MotionGate.h from the OpenVR-PairDriver submodule
+    # so the overlay's #include "Protocol.h" resolves to the same wire-layout
+    # header the shared driver builds against.
+    PUBLIC ${CMAKE_SOURCE_DIR}/lib/OpenVR-PairDriver/src/common
     PUBLIC ${CMAKE_SOURCE_DIR}/lib
     PUBLIC ${CMAKE_SOURCE_DIR}/lib/openvr/headers
     PUBLIC ${CMAKE_SOURCE_DIR}/lib/imgui/backends

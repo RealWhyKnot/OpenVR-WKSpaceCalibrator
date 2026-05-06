@@ -46,6 +46,10 @@ target_include_directories(spacecal_tests
     PRIVATE ${CMAKE_SOURCE_DIR}
     PRIVATE ${CMAKE_SOURCE_DIR}/src/common
     PRIVATE ${CMAKE_SOURCE_DIR}/src/overlay
+    # Protocol.h and MotionGate.h moved into the OpenVR-PairDriver submodule;
+    # tests pick them up from there so test_protocol / test_motion_gate stay
+    # in lock-step with the shared wire layout.
+    PRIVATE ${CMAKE_SOURCE_DIR}/lib/OpenVR-PairDriver/src/common
     PRIVATE ${CMAKE_SOURCE_DIR}/lib
     PRIVATE ${CMAKE_SOURCE_DIR}/lib/openvr/headers
     PRIVATE ${CMAKE_SOURCE_DIR}/lib/Eigen

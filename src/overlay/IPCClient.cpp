@@ -60,7 +60,7 @@ IPCClient::~IPCClient()
 
 void IPCClient::Connect()
 {
-	LPCTSTR pipeName = TEXT(OPENVR_SPACECALIBRATOR_PIPE_NAME);
+	LPCTSTR pipeName = TEXT(OPENVR_PAIRDRIVER_CALIBRATION_PIPE_NAME);
 
 	WaitNamedPipe(pipeName, 1000);
 	pipe = CreateFile(pipeName, GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING, 0, 0);
