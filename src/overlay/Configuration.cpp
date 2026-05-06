@@ -858,8 +858,28 @@ void LoadProfile(CalibrationContext &ctx)
 		std::stringstream io(str);
 		ParseProfile(ctx, io);
 		std::cout << "Loaded profile" << std::endl;
+		// Capture the load event in the spacecal log so a session-time
+		// investigator can correlate any post-load behavior change with the
+		// load itself (rather than guessing whether the user re-applied a
+		// stale profile mid-session).
+		const double transMagCm =
+			std::sqrt(ctx.calibratedTranslation.x() * ctx.calibratedTranslation.x()
+			        + ctx.calibratedTranslation.y() * ctx.calibratedTranslation.y()
+			        + ctx.calibratedTranslation.z() * ctx.calibratedTranslation.z()) * 100.0;
+		char loadBuf[320];
+		snprintf(loadBuf, sizeof loadBuf,
+			"profile_loaded: bytes=%zu valid=%d trans_mag_cm=%.2f euler_deg=(%.2f,%.2f,%.2f)"
+			" ref_sys=%s tgt_sys=%s",
+			str.size(), (int)ctx.validProfile, transMagCm,
+			ctx.calibratedRotation.x(), ctx.calibratedRotation.y(), ctx.calibratedRotation.z(),
+			ctx.referenceTrackingSystem.c_str(), ctx.targetTrackingSystem.c_str());
+		Metrics::WriteLogAnnotation(loadBuf);
 	} catch (const std::runtime_error &e) {
 		std::cerr << "Error loading profile: " << e.what() << std::endl;
+		char errBuf[256];
+		snprintf(errBuf, sizeof errBuf,
+			"profile_load_failed: bytes=%zu reason=%s", str.size(), e.what());
+		Metrics::WriteLogAnnotation(errBuf);
 	}
 }
 
@@ -869,5 +889,21 @@ void SaveProfile(CalibrationContext &ctx)
 
 	std::stringstream io;
 	WriteProfile(ctx, io);
-	WriteRegistryKey(io.str());
+	const std::string serialized = io.str();
+	WriteRegistryKey(serialized);
+
+	// Annotate the save event so investigators can correlate writes with
+	// the cal-state changes that triggered them. The wedged-state-saved bug
+	// from 2026-05-03 was hard to debug because saves were silent; this
+	// closes that gap. Includes the magnitude of what we just persisted so
+	// a future "you saved a wedged cal at time T" can be spot-checked.
+	const double transMagCm =
+		std::sqrt(ctx.calibratedTranslation.x() * ctx.calibratedTranslation.x()
+		        + ctx.calibratedTranslation.y() * ctx.calibratedTranslation.y()
+		        + ctx.calibratedTranslation.z() * ctx.calibratedTranslation.z()) * 100.0;
+	char saveBuf[256];
+	snprintf(saveBuf, sizeof saveBuf,
+		"profile_saved: bytes=%zu valid=%d trans_mag_cm=%.2f",
+		serialized.size(), (int)ctx.validProfile, transMagCm);
+	Metrics::WriteLogAnnotation(saveBuf);
 }
