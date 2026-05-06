@@ -16,12 +16,14 @@ param(
     [switch]$Install,
 
     # Full deploy: closes Steam (which holds the driver DLL locked while
-    # running), copies the driver DLL into <SteamVR>/drivers, hot-swaps the
-    # overlay (implies -Install), disables the legacy 01fingersmoothing
-    # driver folder if present (its hooks would collide with SC's now that
-    # SC owns the IVRDriverInputInternal hook), then relaunches Steam.
-    # Only needed when iterating on driver-side changes; pure overlay edits
-    # use -Install instead. Self-elevates for the admin operations.
+    # running), builds the OpenVR-PairDriver submodule, copies the shared
+    # driver tree into <SteamVR>/drivers/01openvrpair, drops
+    # enable_calibration.flag into its resources/, hot-swaps the overlay
+    # (implies -Install), migrates any legacy 01spacecalibrator/ or
+    # 01fingersmoothing/ driver folders by renaming their manifests, then
+    # relaunches Steam. Only needed when iterating on driver-side changes;
+    # pure overlay edits use -Install instead. Self-elevates for the admin
+    # operations.
     [switch]$DeployDriver,
 
     # Where the install lives. Override only if you've installed somewhere
@@ -65,7 +67,7 @@ if (($Install -or $DeployDriver) -and -not $Yes) {
         Write-Host "  - Close Steam (incl. any running game)" -ForegroundColor Yellow
         Write-Host "  - Force-kill SteamVR helpers (vrserver/vrmonitor/vrcompositor/etc.)" -ForegroundColor Yellow
         Write-Host "  - Close the SpaceCalibrator overlay" -ForegroundColor Yellow
-        Write-Host "  - Copy the driver DLL into SteamVR\drivers\01spacecalibrator (UAC)" -ForegroundColor Yellow
+        Write-Host "  - Build + copy the shared driver tree into SteamVR\drivers\01openvrpair (UAC)" -ForegroundColor Yellow
         Write-Host "  - Hot-swap the overlay into $InstallPath (UAC)" -ForegroundColor Yellow
         Write-Host "  - Relaunch Steam" -ForegroundColor Yellow
     } else {
@@ -88,12 +90,23 @@ if (($Install -or $DeployDriver) -and -not $Yes) {
 #   - skip the release zip (we don't need a distribution artifact mid-iteration)
 #   - leave version stamping ON so SPACECAL_BUILD_STAMP increments and the
 #     in-app updater + git hooks can tell builds apart
-$buildArgs = @()
-if (-not $Reconfigure) { $buildArgs += "-SkipConfigure" }
-if (-not $Zip)         { $buildArgs += "-SkipZip" }
+# Hashtable splat (rather than an @() array) binds switch parameters by
+# name. With the array form `@('-SkipConfigure', '-SkipZip')`, PowerShell
+# delivers the literal strings positionally, which made build.ps1's first
+# positional parameter ($Version) receive '-SkipConfigure' and trip its
+# version-shape validation.
+$buildArgs = @{}
+if (-not $Reconfigure) { $buildArgs.SkipConfigure = $true }
+if (-not $Zip)         { $buildArgs.SkipZip       = $true }
 
-Write-Host "quick.ps1: forwarding to build.ps1 $($buildArgs -join ' ')" -ForegroundColor DarkGray
-& powershell.exe -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "build.ps1") @buildArgs
+$argSummary = ($buildArgs.GetEnumerator() | ForEach-Object { "-$($_.Name)" }) -join ' '
+Write-Host "quick.ps1: forwarding to build.ps1 $argSummary" -ForegroundColor DarkGray
+# Call build.ps1 in-process rather than via `powershell.exe -File`. The
+# child-shell form lets cmake's stdout messages get reframed as PowerShell
+# error records by 5.1's redirection layer, which then poisons $? even on
+# a successful build (cmake exits 0 but the parent throws). In-process
+# invocation propagates $LASTEXITCODE directly from cmake.
+& (Join-Path $PSScriptRoot "build.ps1") @buildArgs
 $exitCode = $LASTEXITCODE
 if ($exitCode -ne 0) {
     throw "build.ps1 failed (exit $exitCode)"
@@ -125,15 +138,36 @@ if (-not $Install) {
 # enough (real-world bite from 2026-05-01: copy succeeded but the OS
 # silently kept the old DLL mapped because steam.exe still had a handle).
 # Documented in reference_install_procedure.md.
-$DriverDll        = Join-Path $PSScriptRoot "bin/driver_01spacecalibrator/bin/win64/driver_01spacecalibrator.dll"
+$PairDriverRoot   = Join-Path $PSScriptRoot "lib/OpenVR-PairDriver"
+$PairDriverTree   = Join-Path $PairDriverRoot "build/driver_openvrpair"
+$PairDriverDll    = Join-Path $PairDriverTree "bin/win64/driver_openvrpair.dll"
 $SteamExe         = Join-Path $SteamPath "steam.exe"
 $SteamDriversDir  = Join-Path $SteamPath "steamapps/common/SteamVR/drivers"
-$DestDriverDll    = Join-Path $SteamDriversDir "01spacecalibrator/bin/win64/driver_01spacecalibrator.dll"
+$DestDriverFolder = Join-Path $SteamDriversDir "01openvrpair"
+$DestDriverDll    = Join-Path $DestDriverFolder "bin/win64/driver_openvrpair.dll"
+$DestResourcesDir = Join-Path $DestDriverFolder "resources"
+$DestCalFlag      = Join-Path $DestResourcesDir "enable_calibration.flag"
+# Legacy driver folders the modular layout supersedes. Migration disables
+# them by renaming the manifest; the folder itself is left in place so a
+# rollback is just rename-the-manifest-back.
+$LegacyScManifest = Join-Path $SteamDriversDir "01spacecalibrator/driver.vrdrivermanifest"
 $LegacyFsManifest = Join-Path $SteamDriversDir "01fingersmoothing/driver.vrdrivermanifest"
 
 if ($DeployDriver) {
-    if (-not (Test-Path $DriverDll)) {
-        throw "Driver DLL not found at '$DriverDll'. Did the build produce a driver target?"
+    if (-not (Test-Path $PairDriverRoot)) {
+        throw "OpenVR-PairDriver submodule not found at '$PairDriverRoot'. Run 'git submodule update --init --recursive'."
+    }
+    Write-Host ""
+    Write-Host "--- Building OpenVR-PairDriver submodule ---" -ForegroundColor Cyan
+    Push-Location $PairDriverRoot
+    try {
+        & powershell.exe -ExecutionPolicy Bypass -File (Join-Path $PairDriverRoot "build.ps1")
+        if ($LASTEXITCODE -ne 0) { throw "Submodule build failed (exit $LASTEXITCODE)" }
+    } finally {
+        Pop-Location
+    }
+    if (-not (Test-Path $PairDriverDll)) {
+        throw "Submodule built but driver DLL not found at '$PairDriverDll'."
     }
     if (-not (Test-Path $SteamExe)) {
         throw "Steam not found at '$SteamExe'. Pass -SteamPath '<your Steam dir>' if installed elsewhere."
@@ -214,18 +248,24 @@ $wasRunning = @(Get-Process -Name SpaceCalibrator -ErrorAction SilentlyContinue)
 $installedExe = Join-Path $InstallPath "SpaceCalibrator.exe"
 
 # Extra steps for -DeployDriver: also baked into the elevated block so
-# everything that needs admin happens in a single UAC prompt. Driver DLL
-# copy goes into <SteamVR>/drivers/01spacecalibrator/bin/win64/. The
-# legacy FingerSmoothing manifest gets renamed (not deleted) so a future
-# rollback is just rename-it-back. Skips both steps cleanly when their
-# prerequisites are missing -- a fresh box without the legacy driver
-# folder is fine.
+# everything that needs admin happens in a single UAC prompt. Replaces
+# any stale 01openvrpair folder with the freshly-built submodule tree,
+# drops enable_calibration.flag so the driver wires up calibration on
+# startup, and disables any legacy driver folders by renaming their
+# manifests (rollback = rename it back). Skips legacy steps cleanly when
+# their prerequisites are missing -- a fresh box without the legacy
+# folders is fine.
 $extraCmds = @()
 if ($DeployDriver) {
-    $extraCmds += "Copy-Item -Force -Path '$DriverDll' -Destination '$DestDriverDll'"
-    $extraCmds += "Write-Host 'Copied driver DLL to $DestDriverDll'"
-    $disabledManifest = "$LegacyFsManifest.disabled-by-quick-deploydriver"
-    $extraCmds += "if (Test-Path '$LegacyFsManifest') { Move-Item -Force -Path '$LegacyFsManifest' -Destination '$disabledManifest'; Write-Host 'Disabled legacy 01fingersmoothing driver (renamed manifest).' }"
+    $extraCmds += "if (Test-Path '$DestDriverFolder') { Remove-Item -Recurse -Force '$DestDriverFolder' }"
+    $extraCmds += "Copy-Item -Recurse -Force -Path '$PairDriverTree' -Destination '$DestDriverFolder'"
+    $extraCmds += "if (-not (Test-Path '$DestResourcesDir')) { New-Item -ItemType Directory -Force -Path '$DestResourcesDir' | Out-Null }"
+    $extraCmds += "Set-Content -Path '$DestCalFlag' -Value 'enabled' -NoNewline"
+    $extraCmds += "Write-Host 'Installed shared driver tree to $DestDriverFolder + dropped enable_calibration.flag.'"
+    $disabledScManifest = "$LegacyScManifest.disabled-by-pair-migration"
+    $extraCmds += "if (Test-Path '$LegacyScManifest') { Move-Item -Force -Path '$LegacyScManifest' -Destination '$disabledScManifest'; Write-Host 'Disabled legacy 01spacecalibrator driver (renamed manifest).' }"
+    $disabledFsManifest = "$LegacyFsManifest.disabled-by-pair-migration"
+    $extraCmds += "if (Test-Path '$LegacyFsManifest') { Move-Item -Force -Path '$LegacyFsManifest' -Destination '$disabledFsManifest'; Write-Host 'Disabled legacy 01fingersmoothing driver (renamed manifest).' }"
 }
 
 # Icon-cache refresh runs after the copy. ie4uinit's -show command tells
@@ -292,12 +332,12 @@ if (Test-Path $installedExe) {
     }
 }
 
-# Driver-deploy: same timestamp sanity check on the destination DLL, then
-# relaunch Steam (which kicks off SteamVR + auto-launches our overlay if it
-# is registered).
+# Driver-deploy: same timestamp sanity check on the destination DLL plus
+# verify the calibration flag landed, then relaunch Steam (which kicks off
+# SteamVR + auto-launches our overlay if it is registered).
 if ($DeployDriver) {
     if (Test-Path $DestDriverDll) {
-        $driverBuildTime     = (Get-Item $DriverDll).LastWriteTime
+        $driverBuildTime     = (Get-Item $PairDriverDll).LastWriteTime
         $driverInstalledTime = (Get-Item $DestDriverDll).LastWriteTime
         if ($driverInstalledTime -ge $driverBuildTime.AddSeconds(-2)) {
             Write-Host "Driver DLL timestamps match build." -ForegroundColor Green
@@ -308,6 +348,11 @@ if ($DeployDriver) {
         }
     } else {
         Write-Host "WARNING: driver DLL not present at $DestDriverDll after install. Check the elevated output." -ForegroundColor Yellow
+    }
+    if (Test-Path $DestCalFlag) {
+        Write-Host "enable_calibration.flag present at $DestCalFlag." -ForegroundColor Green
+    } else {
+        Write-Host "WARNING: enable_calibration.flag missing at $DestCalFlag; the driver will run inert for calibration on next launch." -ForegroundColor Yellow
     }
 
     Write-Host ""

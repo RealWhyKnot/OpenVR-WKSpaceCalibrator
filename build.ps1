@@ -156,19 +156,38 @@ try {
 }
 
 # --- Locate built artifacts ---
-$OverlayExe = Join-Path $PSScriptRoot "bin/artifacts/Release/SpaceCalibrator.exe"
-$DriverDir  = Join-Path $PSScriptRoot "bin/driver_01spacecalibrator"
-$DriverDll  = Join-Path $DriverDir "bin/win64/driver_01spacecalibrator.dll"
+# Driver source moved to the OpenVR-PairDriver submodule. Build it here so
+# the resulting tree is available for the release-zip stage below; the
+# submodule's own build.ps1 handles the CMake configure + compile and lays
+# out a deployable driver folder under build/driver_openvrpair/.
+$OverlayExe       = Join-Path $PSScriptRoot "bin/artifacts/Release/SpaceCalibrator.exe"
+$PairDriverRoot   = Join-Path $PSScriptRoot "lib/OpenVR-PairDriver"
+$PairDriverTree   = Join-Path $PairDriverRoot "build/driver_openvrpair"
+$PairDriverDll    = Join-Path $PairDriverTree "bin/win64/driver_openvrpair.dll"
 
 if (!(Test-Path $OverlayExe)) { throw "Expected overlay exe not found at $OverlayExe" }
-if (!(Test-Path $DriverDll))  { throw "Expected driver DLL not found at $DriverDll" }
+if (-not $SkipZip) {
+    if (-not (Test-Path $PairDriverRoot)) {
+        throw "OpenVR-PairDriver submodule not found at '$PairDriverRoot'. Run 'git submodule update --init --recursive'."
+    }
+    Write-Host "`n--- Building OpenVR-PairDriver submodule ---" -ForegroundColor Cyan
+    Push-Location $PairDriverRoot
+    try {
+        & powershell.exe -ExecutionPolicy Bypass -File (Join-Path $PairDriverRoot "build.ps1") -Version $FullVersion
+        if ($LASTEXITCODE -ne 0) { throw "Submodule build failed (exit $LASTEXITCODE)" }
+    } finally {
+        Pop-Location
+    }
+    if (!(Test-Path $PairDriverDll)) { throw "Submodule built but driver DLL not at $PairDriverDll" }
+}
 
 # --- Release zip ---
 # Drop-in distribution layout:
 #   <zip-root>/SpaceCalibrator.exe
-#   <zip-root>/driver_01spacecalibrator/...
+#   <zip-root>/01openvrpair/...                  (driver tree the user copies into SteamVR\drivers\)
+#   <zip-root>/01openvrpair/resources/enable_calibration.flag
 #   <zip-root>/version.txt
-# User extracts the zip anywhere, then copies driver_01spacecalibrator/ into Steam's
+# User extracts the zip anywhere, then copies 01openvrpair/ into Steam's
 # steamapps/common/SteamVR/drivers/.
 if ($SkipZip) {
     Write-Host "`nSkipping release zip (-SkipZip)." -ForegroundColor DarkGray
@@ -183,7 +202,17 @@ if ($SkipZip) {
     New-Item -ItemType Directory -Path $StageDir -Force | Out-Null
 
     Copy-Item -Path $OverlayExe -Destination $StageDir
-    Copy-Item -Path $DriverDir -Destination $StageDir -Recurse
+    # Copy the driver tree under its eventual install folder name so a user
+    # extracting the zip can drag-and-drop 01openvrpair into SteamVR\drivers\
+    # without a rename step.
+    $StagedDriverDir = Join-Path $StageDir "01openvrpair"
+    Copy-Item -Recurse -Path $PairDriverTree -Destination $StagedDriverDir
+    # Drop the calibration flag so SC's installer / drag-drop install enables
+    # only the calibration feature out of the box. Smoothing flag stays absent;
+    # the OpenVR-Smoothing installer drops its own.
+    $StagedFlagDir = Join-Path $StagedDriverDir "resources"
+    if (-not (Test-Path $StagedFlagDir)) { New-Item -ItemType Directory -Force -Path $StagedFlagDir | Out-Null }
+    Set-Content -Path (Join-Path $StagedFlagDir "enable_calibration.flag") -Value 'enabled' -NoNewline
     $FullVersion | Set-Content -Path (Join-Path $StageDir "version.txt") -Encoding UTF8 -NoNewline
 
     $ZipPath = Join-Path $ReleaseDir "OpenVR-SpaceCalibrator-$FullVersion.zip"
@@ -198,4 +227,6 @@ if ($SkipZip) {
 
 Write-Host "`nBuild $FullVersion complete." -ForegroundColor Green
 Write-Host "  Overlay: $OverlayExe" -ForegroundColor DarkGray
-Write-Host "  Driver:  $DriverDll"  -ForegroundColor DarkGray
+if (-not $SkipZip) {
+    Write-Host "  Driver:  $PairDriverDll" -ForegroundColor DarkGray
+}

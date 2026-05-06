@@ -24,6 +24,8 @@ target_include_directories(spacecal_replay
     PRIVATE ${CMAKE_SOURCE_DIR}
     PRIVATE ${CMAKE_SOURCE_DIR}/src/common
     PRIVATE ${CMAKE_SOURCE_DIR}/src/overlay
+    # Protocol.h and MotionGate.h moved into the OpenVR-PairDriver submodule.
+    PRIVATE ${CMAKE_SOURCE_DIR}/lib/OpenVR-PairDriver/src/common
     PRIVATE ${CMAKE_SOURCE_DIR}/lib
     PRIVATE ${CMAKE_SOURCE_DIR}/lib/openvr/headers
     PRIVATE ${CMAKE_SOURCE_DIR}/lib/Eigen
