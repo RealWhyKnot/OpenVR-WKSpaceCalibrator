@@ -936,16 +936,38 @@ void CCal_DrawSettings() {
 					"offset above when on.");
 			}
 
-			ImGui::Indent();
+			ImGui::EndGroupPanel();
+		}
+
+		// Experimental opt-in toggles. New flags ship here default-off until real-
+		// world session evidence shows they are an improvement (or a regression to
+		// roll back). Header is collapsed by default so the panel doesn't grow
+		// noisy as more flags accumulate. Plain English on labels; engineering
+		// terms (algorithm names, paper refs) live in the tooltip if anywhere.
+		{
+			ImGui::BeginGroupPanel("Experimental (opt-in, may break)", panel_size);
+			ImGui::TextWrapped("Off by default. Enable only if you want to help validate a new path. "
+				"Each toggle changes one specific code path; if tracking regresses after you enable "
+				"one, turn it back off and the old behavior returns.");
+			ImGui::Spacing();
+
+			// Whitened-spectrum latency estimator (GCC-PHAT, Knapp-Carter 1976).
+			// Only active when Auto-detect target latency above is on -- the
+			// flag selects which algorithm runs inside that path.
 			ImGui::BeginDisabled(!CalCtx.latencyAutoDetect);
-			ImGui::Checkbox("Use experimental whitened-spectrum estimator", &CalCtx.useGccPhatLatency);
-			if (ImGui::IsItemHovered(0)) {
-				ImGui::SetTooltip("Alternative algorithm (GCC-PHAT). May be sharper when the two tracking\n"
-					"systems' velocity signals have very different frequency content. Off by\n"
-					"default; the standard estimator is well-validated.");
-			}
+			ImGui::Checkbox("Whitened-spectrum latency estimator", &CalCtx.useGccPhatLatency);
 			ImGui::EndDisabled();
-			ImGui::Unindent();
+			if (ImGui::IsItemHovered(0)) {
+				if (CalCtx.latencyAutoDetect) {
+					ImGui::SetTooltip("Replaces the default time-domain cross-correlator with a GCC-PHAT\n"
+						"variant (Knapp-Carter 1976). May be sharper when the two tracking systems'\n"
+						"velocity signals have very different frequency content (e.g. heavy IMU\n"
+						"low-pass on one side). The default time-domain estimator is well-validated;\n"
+						"turn this on only if your auto-detected offset reads as jumpy.");
+				} else {
+					ImGui::SetTooltip("Requires Auto-detect target latency above. Off by default.");
+				}
+			}
 
 			ImGui::EndGroupPanel();
 		}
