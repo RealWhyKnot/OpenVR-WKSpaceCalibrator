@@ -13,6 +13,7 @@ The most recent release is at the top.
 
 ### Changed
 - Consume OpenVR-PairDriver via submodule, drop local driver tree (e8678db)
+- **deps:** Bump OpenVR-PairDriver to ceb1416 (InputHealth Stages 1A-1D) (b6bc0d9)
 
 ---
 
