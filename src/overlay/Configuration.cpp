@@ -296,6 +296,8 @@ void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		ctx.latencyAutoDetect = obj["latency_auto_detect"].get<bool>();
 	if (obj["estimated_latency_offset_ms"].is<double>())
 		ctx.estimatedLatencyOffsetMs = obj["estimated_latency_offset_ms"].get<double>();
+	if (obj["latency_use_gcc_phat"].is<bool>())
+		ctx.useGccPhatLatency = obj["latency_use_gcc_phat"].get<bool>();
 
 	// Native prediction-suppression settings.
 	//
@@ -619,6 +621,7 @@ void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	WRITE_IF_CHANGED_DOUBLE("target_latency_offset_ms",     targetLatencyOffsetMs);
 	WRITE_IF_CHANGED_BOOL  ("latency_auto_detect",          latencyAutoDetect);
 	WRITE_IF_CHANGED_DOUBLE("estimated_latency_offset_ms",  estimatedLatencyOffsetMs);
+	WRITE_IF_CHANGED_BOOL  ("latency_use_gcc_phat",         useGccPhatLatency);
 	WRITE_IF_CHANGED_BOOL  ("recalibrate_on_movement",      recalibrateOnMovement);
 	WRITE_IF_CHANGED_BOOL  ("base_station_drift_correction", baseStationDriftCorrectionEnabled);
 	WRITE_IF_CHANGED_DOUBLE("calibration_speed",            calibrationSpeed);
