@@ -66,6 +66,27 @@ TEST(RobustScaleQn, ResistsFiftyPercentOutliers) {
         << "Qn lost robustness under 49% outlier contamination: " << q;
 }
 
+TEST(RobustScaleQn, LargeInputDoesNotOOM) {
+    // Regression: the production IRLS feeds the Qn helper with O(N^2) per-row
+    // residuals -- 250 samples produces ~62k rows. The original Qn allocated
+    // a (rows choose 2) pair-distance vector, which is ~1.9e9 doubles =
+    // 15 GB on 62k input -- bad_alloc -> overlay crash. The user hit this
+    // by enabling the Tukey/Qn toggle at runtime on 2026-05-05; build
+    // 2026.5.5.16-15D8 crashed within 0.5 sec of the toggle flip.
+    //
+    // The fix stride-samples the input down to kQnInputCap when it is
+    // larger. This test validates: (a) no crash on a 100k-element input,
+    // (b) the recovered scale is still close to the true sigma.
+    std::mt19937 rng(2024);
+    std::normal_distribution<double> g(0.0, 1.0);
+    std::vector<double> xs;
+    xs.reserve(100000);
+    for (int i = 0; i < 100000; i++) xs.push_back(g(rng));
+    const double q = Qn(xs);
+    EXPECT_GT(q, 0.85);
+    EXPECT_LT(q, 1.15);
+}
+
 TEST(RobustScaleQn, HandlesAsymmetricDistribution) {
     // Qn does not assume symmetry of the residual distribution. Mix samples
     // from a left-skewed distribution: 60 samples in [-0.1, 0.0] and 40 in

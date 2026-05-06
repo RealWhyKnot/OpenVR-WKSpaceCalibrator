@@ -862,10 +862,13 @@ void LoadProfile(CalibrationContext &ctx)
 		// investigator can correlate any post-load behavior change with the
 		// load itself (rather than guessing whether the user re-applied a
 		// stale profile mid-session).
+		// NOTE: ctx.calibratedTranslation is stored in centimetres (see
+		// Calibration.cpp:2800 -- "convert to cm units for profile storage").
+		// Do NOT multiply by 100; the value is already in cm.
 		const double transMagCm =
 			std::sqrt(ctx.calibratedTranslation.x() * ctx.calibratedTranslation.x()
 			        + ctx.calibratedTranslation.y() * ctx.calibratedTranslation.y()
-			        + ctx.calibratedTranslation.z() * ctx.calibratedTranslation.z()) * 100.0;
+			        + ctx.calibratedTranslation.z() * ctx.calibratedTranslation.z());
 		char loadBuf[320];
 		snprintf(loadBuf, sizeof loadBuf,
 			"profile_loaded: bytes=%zu valid=%d trans_mag_cm=%.2f euler_deg=(%.2f,%.2f,%.2f)"
