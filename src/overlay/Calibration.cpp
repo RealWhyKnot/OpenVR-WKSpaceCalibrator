@@ -8,6 +8,8 @@
 #include "WedgeDetector.h"   // ShouldFireRuntimeWedgeRecovery, kMaxPlausibleCalibrationMagnitudeCm
 #include "GeometryShiftDetector.h"  // IsCurrentErrorSpike, ShouldFireGeometryShiftRecovery
 #include "MotionGate.h"      // ShouldBlendCycle — auto-recovery snap decision
+#include "LatencyEstimator.h"  // spacecal::latency::EstimateLagTimeDomain / EstimateLagGccPhat
+#include "TiltDiagnostic.h"    // spacecal::gravity::EvaluateTilt — sustained gravity-disagreement annotation
 #include "Wizard.h"          // spacecal::wizard::IsActive — gate the runtime wedge detector
                              // off while the user is mid-setup so it can't disrupt them.
 
@@ -653,72 +655,24 @@ namespace {
 	// maximised, with sub-sample resolution from a quadratic fit around the peak.
 	// Positive lag means the target signal lags the reference signal (target arrives later).
 	//
-	// Energy threshold: we require RMS speed > 0.1 m/s on both signals so we don't
-	// chase noise when the user is standing still.
+	// 2026-05-05: math extracted to spacecal::latency::EstimateLagTimeDomain in
+	// LatencyEstimator.h so it can be unit-tested directly. This wrapper
+	// dispatches to either the original time-domain CC (default) or to the
+	// GCC-PHAT variant (Knapp & Carter 1976) based on `useGccPhat`. GCC-PHAT
+	// is opt-in until real-session evidence confirms the whitened-spectrum
+	// estimate is preferable; the math review pinned time-domain CC as
+	// "empirically validated, not a sore point".
 	bool EstimateLatencyLagSamples(
 		const std::deque<double>& ref,
 		const std::deque<double>& tgt,
 		int maxTau,
+		bool useGccPhat,
 		double* lagSamplesOut)
 	{
-		const size_t N = ref.size();
-		if (N < (size_t)(2 * maxTau + 4) || tgt.size() != N) return false;
-
-		// Energy gate: avoid biting on noise.
-		double refE = 0, tgtE = 0;
-		for (size_t i = 0; i < N; i++) { refE += ref[i] * ref[i]; tgtE += tgt[i] * tgt[i]; }
-		double refRms = std::sqrt(refE / (double)N);
-		double tgtRms = std::sqrt(tgtE / (double)N);
-		const double kMinRmsSpeed = 0.1; // m/s
-		if (refRms < kMinRmsSpeed || tgtRms < kMinRmsSpeed) return false;
-
-		// Mean-subtract so a constant-offset signal doesn't dominate the correlation.
-		double refMean = 0, tgtMean = 0;
-		for (size_t i = 0; i < N; i++) { refMean += ref[i]; tgtMean += tgt[i]; }
-		refMean /= (double)N; tgtMean /= (double)N;
-
-		std::vector<double> r(N), t(N);
-		for (size_t i = 0; i < N; i++) { r[i] = ref[i] - refMean; t[i] = tgt[i] - tgtMean; }
-
-		// C(tau) = sum_k r[k] * t[k + tau], for tau in [-maxTau, +maxTau]. We index
-		// t[k + tau] only when in range; the truncated sum is the standard biased
-		// estimator and is fine since N >> maxTau.
-		std::vector<double> C(2 * maxTau + 1, 0.0);
-		int bestIdx = -1;
-		double bestVal = -std::numeric_limits<double>::infinity();
-		for (int tau = -maxTau; tau <= maxTau; tau++) {
-			int idx = tau + maxTau;
-			double sum = 0.0;
-			int kStart = std::max(0, -tau);
-			int kEnd = std::min((int)N, (int)N - tau);
-			for (int k = kStart; k < kEnd; k++) {
-				sum += r[k] * t[k + tau];
-			}
-			C[idx] = sum;
-			if (sum > bestVal) { bestVal = sum; bestIdx = idx; }
+		if (useGccPhat) {
+			return spacecal::latency::EstimateLagGccPhat(ref, tgt, maxTau, lagSamplesOut);
 		}
-
-		if (bestIdx <= 0 || bestIdx >= (int)C.size() - 1) {
-			// Peak at the edge — under-determined; fall back to integer lag.
-			*lagSamplesOut = (double)(bestIdx - maxTau);
-			return true;
-		}
-
-		// Quadratic interpolation around the integer peak for sub-sample resolution.
-		// y0 = C[bestIdx-1], y1 = C[bestIdx], y2 = C[bestIdx+1].
-		// Fractional offset of the parabolic peak = (y0 - y2) / (2*(y0 - 2y1 + y2)).
-		double y0 = C[bestIdx - 1];
-		double y1 = C[bestIdx];
-		double y2 = C[bestIdx + 1];
-		double denom = (y0 - 2.0 * y1 + y2);
-		double frac = 0.0;
-		if (std::fabs(denom) > 1e-12) {
-			frac = 0.5 * (y0 - y2) / denom;
-			// Bound the fractional shift; a parabolic peak should be within ±1 sample.
-			if (!std::isfinite(frac) || std::fabs(frac) > 1.0) frac = 0.0;
-		}
-		*lagSamplesOut = (double)(bestIdx - maxTau) + frac;
-		return true;
+		return spacecal::latency::EstimateLagTimeDomain(ref, tgt, maxTau, lagSamplesOut);
 	}
 
 	bool DetectExternalSmoothingTool(std::string& outName) {
@@ -2214,7 +2168,7 @@ void CalibrationTick(double time)
 		ctx.timeLastLatencyEstimate = time;
 		double lagSamples = 0.0;
 		const int kMaxTau = 10;
-		if (EstimateLatencyLagSamples(ctx.refSpeedHistory, ctx.targetSpeedHistory, kMaxTau, &lagSamples)) {
+		if (EstimateLatencyLagSamples(ctx.refSpeedHistory, ctx.targetSpeedHistory, kMaxTau, ctx.useGccPhatLatency, &lagSamples)) {
 			// Convert sample lag to ms using the *empirical* sample rate from the
 			// timestamp ring. This is more honest than assuming a fixed 20 Hz: the
 			// rate is whatever CollectSample is being called at right now.
@@ -2601,6 +2555,40 @@ void CalibrationTick(double time)
 		// math doesn't fight the user trying to inspect the current result.
 		if (!CalCtx.calibrationPaused) {
 			calibration.ComputeIncremental(lerp, CalCtx.continuousCalibrationThreshold, CalCtx.maxRelativeErrorThreshold, CalCtx.ignoreOutliers);
+
+			// Sustained gravity-axis disagreement diagnostic. Push the per-tick
+			// residual pitch+roll reading into a rolling 60s window and ask
+			// the pure-helper decision (TiltDiagnostic.h) whether the median
+			// has crossed the 1.0 deg sustained threshold. Logging-only:
+			// surfaces "your two systems disagree about which way is down"
+			// as a sustained signal so the user can re-run room setup. No
+			// calibration behavior change. See project_future_improvements_
+			// 2026-05-05.md Tier 1 #1 for the eventual Pacher-2021 RFU-style
+			// correction that this diagnostic is the prerequisite for.
+			{
+				const double tiltDeg = calibration.m_residualPitchRollDeg;
+				if (std::isfinite(tiltDeg) && tiltDeg >= 0.0) {
+					CalCtx.tiltDiagnosticWindow.push_back({time, tiltDeg});
+					const double cutoff = time - spacecal::gravity::kSustainedWindowSeconds;
+					while (!CalCtx.tiltDiagnosticWindow.empty()
+						&& CalCtx.tiltDiagnosticWindow.front().timestamp_s < cutoff) {
+						CalCtx.tiltDiagnosticWindow.pop_front();
+					}
+					const auto decision = spacecal::gravity::EvaluateTilt(
+						CalCtx.tiltDiagnosticWindow, time, CalCtx.tiltSustainedAlarmed);
+					if (decision.sustainedDisagreement != CalCtx.tiltSustainedAlarmed) {
+						CalCtx.tiltSustainedAlarmed = decision.sustainedDisagreement;
+						CalCtx.tiltLastAnnotatedMedian = decision.medianDeg;
+						char tbuf[224];
+						snprintf(tbuf, sizeof tbuf,
+							"gravity_disagreement_%s: median_tilt_deg=%.3f window_samples=%zu threshold=%.2f",
+							decision.sustainedDisagreement ? "sustained_on" : "sustained_off",
+							decision.medianDeg, CalCtx.tiltDiagnosticWindow.size(),
+							spacecal::gravity::kSustainedTiltThresholdDeg);
+						Metrics::WriteLogAnnotation(tbuf);
+					}
+				}
+			}
 		}
 
 		// Multi-ecosystem extras: each runs its own continuous calibration

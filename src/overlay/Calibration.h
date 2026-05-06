@@ -20,6 +20,7 @@
 // in Calibration.cpp -- keeps the destructor available everywhere without
 // dragging the stubs through extra link steps.
 #include "CalibrationCalc.h"
+#include "TiltDiagnostic.h"  // spacecal::gravity::TiltSample for the diagnostic window
 
 enum class CalibrationState
 {
@@ -194,6 +195,28 @@ struct CalibrationContext
 	std::deque<double> targetSpeedHistory;
 	std::deque<double> speedSampleTimes;
 	double timeLastLatencyEstimate = 0.0;
+
+	// Opt-in switch for the GCC-PHAT latency estimator (Knapp & Carter 1976)
+	// alongside the original time-domain cross-correlator. Default OFF: the
+	// 2026-05-04 math review pinned the existing time-domain CC as
+	// "empirically validated, not a sore point", so we keep it as the
+	// default and make GCC-PHAT a logged-side-by-side alternative until
+	// real-session evidence shows the whitened-spectrum estimate is
+	// preferable. Both algorithms are pure helpers in
+	// src/overlay/LatencyEstimator.h. Persisted via Configuration.cpp.
+	bool useGccPhatLatency = false;
+
+	// Rolling window of per-solve residual pitch+roll readings (degrees), used
+	// by spacecal::gravity::EvaluateTilt to flag sustained gravity-axis
+	// disagreement between the reference and target tracking systems. Pushed
+	// each ComputeIncremental tick that produces a candidate; trimmed to the
+	// last kSustainedWindowSeconds of history. Logging-only diagnostic:
+	// surfaces "your two systems disagree about which way is down by X
+	// degrees" as a sustained signal so the user can correct (e.g. re-run
+	// room setup) -- the calibration math itself is unchanged.
+	std::deque<spacecal::gravity::TiltSample> tiltDiagnosticWindow;
+	bool tiltSustainedAlarmed = false;
+	double tiltLastAnnotatedMedian = -1.0;
 
 	protocol::AlignmentSpeedParams alignmentSpeedParams;
 	bool enableStaticRecalibration;
