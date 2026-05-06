@@ -981,6 +981,19 @@ void CCal_DrawSettings() {
 					"has not misfired in observed sessions.");
 			}
 
+			// Velocity-aware outlier weighting in the IRLS translation solve.
+			// Down-weights residuals taken during fast motion as likely
+			// glitches; preserves residuals taken at rest as legitimate
+			// "cal is wrong here" signal.
+			ImGui::Checkbox("Velocity-aware outlier weighting", &CalCtx.useVelocityAwareWeighting);
+			if (ImGui::IsItemHovered(0)) {
+				ImGui::SetTooltip("Scales the per-pair IRLS Cauchy threshold inversely with motion magnitude\n"
+					"so high-residual rows from fast-moving frames are suppressed as likely glitches,\n"
+					"while high-residual rows from stationary frames remain informative (the cal\n"
+					"genuinely needs an update there). Off by default; the dominant rejection in\n"
+					"observed logs is axis_variance_low which this does not address.");
+			}
+
 			ImGui::EndGroupPanel();
 		}
 

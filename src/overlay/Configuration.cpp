@@ -300,6 +300,8 @@ void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		ctx.useGccPhatLatency = obj["latency_use_gcc_phat"].get<bool>();
 	if (obj["geometry_shift_use_cusum"].is<bool>())
 		ctx.useCusumGeometryShift = obj["geometry_shift_use_cusum"].get<bool>();
+	if (obj["irls_velocity_aware"].is<bool>())
+		ctx.useVelocityAwareWeighting = obj["irls_velocity_aware"].get<bool>();
 
 	// Native prediction-suppression settings.
 	//
@@ -625,6 +627,7 @@ void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	WRITE_IF_CHANGED_DOUBLE("estimated_latency_offset_ms",  estimatedLatencyOffsetMs);
 	WRITE_IF_CHANGED_BOOL  ("latency_use_gcc_phat",         useGccPhatLatency);
 	WRITE_IF_CHANGED_BOOL  ("geometry_shift_use_cusum",     useCusumGeometryShift);
+	WRITE_IF_CHANGED_BOOL  ("irls_velocity_aware",          useVelocityAwareWeighting);
 	WRITE_IF_CHANGED_BOOL  ("recalibrate_on_movement",      recalibrateOnMovement);
 	WRITE_IF_CHANGED_BOOL  ("base_station_drift_correction", baseStationDriftCorrectionEnabled);
 	WRITE_IF_CHANGED_DOUBLE("calibration_speed",            calibrationSpeed);

@@ -216,6 +216,18 @@ struct CalibrationContext
 	// geometry_shift_use_cusum in profile JSON.
 	bool useCusumGeometryShift = false;
 
+	// Opt-in switch for velocity-aware outlier weighting in the IRLS
+	// translation solve. When on, the per-pair Cauchy threshold c is
+	// scaled DOWN with motion magnitude: c_pair = c0 / (1 + kappa *
+	// v_pair / v_ref) where v_pair = max(refSpeed, targetSpeed) across
+	// the pair. Stationary pairs keep c0 (high-residual stays informative
+	// — "the cal is wrong here"); fast-motion pairs get a sharper cutoff
+	// that suppresses high-residual rows as glitches. Default OFF; only
+	// worth turning on if motion-glitch failure modes are observed
+	// (current logs show axis_variance_low dominating, which this does
+	// not address). Persisted as irls_velocity_aware in profile JSON.
+	bool useVelocityAwareWeighting = false;
+
 	// Rolling window of per-solve residual pitch+roll readings (degrees), used
 	// by spacecal::gravity::EvaluateTilt to flag sustained gravity-axis
 	// disagreement between the reference and target tracking systems. Pushed
