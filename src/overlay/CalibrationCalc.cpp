@@ -467,6 +467,11 @@ Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rot
 		Eigen::Vector3d c;
 		Eigen::Matrix3d q;
 		double weight;
+		// Max linear speed (m/s) across the four pose readings (ref/target,
+		// sample i / sample j) that produced this row. Zero when sample
+		// velocity wasn't recorded (replay harness, tests). Consumed only
+		// by the velocity-aware IRLS path; the default Cauchy path ignores it.
+		double pairSpeedMax;
 	};
 	std::vector<DeltaRow> deltas;
 	deltas.reserve(m_samples.size() * m_samples.size());
@@ -492,17 +497,24 @@ Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rot
 			double weight = std::min(refA, targetA);
 			if (!std::isfinite(weight) || weight < 0.01) weight = 0.01;
 
+			// Maximum recorded linear speed across the pair. ANY mover is
+			// enough to mark the pair as "in motion"; only when all four
+			// readings were stationary do we treat residuals as ground-truth
+			// signal that the calibration is wrong.
+			const double pairSpeed = std::max(std::max(m_samples[i].refSpeed, m_samples[i].targetSpeed),
+			                                  std::max(m_samples[j].refSpeed, m_samples[j].targetSpeed));
+
 			auto QAi = s_i.ref.rot.transpose();
 			auto QAj = s_j.ref.rot.transpose();
 			auto dQA = QAj - QAi;
 			auto CA = QAj * (s_j.ref.trans - s_j.target.trans) - QAi * (s_i.ref.trans - s_i.target.trans);
-			deltas.push_back({ CA, dQA, weight });
+			deltas.push_back({ CA, dQA, weight, pairSpeed });
 
 			auto QBi = s_i.target.rot.transpose();
 			auto QBj = s_j.target.rot.transpose();
 			auto dQB = QBj - QBi;
 			auto CB = QBj * (s_j.ref.trans - s_j.target.trans) - QBi * (s_i.ref.trans - s_i.target.trans);
-			deltas.push_back({ CB, dQB, weight });
+			deltas.push_back({ CB, dQB, weight, pairSpeed });
 		}
 	}
 
@@ -659,12 +671,30 @@ Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rot
 		std::nth_element(absResid.begin(), absResid.begin() + absResid.size() / 2, absResid.end());
 		double mad = absResid[absResid.size() / 2];
 
-		double c = kCauchyTune * std::max(mad, kMadFloor);
-		double cInv = 1.0 / c;
+		const double c0 = kCauchyTune * std::max(mad, kMadFloor);
 
-		// Cauchy weights w_i = 1 / (1 + (r_i / c)^2).
+		// Velocity-aware per-row scaling (opt-in). When useVelocityAwareWeighting
+		// is on, divide the per-pair Cauchy threshold by (1 + kappa * v / vRef)
+		// so fast-motion pairs get a SHARPER cutoff and stationary pairs keep
+		// the standard c0. Direction follows sore-point #12 in the math
+		// rundown: stationary high-residual is informative ("cal is wrong
+		// here"), motion high-residual is a glitch (suppress). Default-off
+		// path is identical to the previous single-c0 behavior.
+		constexpr double kVelocityKappa = 2.0;
+		constexpr double kVelocityRefMps = 0.3;  // m/s; brisk arm-swing speed
+
+		// Cauchy weights w_i = 1 / (1 + (r_i / c_i)^2).
 		for (size_t i = 0; i < deltas.size(); i++) {
-			double rOverC = perPair(static_cast<Eigen::Index>(i)) * cInv;
+			double cThis = c0;
+			if (useVelocityAwareWeighting) {
+				const double v = std::max(0.0, deltas[i].pairSpeedMax);
+				const double scale = 1.0 + kVelocityKappa * v / kVelocityRefMps;
+				cThis = c0 / scale;
+				// Floor at kMadFloor / 1e3 to avoid divide-by-zero on a runaway
+				// velocity reading; keeps the weight calculation finite.
+				if (!(cThis > 1e-9)) cThis = 1e-9;
+			}
+			const double rOverC = perPair(static_cast<Eigen::Index>(i)) / cThis;
 			m_weightsTrans(static_cast<Eigen::Index>(i)) = 1.0 / (1.0 + rOverC * rOverC);
 		}
 

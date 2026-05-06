@@ -513,14 +513,14 @@ namespace {
 		// Linear velocity is preferred over angular for these speed signals — angular
 		// velocity from optical trackers is often filter-shaped (low-pass), which
 		// blurs the transient that the cross-correlator looks for.
+		auto speedFromVel = [](const double v[3]) -> double {
+			double s = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+			if (!std::isfinite(s)) return 0.0;
+			return s;
+		};
+		const double refSpeed = speedFromVel(ctx.devicePoses[ctx.referenceID].vecVelocity);
+		const double tgtSpeed = speedFromVel(ctx.devicePoses[ctx.targetID].vecVelocity);
 		{
-			auto speedFromVel = [](const double v[3]) -> double {
-				double s = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-				if (!std::isfinite(s)) return 0.0;
-				return s;
-			};
-			double refSpeed = speedFromVel(ctx.devicePoses[ctx.referenceID].vecVelocity);
-			double tgtSpeed = speedFromVel(ctx.devicePoses[ctx.targetID].vecVelocity);
 			double now = glfwGetTime();
 
 			CalibrationContext& mctx = const_cast<CalibrationContext&>(ctx);
@@ -541,7 +541,9 @@ namespace {
 		calibration.PushSample(Sample(
 			ConvertPose(reference),
 			ConvertPose(target),
-			glfwGetTime()
+			glfwGetTime(),
+			refSpeed,
+			tgtSpeed
 		));
 
 		// Feed the auto-lock detector with the same sample. We use the world
@@ -2574,6 +2576,7 @@ void CalibrationTick(double time)
 		CalCtx.messages.clear();
 		calibration.enableStaticRecalibration = CalCtx.enableStaticRecalibration;
 		calibration.lockRelativePosition = CalCtx.lockRelativePosition;
+		calibration.useVelocityAwareWeighting = CalCtx.useVelocityAwareWeighting;
 		// User-toggled "Pause updates" from the continuous-cal UI: keep the
 		// already-applied driver offset live, skip any new solve cycle so the
 		// math doesn't fight the user trying to inspect the current result.
@@ -2632,7 +2635,12 @@ void CalibrationTick(double time)
 			if (refPose.result != vr::ETrackingResult::TrackingResult_Running_OK) continue;
 			if (tgtPose.result != vr::ETrackingResult::TrackingResult_Running_OK) continue;
 
-			Sample s(ConvertPose(refPose), ConvertPose(tgtPose), glfwGetTime());
+			auto vmag = [](const double v[3]) -> double {
+				const double s = std::sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+				return std::isfinite(s) ? s : 0.0;
+			};
+			Sample s(ConvertPose(refPose), ConvertPose(tgtPose), glfwGetTime(),
+			         vmag(refPose.vecVelocity), vmag(tgtPose.vecVelocity));
 			extra.calc->PushSample(s);
 			while (extra.calc->SampleCount() > CalCtx.SampleCount()) extra.calc->ShiftSample();
 

@@ -52,8 +52,21 @@ struct Sample
 	Pose ref, target;
 	bool valid;
 	double timestamp;
+	// Linear-speed magnitudes (m/s) of the reference and target devices at
+	// sample-collection time. Sourced from vr::DriverPose_t::vecVelocity in
+	// the production CollectSample path; left at zero for replay-harness and
+	// test paths that don't have velocity data. Used by the velocity-aware
+	// outlier weighting (default-off experimental flag) to scale the per-row
+	// IRLS Cauchy threshold so high-residual samples taken during fast motion
+	// can be suppressed as glitches while stationary high-residual samples
+	// stay informative.
+	double refSpeed = 0.0;
+	double targetSpeed = 0.0;
 	Sample() : valid(false), timestamp(0) { }
 	Sample(Pose ref, Pose target, double timestamp) : valid(true), ref(ref), target(target), timestamp(timestamp){ }
+	Sample(Pose ref, Pose target, double timestamp, double refSpeed, double targetSpeed)
+		: valid(true), ref(ref), target(target), timestamp(timestamp),
+		  refSpeed(refSpeed), targetSpeed(targetSpeed) { }
 };
 
 class CalibrationCalc {
@@ -62,6 +75,12 @@ public:
 
 	bool enableStaticRecalibration;
 	bool lockRelativePosition = false;
+	// Opt-in: when true, the per-pair IRLS Cauchy threshold scales with the
+	// pair's motion magnitude so stationary high-residual rows stay
+	// informative while fast-motion high-residual rows are aggressively
+	// suppressed as glitches. Set by the caller per-tick from
+	// CalCtx.useVelocityAwareWeighting; default-off path is unchanged.
+	bool useVelocityAwareWeighting = false;
 	
 	const Eigen::AffineCompact3d Transformation() const 
 	{

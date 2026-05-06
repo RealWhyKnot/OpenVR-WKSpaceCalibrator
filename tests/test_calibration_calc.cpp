@@ -798,3 +798,88 @@ TEST(CalibrationCalcTest, ComputeOneshotRejectsTooFewSamples) {
     EXPECT_NE(out.find("too few samples"), std::string::npos)
         << "Expected 'too few samples' log; got: " << out;
 }
+
+// ---------------------------------------------------------------------------
+// Velocity-aware outlier weighting (Tier 2 #6, opt-in flag).
+//
+// Off-path: when the flag is OFF, the solver must produce identical output
+// regardless of what speeds the samples carry. Pin: solve a known calibration
+// twice, once with all-zero velocities and once with random non-zero, expect
+// bit-for-bit identical recovered transforms.
+//
+// On-path: when the flag is ON and one of the samples is a glitch (target
+// translation displaced) marked with a high velocity, the velocity-aware
+// kernel suppresses it more aggressively than plain Cauchy. Pin: with the
+// glitch present, useVelocityAwareWeighting=true recovers a fit closer to
+// truth than useVelocityAwareWeighting=false on the same input.
+// ---------------------------------------------------------------------------
+
+TEST(CalibrationCalcTest, VelocityAware_OffPath_IgnoresSpeed) {
+    const double yawRad = 15.0 * EIGEN_PI / 180.0;
+    Eigen::AffineCompact3d expected = MakeTransform(
+        yawRad, 0, 0, Eigen::Vector3d(0.20, 0.10, -0.30));
+
+    auto samplesNoSpeed = MakeSamplePairs(expected, kSampleCount);
+    auto samplesWithSpeed = samplesNoSpeed;
+    std::mt19937 rng(7);
+    std::uniform_real_distribution<double> vel(0.0, 1.5);
+    for (auto& s : samplesWithSpeed) {
+        s.refSpeed = vel(rng);
+        s.targetSpeed = vel(rng);
+    }
+
+    CalibrationCalc a, b;
+    a.useVelocityAwareWeighting = false;
+    b.useVelocityAwareWeighting = false;
+    for (auto& s : samplesNoSpeed) a.PushSample(s);
+    for (auto& s : samplesWithSpeed) b.PushSample(s);
+    ASSERT_TRUE(a.ComputeOneshot(false));
+    ASSERT_TRUE(b.ComputeOneshot(false));
+
+    const auto da = a.Transformation();
+    const auto db = b.Transformation();
+    EXPECT_LT((da.translation() - db.translation()).norm(), 1e-9)
+        << "Off-path translation must be speed-invariant";
+    EXPECT_LT(RotationErrorDegrees(da, db), 1e-6)
+        << "Off-path rotation must be speed-invariant";
+}
+
+TEST(CalibrationCalcTest, VelocityAware_OnPath_SuppressesMotionGlitch) {
+    const double yawRad = 20.0 * EIGEN_PI / 180.0;
+    Eigen::AffineCompact3d expected = MakeTransform(
+        yawRad, 0, 0, Eigen::Vector3d(0.10, 0.05, -0.20));
+    auto samples = MakeSamplePairs(expected, kSampleCount);
+
+    // Inject a glitch: sample 0 has its target translation pushed off by 30 cm
+    // along Z. Mark it as a high-velocity sample so the velocity-aware
+    // weighting can identify it as a likely glitch. All other samples carry
+    // a low velocity (0.05 m/s; below the 0.3 m/s reference speed) so they
+    // are treated as stationary and keep the standard Cauchy threshold.
+    samples[0].target.trans += Eigen::Vector3d(0.0, 0.0, 0.30);
+    samples[0].refSpeed = 1.2;     // glitch arrival during fast motion
+    samples[0].targetSpeed = 1.2;
+    for (size_t i = 1; i < samples.size(); i++) {
+        samples[i].refSpeed = 0.05;
+        samples[i].targetSpeed = 0.05;
+    }
+
+    CalibrationCalc cauchy, vel;
+    cauchy.useVelocityAwareWeighting = false;
+    vel.useVelocityAwareWeighting = true;
+    for (auto& s : samples) {
+        cauchy.PushSample(s);
+        vel.PushSample(s);
+    }
+    ASSERT_TRUE(cauchy.ComputeOneshot(/*ignoreOutliers=*/false));
+    ASSERT_TRUE(vel.ComputeOneshot(/*ignoreOutliers=*/false));
+
+    const double cauchyErr = (cauchy.Transformation().translation() - expected.translation()).norm();
+    const double velErr    = (vel.Transformation().translation()    - expected.translation()).norm();
+
+    // Velocity-aware should be at least as close to truth as plain Cauchy when
+    // a single fast-motion glitch sample is the only contaminant. Allow a tiny
+    // numerical slack so transient near-equal cases do not fail.
+    EXPECT_LE(velErr, cauchyErr + 1e-9)
+        << "velErr=" << velErr << " cauchyErr=" << cauchyErr
+        << " (velocity-aware should suppress the glitch at least as well)";
+}
