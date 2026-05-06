@@ -2132,6 +2132,30 @@ void CalibrationTick(double time)
 	// state into the resolved field.
 	ctx.ResolveLockMode();
 
+	// One-shot session-start config dump. Fires on the first non-skipped
+	// CalibrationTick after the profile has been loaded, so the annotation
+	// reflects the user's actual saved settings. Captures every experimental
+	// toggle + the load-bearing tunables. Saves a future investigator the
+	// "what version of the math is running" reverse-derivation from code.
+	{
+		static bool s_loggedConfigDump = false;
+		if (!s_loggedConfigDump) {
+			s_loggedConfigDump = true;
+			char dumpBuf[512];
+			snprintf(dumpBuf, sizeof dumpBuf,
+				"session_config_dump: gcc_phat=%d cusum=%d velocity_aware=%d tukey=%d kalman=%d"
+				" auto_detect_latency=%d ignore_outliers=%d static_recal=%d"
+				" recalibrate_on_movement=%d cal_speed=%.2f jitter_threshold=%.2f",
+				(int)ctx.useGccPhatLatency, (int)ctx.useCusumGeometryShift,
+				(int)ctx.useVelocityAwareWeighting, (int)ctx.useTukeyBiweight,
+				(int)ctx.useBlendFilter,
+				(int)ctx.latencyAutoDetect, (int)ctx.ignoreOutliers,
+				(int)ctx.enableStaticRecalibration, (int)ctx.recalibrateOnMovement,
+				(double)ctx.calibrationSpeed, (double)ctx.jitterThreshold);
+			Metrics::WriteLogAnnotation(dumpBuf);
+		}
+	}
+
 	// Bounds-check the device IDs once at the top of the tick. Many code paths
 	// downstream index devicePoses[ctx.referenceID] / devicePoses[ctx.targetID]
 	// directly (CollectSample, the sample-history pose recording near the end of
