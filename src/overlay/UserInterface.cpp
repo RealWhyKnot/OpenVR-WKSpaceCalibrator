@@ -994,6 +994,16 @@ void CCal_DrawSettings() {
 					"observed logs is axis_variance_low which this does not address.");
 			}
 
+			// Tukey biweight + Qn-scale alternative robust kernel.
+			ImGui::Checkbox("Tukey biweight robust kernel", &CalCtx.useTukeyBiweight);
+			if (ImGui::IsItemHovered(0)) {
+				ImGui::SetTooltip("Replaces the default IRLS Cauchy + MAD with Tukey biweight + Qn-scale\n"
+					"(Rousseeuw-Croux 1993). Tukey is redescending: residuals beyond the threshold\n"
+					"get exactly zero weight, so a single bad-frame outlier cannot drag the fit.\n"
+					"Qn does not saturate at the MAD floor and does not assume residual symmetry.\n"
+					"Off by default; the standard Cauchy + MAD has been adequate on observed data.");
+			}
+
 			ImGui::EndGroupPanel();
 		}
 

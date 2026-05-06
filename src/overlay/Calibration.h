@@ -228,6 +228,15 @@ struct CalibrationContext
 	// not address). Persisted as irls_velocity_aware in profile JSON.
 	bool useVelocityAwareWeighting = false;
 
+	// Opt-in switch for the Tukey biweight + Qn-scale path in the IRLS
+	// translation solve. Replaces the default Cauchy + MAD pair with a
+	// redescending kernel (large residuals get exactly zero weight) and
+	// a 50% breakdown scale estimator (no symmetry assumption, no MAD
+	// floor saturation). Default OFF; the Cauchy + MAD path has been
+	// adequate on observed Quest+Lighthouse residual distributions.
+	// Persisted as irls_use_tukey in profile JSON.
+	bool useTukeyBiweight = false;
+
 	// Rolling window of per-solve residual pitch+roll readings (degrees), used
 	// by spacecal::gravity::EvaluateTilt to flag sustained gravity-axis
 	// disagreement between the reference and target tracking systems. Pushed

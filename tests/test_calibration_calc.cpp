@@ -883,3 +883,47 @@ TEST(CalibrationCalcTest, VelocityAware_OnPath_SuppressesMotionGlitch) {
         << "velErr=" << velErr << " cauchyErr=" << cauchyErr
         << " (velocity-aware should suppress the glitch at least as well)";
 }
+
+// ---------------------------------------------------------------------------
+// Tukey biweight + Qn-scale robust kernel (Tier 2 #8, opt-in flag).
+//
+// Off-path: with the toggle off, the IRLS produces the same fit as it did
+// before the helpers existed. Pin: solve a known calibration with a fresh
+// Cauchy CalibrationCalc, expect the historical accuracy bounds to hold.
+//
+// On-path: with the toggle on, the IRLS swaps in Tukey biweight + Qn. On
+// clean synthetic data the recovered fit must still match truth within a
+// reasonable tolerance (the test ensures the new kernel is at least
+// algorithmically usable; behavior parity vs Cauchy is not required).
+// ---------------------------------------------------------------------------
+
+TEST(CalibrationCalcTest, TukeyBiweight_OffPath_UnchangedFromBaseline) {
+    const double yawRad = 12.0 * EIGEN_PI / 180.0;
+    Eigen::AffineCompact3d expected = MakeTransform(
+        yawRad, 0, 0, Eigen::Vector3d(0.20, 0.10, -0.30));
+    auto samples = MakeSamplePairs(expected, kSampleCount);
+
+    CalibrationCalc calc;
+    calc.useTukeyBiweight = false;
+    for (auto& s : samples) calc.PushSample(s);
+    ASSERT_TRUE(calc.ComputeOneshot(/*ignoreOutliers=*/false));
+
+    EXPECT_LT((calc.Transformation().translation() - expected.translation()).norm(), 5e-3);
+    EXPECT_LT(RotationErrorDegrees(calc.Transformation(), expected), 0.5);
+}
+
+TEST(CalibrationCalcTest, TukeyBiweight_OnPath_RecoversTruthOnCleanData) {
+    const double yawRad = 12.0 * EIGEN_PI / 180.0;
+    Eigen::AffineCompact3d expected = MakeTransform(
+        yawRad, 0, 0, Eigen::Vector3d(0.20, 0.10, -0.30));
+    auto samples = MakeSamplePairs(expected, kSampleCount);
+
+    CalibrationCalc calc;
+    calc.useTukeyBiweight = true;
+    for (auto& s : samples) calc.PushSample(s);
+    ASSERT_TRUE(calc.ComputeOneshot(/*ignoreOutliers=*/false));
+
+    EXPECT_LT((calc.Transformation().translation() - expected.translation()).norm(), 1e-2)
+        << "Tukey + Qn IRLS must still recover the truth on clean data";
+    EXPECT_LT(RotationErrorDegrees(calc.Transformation(), expected), 1.0);
+}

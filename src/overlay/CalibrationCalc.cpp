@@ -3,6 +3,7 @@
 #include "CalibrationMetrics.h"
 #include "Protocol.h"
 #include "WatchdogDecisions.h"  // ShouldClearViaWatchdog, IsCalibrationHealthy
+#include "RobustScale.h"        // Qn, TukeyWeight, kQnConsistency, kTukeyTune (opt-in IRLS path)
 
 #include <chrono>  // steady_clock for throttled diagnostic logs in
                    // CalibrateRotation / CalibrateTranslation. The throttle
@@ -658,44 +659,71 @@ Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rot
 			perPair(static_cast<Eigen::Index>(i)) = std::sqrt(s2);
 		}
 
-		// MAD on the absolute residuals. Uses partial sort via nth_element so
-		// it's O(N) rather than full sort.
-		std::vector<double> absResid(deltas.size());
-		for (size_t i = 0; i < deltas.size(); i++) absResid[i] = std::abs(perPair(static_cast<Eigen::Index>(i)));
-		std::nth_element(absResid.begin(), absResid.begin() + absResid.size() / 2, absResid.end());
-		double median = absResid[absResid.size() / 2];
+		// Scale estimate. Default path: MAD via two nth_element passes (O(N)).
+		// Opt-in path (useTukeyBiweight): Qn-scale (Rousseeuw-Croux 1993),
+		// O(N^2) over the per-pair residuals. Both produce a sigma estimate
+		// that the weight function consumes. Qn has 50% breakdown without
+		// requiring symmetry of the residual distribution and does not
+		// saturate at the kMadFloor.
+		double scale = 0.0;
+		if (useTukeyBiweight) {
+			std::vector<double> resids(deltas.size());
+			for (size_t i = 0; i < deltas.size(); i++) {
+				resids[i] = perPair(static_cast<Eigen::Index>(i));
+			}
+			scale = spacecal::robust::Qn(resids);
+			if (!(scale > kMadFloor)) scale = kMadFloor;
+		} else {
+			std::vector<double> absResid(deltas.size());
+			for (size_t i = 0; i < deltas.size(); i++) absResid[i] = std::abs(perPair(static_cast<Eigen::Index>(i)));
+			std::nth_element(absResid.begin(), absResid.begin() + absResid.size() / 2, absResid.end());
+			const double median = absResid[absResid.size() / 2];
 
-		// MAD = median(|r_i - median(r)|). Reuse absResid storage with the
-		// shifted residuals.
-		for (size_t i = 0; i < deltas.size(); i++) absResid[i] = std::abs(perPair(static_cast<Eigen::Index>(i)) - median);
-		std::nth_element(absResid.begin(), absResid.begin() + absResid.size() / 2, absResid.end());
-		double mad = absResid[absResid.size() / 2];
+			// MAD = median(|r_i - median(r)|). Reuse absResid storage with the
+			// shifted residuals.
+			for (size_t i = 0; i < deltas.size(); i++) absResid[i] = std::abs(perPair(static_cast<Eigen::Index>(i)) - median);
+			std::nth_element(absResid.begin(), absResid.begin() + absResid.size() / 2, absResid.end());
+			scale = absResid[absResid.size() / 2];
+			if (!(scale > kMadFloor)) scale = kMadFloor;
+		}
 
-		const double c0 = kCauchyTune * std::max(mad, kMadFloor);
+		// Tuning constant for the chosen kernel. Cauchy 95% efficiency
+		// historically uses Huber's c=1.345 here (a relabel; see
+		// CalibrationCalc.cpp:560 comment); Tukey biweight 95% efficiency
+		// uses c=4.685 paired with Qn.
+		const double tuneConstant = useTukeyBiweight
+			? spacecal::robust::kTukeyTune
+			: kCauchyTune;
+		const double c0 = tuneConstant * scale;
 
 		// Velocity-aware per-row scaling (opt-in). When useVelocityAwareWeighting
-		// is on, divide the per-pair Cauchy threshold by (1 + kappa * v / vRef)
-		// so fast-motion pairs get a SHARPER cutoff and stationary pairs keep
+		// is on, divide the per-pair threshold by (1 + kappa * v / vRef) so
+		// fast-motion pairs get a SHARPER cutoff and stationary pairs keep
 		// the standard c0. Direction follows sore-point #12 in the math
 		// rundown: stationary high-residual is informative ("cal is wrong
-		// here"), motion high-residual is a glitch (suppress). Default-off
-		// path is identical to the previous single-c0 behavior.
+		// here"), motion high-residual is a glitch (suppress). Composes with
+		// either kernel.
 		constexpr double kVelocityKappa = 2.0;
 		constexpr double kVelocityRefMps = 0.3;  // m/s; brisk arm-swing speed
 
-		// Cauchy weights w_i = 1 / (1 + (r_i / c_i)^2).
+		// Apply weights: Cauchy or Tukey biweight per the toggle.
 		for (size_t i = 0; i < deltas.size(); i++) {
 			double cThis = c0;
 			if (useVelocityAwareWeighting) {
 				const double v = std::max(0.0, deltas[i].pairSpeedMax);
-				const double scale = 1.0 + kVelocityKappa * v / kVelocityRefMps;
-				cThis = c0 / scale;
-				// Floor at kMadFloor / 1e3 to avoid divide-by-zero on a runaway
-				// velocity reading; keeps the weight calculation finite.
+				const double vScale = 1.0 + kVelocityKappa * v / kVelocityRefMps;
+				cThis = c0 / vScale;
 				if (!(cThis > 1e-9)) cThis = 1e-9;
 			}
-			const double rOverC = perPair(static_cast<Eigen::Index>(i)) / cThis;
-			m_weightsTrans(static_cast<Eigen::Index>(i)) = 1.0 / (1.0 + rOverC * rOverC);
+			const double r = perPair(static_cast<Eigen::Index>(i));
+			double w = 0.0;
+			if (useTukeyBiweight) {
+				w = spacecal::robust::TukeyWeight(r, cThis);
+			} else {
+				const double rOverC = r / cThis;
+				w = 1.0 / (1.0 + rOverC * rOverC);
+			}
+			m_weightsTrans(static_cast<Eigen::Index>(i)) = w;
 		}
 
 		// Convergence check: max relative weight change < 1%.

@@ -81,6 +81,12 @@ public:
 	// suppressed as glitches. Set by the caller per-tick from
 	// CalCtx.useVelocityAwareWeighting; default-off path is unchanged.
 	bool useVelocityAwareWeighting = false;
+	// Opt-in: when true, the IRLS robust kernel switches from Cauchy + MAD
+	// to Tukey biweight + Qn-scale. Tukey is redescending (large residuals
+	// -> exactly zero weight); Qn replaces MAD with a no-symmetry,
+	// no-saturation 50%-breakdown estimator. Set by the caller per-tick
+	// from CalCtx.useTukeyBiweight; default-off path is unchanged.
+	bool useTukeyBiweight = false;
 	
 	const Eigen::AffineCompact3d Transformation() const 
 	{
