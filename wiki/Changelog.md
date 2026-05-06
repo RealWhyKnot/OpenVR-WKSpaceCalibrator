@@ -11,7 +11,8 @@ The most recent release is at the top.
 
 ## Unreleased
 
-_No notable changes since the last release._
+### Changed
+- Consume OpenVR-PairDriver via submodule, drop local driver tree (e8678db)
 
 ---
 
