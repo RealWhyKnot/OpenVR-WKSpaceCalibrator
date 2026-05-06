@@ -944,6 +944,21 @@ void CCal_DrawSettings() {
 		// roll back). Header is collapsed by default so the panel doesn't grow
 		// noisy as more flags accumulate. Plain English on labels; engineering
 		// terms (algorithm names, paper refs) live in the tooltip if anywhere.
+		//
+		// Each toggle is wrapped in a previous-value compare so that a user flip
+		// emits a one-shot log annotation. This gives investigators reading a
+		// session log direct evidence of "behavior changed at time T because the
+		// user enabled X". The previous-value statics are function-local so they
+		// don't leak; first-frame initialization captures whatever the loaded
+		// profile says, and subsequent flips fire the annotation.
+		auto logToggleFlip = [](const char* key, bool& prev, bool current) {
+			if (prev != current) {
+				char buf[128];
+				snprintf(buf, sizeof buf, "experimental_toggle_flip: key=%s value=%d", key, (int)current);
+				Metrics::WriteLogAnnotation(buf);
+				prev = current;
+			}
+		};
 		{
 			ImGui::BeginGroupPanel("Experimental (opt-in, may break)", panel_size);
 			ImGui::TextWrapped("Off by default. Enable only if you want to help validate a new path. "
@@ -1014,6 +1029,23 @@ void CCal_DrawSettings() {
 					"geometry-shift recovery), the filter resets and falls back to the EMA path for\n"
 					"that tick. Off by default; the EMA is the validated default.");
 			}
+
+			// Toggle-flip diagnostic. Compare each flag to its previous value
+			// and emit a one-shot annotation on change. Statics are initialized
+			// to the loaded-profile values on first frame so we do not log a
+			// spurious flip just because the panel rendered for the first time.
+			static bool s_prevAutoDetect = CalCtx.latencyAutoDetect;
+			static bool s_prevGccPhat    = CalCtx.useGccPhatLatency;
+			static bool s_prevCusum      = CalCtx.useCusumGeometryShift;
+			static bool s_prevVelAware   = CalCtx.useVelocityAwareWeighting;
+			static bool s_prevTukey      = CalCtx.useTukeyBiweight;
+			static bool s_prevKalman     = CalCtx.useBlendFilter;
+			logToggleFlip("latency_auto_detect",       s_prevAutoDetect, CalCtx.latencyAutoDetect);
+			logToggleFlip("latency_use_gcc_phat",      s_prevGccPhat,    CalCtx.useGccPhatLatency);
+			logToggleFlip("geometry_shift_use_cusum",  s_prevCusum,      CalCtx.useCusumGeometryShift);
+			logToggleFlip("irls_velocity_aware",       s_prevVelAware,   CalCtx.useVelocityAwareWeighting);
+			logToggleFlip("irls_use_tukey",            s_prevTukey,      CalCtx.useTukeyBiweight);
+			logToggleFlip("blend_use_kalman",          s_prevKalman,     CalCtx.useBlendFilter);
 
 			ImGui::EndGroupPanel();
 		}
