@@ -97,3 +97,93 @@ static_assert(!ShouldFireGeometryShiftRecovery(2),
     "2 sustained spikes must not yet fire");
 static_assert(ShouldFireGeometryShiftRecovery(3),
     "3 sustained spikes is the documented trigger");
+
+// ---------------------------------------------------------------------------
+// CUSUM (Page 1954) opt-in path. Same recovery action as the legacy detector;
+// different per-tick decision. The pure helper UpdateCusumGeometryShift
+// owns the increment + threshold logic so we can pin it without spinning up
+// the calibration tick.
+// ---------------------------------------------------------------------------
+TEST(CusumGeometryShiftTest, NoiseAtBaselineDoesNotAccumulate) {
+    using spacecal::geometry_shift::CusumState;
+    using spacecal::geometry_shift::UpdateCusumGeometryShift;
+    using spacecal::geometry_shift::kCusumDriftMm;
+    using spacecal::geometry_shift::kCusumThreshold;
+    CusumState s{};
+    // Feed 100 ticks of "current = baseline" -- per-sample increment is
+    // (0 - drift) = -kCusumDriftMm < 0, so S stays clamped at 0.
+    for (int i = 0; i < 100; i++) {
+        const bool fire = UpdateCusumGeometryShift(s, /*current=*/2.0, /*baseline=*/2.0);
+        EXPECT_FALSE(fire);
+        EXPECT_DOUBLE_EQ(s.S, 0.0);
+    }
+}
+
+TEST(CusumGeometryShiftTest, BelowDriftDoesNotFire) {
+    using spacecal::geometry_shift::CusumState;
+    using spacecal::geometry_shift::UpdateCusumGeometryShift;
+    using spacecal::geometry_shift::kCusumDriftMm;
+    using spacecal::geometry_shift::kCusumThreshold;
+    CusumState s{};
+    // Per-sample excursion at exactly +0.4 mm (below the 0.5 mm drift). Each
+    // tick contributes (0.4 - 0.5) = -0.1 to S, clamped at 0. No fire ever.
+    for (int i = 0; i < 1000; i++) {
+        const bool fire = UpdateCusumGeometryShift(s, /*current=*/2.4, /*baseline=*/2.0);
+        EXPECT_FALSE(fire);
+    }
+    EXPECT_DOUBLE_EQ(s.S, 0.0);
+}
+
+TEST(CusumGeometryShiftTest, SustainedShiftFiresWithinExpectedTicks) {
+    using spacecal::geometry_shift::CusumState;
+    using spacecal::geometry_shift::UpdateCusumGeometryShift;
+    using spacecal::geometry_shift::kCusumDriftMm;
+    using spacecal::geometry_shift::kCusumThreshold;
+    CusumState s{};
+    // 5 mm sustained shift: increment per tick = (5 - 0) - 0.5 = 4.5 mm.
+    // Threshold 5.0 mm reached on the 2nd tick. (After tick 1: S = 4.5; not
+    // yet > 5.0. After tick 2: S = 9.0; FIRE; S resets to 0.)
+    EXPECT_FALSE(UpdateCusumGeometryShift(s, /*current=*/5.0, /*baseline=*/0.0));
+    EXPECT_NEAR(s.S, 4.5, 1e-9);
+    EXPECT_TRUE(UpdateCusumGeometryShift(s, 5.0, 0.0));
+    EXPECT_DOUBLE_EQ(s.S, 0.0) << "CUSUM must reset to 0 after firing";
+}
+
+TEST(CusumGeometryShiftTest, RecoversFromSpike_ResumesQuiet) {
+    using spacecal::geometry_shift::CusumState;
+    using spacecal::geometry_shift::UpdateCusumGeometryShift;
+    CusumState s{};
+    // Sustained shift fires.
+    UpdateCusumGeometryShift(s, 5.0, 0.0);
+    UpdateCusumGeometryShift(s, 5.0, 0.0);
+    // Now post-fire: error returns to baseline. State is at 0; no further fires.
+    for (int i = 0; i < 100; i++) {
+        EXPECT_FALSE(UpdateCusumGeometryShift(s, 0.0, 0.0));
+    }
+    EXPECT_DOUBLE_EQ(s.S, 0.0);
+}
+
+TEST(CusumGeometryShiftTest, ManualThresholdTuningWorks) {
+    using spacecal::geometry_shift::CusumState;
+    using spacecal::geometry_shift::UpdateCusumGeometryShift;
+    CusumState s{};
+    // Tighter threshold (1.0 mm) fires sooner on the same shift.
+    EXPECT_TRUE(UpdateCusumGeometryShift(s, /*current=*/3.0, /*baseline=*/0.0,
+                                          /*driftMm=*/0.5, /*threshold=*/1.0));
+    EXPECT_DOUBLE_EQ(s.S, 0.0);
+}
+
+TEST(CusumGeometryShiftTest, ResetClampPreventsNegativeAccumulation) {
+    using spacecal::geometry_shift::CusumState;
+    using spacecal::geometry_shift::UpdateCusumGeometryShift;
+    CusumState s{};
+    // Long quiet period must NOT accumulate negative S that would delay a
+    // later real shift's fire. The clamp at S = max(0, ...) is what prevents
+    // this; without it, 1000 quiet ticks would push S to -500 mm and a real
+    // shift would need to overcome that before firing.
+    for (int i = 0; i < 1000; i++) UpdateCusumGeometryShift(s, 0.0, 0.0);
+    EXPECT_DOUBLE_EQ(s.S, 0.0);
+    // Now a real shift fires within 2 ticks (same as the fresh-state case).
+    EXPECT_FALSE(UpdateCusumGeometryShift(s, 5.0, 0.0));
+    EXPECT_TRUE(UpdateCusumGeometryShift(s, 5.0, 0.0));
+}

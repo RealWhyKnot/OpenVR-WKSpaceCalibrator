@@ -2122,6 +2122,7 @@ void CalibrationTick(double time)
 	{
 		static int s_consecutiveBadTicks = 0;
 		static double s_lastErrorTs = 0.0;
+		static spacecal::geometry_shift::CusumState s_cusumState;
 		const auto& errSeries = Metrics::error_currentCal;
 		const int N = errSeries.size();
 		if (N >= 5 && calibration.isValid()) {
@@ -2137,21 +2138,44 @@ void CalibrationTick(double time)
 				std::sort(tail.begin(), tail.end());
 				double median = tail[tail.size() / 2];
 				double current = errSeries[N - 1].second;
-				if (spacecal::geometry_shift::IsCurrentErrorSpike(current, median)) {
-					s_consecutiveBadTicks++;
-				} else {
+
+				bool fire = false;
+				if (ctx.useCusumGeometryShift) {
+					// Page CUSUM: accumulates (current - baseline - drift) per
+					// tick, fires when the running sum crosses threshold. Median
+					// stays as the baseline so the test is centered on the recent
+					// no-shift behavior. Fire path resets the CUSUM state to zero
+					// inside UpdateCusumGeometryShift.
+					fire = spacecal::geometry_shift::UpdateCusumGeometryShift(
+						s_cusumState, current, median);
+					// Mirror the consecutive-bad-tick counter to zero in this path
+					// so a toggle flip mid-session doesn't leave stale state.
 					s_consecutiveBadTicks = 0;
+				} else {
+					if (spacecal::geometry_shift::IsCurrentErrorSpike(current, median)) {
+						s_consecutiveBadTicks++;
+					} else {
+						s_consecutiveBadTicks = 0;
+					}
+					fire = spacecal::geometry_shift::ShouldFireGeometryShiftRecovery(s_consecutiveBadTicks);
+					// Reset CUSUM accumulator when the legacy path is active so a
+					// later toggle flip starts from a clean state rather than a
+					// stale running-sum from before the toggle change.
+					s_cusumState.S = 0.0;
 				}
-				if (spacecal::geometry_shift::ShouldFireGeometryShiftRecovery(s_consecutiveBadTicks)) {
+
+				if (fire) {
 					CalCtx.Log("Tracking geometry shifted — restarting calibration\n");
 					calibration.Clear();
 					ctx.state = CalibrationState::ContinuousStandby;
 					ctx.relativePosCalibrated = false;
 					s_consecutiveBadTicks = 0;
+					s_cusumState.S = 0.0;
 				}
 			}
 		} else {
 			s_consecutiveBadTicks = 0;
+			s_cusumState.S = 0.0;
 		}
 	}
 

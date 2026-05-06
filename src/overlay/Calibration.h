@@ -206,6 +206,16 @@ struct CalibrationContext
 	// src/overlay/LatencyEstimator.h. Persisted via Configuration.cpp.
 	bool useGccPhatLatency = false;
 
+	// Opt-in switch for the CUSUM geometry-shift detector (Page 1954)
+	// alternative to the default 5x-rolling-median rule. Both share the
+	// same "fire -> Clear() + demote to Standby" recovery action; only the
+	// per-tick decision differs. CUSUM gives a tunable false-alarm rate
+	// via standard ARL tables (kCusumDriftMm, kCusumThreshold in
+	// GeometryShiftDetector.h). Default OFF; the rolling-median rule has
+	// not misfired in observed 35.6 MB of session logs. Persisted as
+	// geometry_shift_use_cusum in profile JSON.
+	bool useCusumGeometryShift = false;
+
 	// Rolling window of per-solve residual pitch+roll readings (degrees), used
 	// by spacecal::gravity::EvaluateTilt to flag sustained gravity-axis
 	// disagreement between the reference and target tracking systems. Pushed
