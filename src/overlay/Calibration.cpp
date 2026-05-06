@@ -1524,6 +1524,67 @@ namespace {
 					Metrics::WriteLogAnnotation(baseBuf);
 				}
 
+				// "Who moved" diagnostic: when relocalization fires, integrate
+				// each tracking system's reported velocity over the last tick
+				// and compare to the observed pose delta. Quest-re-anchor
+				// signature: the HMD's velocity-integrated displacement is
+				// near zero (the Quest didn't physically move; its world
+				// frame jumped). A genuine fast head movement that slipped
+				// through the gates would have velocity-integrated displacement
+				// comparable to the observed delta. This is logging-only --
+				// the auto-recover decision still runs from the existing
+				// triple-AND gate; this just gives the next investigator
+				// data to distinguish "Quest re-anchored" from "base station
+				// bumped" from "false-positive on fast natural motion".
+				{
+					const double dt = std::max(1e-3, now - s.lastTickLogTime);  // ~ tick interval
+					auto vmag = [](const double v[3]) -> double {
+						return std::sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+					};
+					auto vmagFinite = [&](const double v[3]) -> double {
+						const double m = vmag(v);
+						return std::isfinite(m) ? m : 0.0;
+					};
+					const auto& hmdRawNow = CalCtx.devicePoses[vr::k_unTrackedDeviceIndex_Hmd];
+					const double hmdSpeed = vmagFinite(hmdRawNow.vecVelocity);
+					const double hmdImuDisp = hmdSpeed * dt;
+
+					// Body-tracker (other-system) integrated displacement: max
+					// across all body trackers. If this is near zero, no body
+					// device physically moved either, so the geometry shift
+					// is purely a world-frame change of one of the systems.
+					double bodyMaxImuDisp = 0.0;
+					int bodyCount = 0;
+					for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id) {
+						const auto cls = vr::VRSystem()->GetTrackedDeviceClass(id);
+						if (cls != vr::TrackedDeviceClass_GenericTracker
+						 && cls != vr::TrackedDeviceClass_Controller) continue;
+						const auto& dp = CalCtx.devicePoses[id];
+						if (!dp.poseIsValid || !dp.deviceIsConnected) continue;
+						if (dp.result != vr::ETrackingResult::TrackingResult_Running_OK) continue;
+						const double d = vmagFinite(dp.vecVelocity) * dt;
+						if (d > bodyMaxImuDisp) bodyMaxImuDisp = d;
+						++bodyCount;
+					}
+
+					// Ratio interpretation (for the human grepping this later):
+					//   hmdRatio = observedHmdDelta / hmdImuDisp
+					//     >> 1: HMD's world frame jumped without device moving
+					//           (most likely Quest re-anchor)
+					//     ~= 1: HMD device physically moved (gate should have
+					//           rejected on bodyMaxDelta but did not -- worth
+					//           investigating; possible false positive)
+					//   bodyRatio similar for the body trackers.
+					const double hmdRatio = (hmdImuDisp > 1e-6) ? (hmdDelta / hmdImuDisp) : -1.0;
+					char wmoBuf[320];
+					snprintf(wmoBuf, sizeof wmoBuf,
+						"who_moved: dt=%.4f hmd_observed=%.3f hmd_imu_disp=%.4f hmd_ratio=%.2f"
+						" body_observed_max=%.3f body_imu_disp_max=%.4f body_count=%d",
+						dt, hmdDelta, hmdImuDisp, hmdRatio,
+						bodyMaxDelta, bodyMaxImuDisp, bodyCount);
+					Metrics::WriteLogAnnotation(wmoBuf);
+				}
+
 				s.lastFireTime = now;
 				s.lastFireDelta = dpos;
 				s.lastFireRotRad = angRad;
