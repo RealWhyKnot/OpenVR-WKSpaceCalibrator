@@ -48,23 +48,6 @@ jobs:
           Copy-Item CHANGELOG.md       .changelog-stash/CHANGELOG.md       -Force
           Copy-Item wiki/Changelog.md  .changelog-stash/wiki/Changelog.md  -Force
 
-      - name: Capture release notes
-        id: notes
-        shell: pwsh
-        run: |
-          # Pull JUST the body of the section we just promoted -- not the whole
-          # CHANGELOG -- so the GitHub release notes match the slice between this
-          # tag and the previous one. This is the contract that prevents the
-          # 2026-05-06 "five weeks of work" false-date hand-rewrite bug from
-          # recurring: the release body is mechanically derived from commit
-          # subjects in the tag range.
-          $body = & ./.github/scripts/Update-Changelog.ps1 -Mode Notes -ForVersion -Version '${{ github.ref_name }}'
-          if (-not $body) { $body = '_Maintenance release; see commit log for details._' }
-          $delim = "EOF_" + [Guid]::NewGuid().ToString('N')
-          "body<<$delim"  >> $env:GITHUB_OUTPUT
-          $body           >> $env:GITHUB_OUTPUT
-          $delim          >> $env:GITHUB_OUTPUT
-
       - name: Build distribution
         shell: pwsh
         env:
@@ -186,43 +169,161 @@ jobs:
           Write-Host "Release zip: $($zip.Name)"
           Write-Host "SHA256: $hash"
 
+      - name: Compose release body
+        id: compose
+        shell: pwsh
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          INSTALLER_PATH: ${{ steps.installer.outputs.path }}
+          INSTALLER_SHA: ${{ steps.installer.outputs.sha256 }}
+          INSTALLER_NAME: ${{ steps.installer.outputs.name }}
+          ZIP_PATH: ${{ steps.zip.outputs.path }}
+          ZIP_SHA: ${{ steps.zip.outputs.sha256 }}
+          ZIP_NAME: ${{ steps.zip.outputs.name }}
+        run: |
+          # Construct the final release body by hand from typed inputs (env
+          # vars + the slice file), NOT by interpolating ${{ ... }} into a
+          # PowerShell here-string. Inline GHA expressions in here-strings
+          # have bitten this workflow before (PowerShell colon-prefix scope
+          # parsing, embedded-quote escaping, multi-line YAML indent rules).
+          # Reading inputs from $env:* keeps the script lint-stable and the
+          # body byte-stable across runs.
+          $tag       = $env:TAG_NAME
+          $instPath  = $env:INSTALLER_PATH
+          $instSha   = $env:INSTALLER_SHA
+          $instName  = $env:INSTALLER_NAME
+          $zipPath   = $env:ZIP_PATH
+          $zipSha    = $env:ZIP_SHA
+          $zipName   = $env:ZIP_NAME
+
+          # Slice body from Notes mode. Read from the same CHANGELOG.md
+          # the Promote step just modified, NOT from a steps.*.body context
+          # (which had encoding problems on multi-line bodies).
+          $env:GITHUB_REPOSITORY = '${{ github.repository }}'
+          $sliceBody = (& ./.github/scripts/Update-Changelog.ps1 -Mode Notes -ForVersion -Version $tag) -join "`n"
+          $sliceBody = $sliceBody.Trim()
+          if (-not $sliceBody) {
+            $sliceBody = '_Maintenance release; see commit log for details._'
+          }
+
+          # File integrity table from the actual built artifacts. Sizes are
+          # rendered in MB / KB / B, depending on magnitude, so a 27 MB
+          # installer doesn't show as 27000000 bytes.
+          function Format-Bytes($bytes) {
+            if ($bytes -ge 1048576) { return ('{0:F1} MB' -f ($bytes / 1048576)) }
+            if ($bytes -ge 1024)    { return ('{0:F1} KB' -f ($bytes / 1024)) }
+            return "$bytes B"
+          }
+          $instSize = Format-Bytes (Get-Item $instPath).Length
+          $zipSize  = Format-Bytes (Get-Item $zipPath).Length
+
+          # Optional extras file at release/<tag>/extra-details.md. If present,
+          # appended below the slice with a `---` separator and `## Additional
+          # notes` heading. Pre-publish validation runs on the composed body
+          # so any AI-tells in the extras get flagged the same as if they
+          # were in a commit subject.
+          $extrasPath = Join-Path $PWD "release/$tag/extra-details.md"
+          $extrasBody = $null
+          if (Test-Path $extrasPath) {
+            $extrasBody = ([System.IO.File]::ReadAllText($extrasPath, [System.Text.UTF8Encoding]::new($false))).Trim()
+            Write-Host "Found extras file at $extrasPath ($($extrasBody.Length) chars)."
+          } else {
+            Write-Host "No extras file at $extrasPath. Body = slice only."
+          }
+
+          $sb = New-Object System.Text.StringBuilder
+          [void]$sb.AppendLine("## OpenVR-SpaceCalibrator $tag")
+          [void]$sb.AppendLine('')
+          [void]$sb.AppendLine('Two download options:')
+          [void]$sb.AppendLine('')
+          [void]$sb.AppendLine("- **$instName** -- guided installer. Run it; it places the overlay and the SteamVR driver in the right places automatically.")
+          [void]$sb.AppendLine("- **$zipName** -- drop-in zip. Extract anywhere, copy the ``driver_01spacecalibrator/`` folder into ``<Steam>\steamapps\common\SteamVR\drivers\``, and run ``SpaceCalibrator.exe`` from wherever you put it.")
+          [void]$sb.AppendLine('')
+          [void]$sb.AppendLine('| File | Size | SHA256 |')
+          [void]$sb.AppendLine('|---|---|---|')
+          [void]$sb.AppendLine("| ``$instName`` | $instSize | ``$instSha`` |")
+          [void]$sb.AppendLine("| ``$zipName`` | $zipSize | ``$zipSha`` |")
+          [void]$sb.AppendLine('')
+          [void]$sb.AppendLine('---')
+          [void]$sb.AppendLine('')
+          [void]$sb.AppendLine($sliceBody)
+          if ($extrasBody) {
+            [void]$sb.AppendLine('')
+            [void]$sb.AppendLine('---')
+            [void]$sb.AppendLine('')
+            [void]$sb.AppendLine('## Additional notes')
+            [void]$sb.AppendLine('')
+            [void]$sb.AppendLine($extrasBody)
+          }
+          $body = $sb.ToString()
+
+          # Stash to a temp file for the create + smoke-check steps. Both
+          # consume it via path so the multi-line content survives any
+          # GITHUB_OUTPUT escaping quirks.
+          $stash = Join-Path $env:RUNNER_TEMP 'release-body.md'
+          [System.IO.File]::WriteAllText($stash, $body, [System.Text.UTF8Encoding]::new($false))
+          "stash=$stash" >> $env:GITHUB_OUTPUT
+          Write-Host "Composed body: $($body.Length) chars at $stash."
+
+      - name: Validate release body
+        # Pre-publish grep: AI-tells, internal-tooling vocabulary, false-date
+        # claims, residual non-ASCII, stray @WhyKnot. Soft mode: warnings only,
+        # exits 0. Findings show up as ::warning:: annotations on the workflow
+        # run; the maintainer reviews and amends commit subjects (or the
+        # extras file) for the next release.
+        shell: pwsh
+        run: |
+          & ./.github/scripts/Update-Changelog.ps1 -Mode Validate -Path '${{ steps.compose.outputs.stash }}'
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
-          $tag        = "${{ github.ref_name }}"
-          $zip        = "${{ steps.zip.outputs.path }}"
-          $zipSha     = "${{ steps.zip.outputs.sha256 }}"
-          $zipName    = "${{ steps.zip.outputs.name }}"
-          $installer  = "${{ steps.installer.outputs.path }}"
-          $instSha    = "${{ steps.installer.outputs.sha256 }}"
-          $instName   = "${{ steps.installer.outputs.name }}"
-          $body       = @'
-          ${{ steps.notes.outputs.body }}
-          '@
-          # PowerShell variable-with-colon trap: `$instName:` parses as a
-          # scoped-variable prefix (`$scope:name`) and aborts the here-string.
-          # Use `${instName}` etc. to delimit the variable name explicitly.
-          # The body comes from Update-Changelog.ps1 -Mode Notes -- mechanically
-          # generated from commit subjects in the prior-tag..this-tag range.
-          $notes = @"
-          ## OpenVR-SpaceCalibrator $tag
+          $tag   = "${{ github.ref_name }}"
+          $zip   = "${{ steps.zip.outputs.path }}"
+          $inst  = "${{ steps.installer.outputs.path }}"
+          $stash = "${{ steps.compose.outputs.stash }}"
+          gh release create $tag $zip $inst --title $tag --notes-file $stash
 
-          Two download options:
-
-          - **${instName}** -- guided installer. Run it; it places the overlay and the SteamVR driver in the right places automatically.
-          - **${zipName}** -- drop-in zip. Extract anywhere, copy the ``driver_01spacecalibrator/`` folder into ``<Steam>\steamapps\common\SteamVR\drivers\``, and run ``SpaceCalibrator.exe`` from wherever you put it.
-
-          SHA256:
-          - ``${instName}``: ``${instSha}``
-          - ``${zipName}``: ``${zipSha}``
-
-          ---
-
-          $body
-          "@
-          gh release create $tag $zip $installer --title $tag --notes $notes
+      - name: Verify published body matches composed body
+        # Smoke check: fetch the published release body via gh and diff against
+        # what we sent. GitHub occasionally re-encodes line endings and
+        # trailing whitespace; the comparison is line-ending-normalised + Trim
+        # to dodge those false-positives. Real divergence (markdown swallowed,
+        # body truncated, GitHub auto-prepended its own auto-notes, etc.)
+        # surfaces as a workflow warning that the maintainer can react to.
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          $stash = '${{ steps.compose.outputs.stash }}'
+          $expected = ([System.IO.File]::ReadAllText($stash, [System.Text.UTF8Encoding]::new($false))).Trim()
+          $published = (gh release view $env:TAG_NAME --json body | ConvertFrom-Json).body.Trim()
+          $expectedN  = ($expected  -replace "`r`n", "`n").TrimEnd()
+          $publishedN = ($published -replace "`r`n", "`n").TrimEnd()
+          if ($expectedN -ne $publishedN) {
+            Write-Warning "Published release body does not byte-match the composed body."
+            Write-Host "expected length: $($expectedN.Length)"
+            Write-Host "published length: $($publishedN.Length)"
+            # Best-effort diff context: dump the first divergent line.
+            $eLines = $expectedN -split "`n"
+            $pLines = $publishedN -split "`n"
+            for ($i = 0; $i -lt [math]::Min($eLines.Count, $pLines.Count); $i++) {
+              if ($eLines[$i] -ne $pLines[$i]) {
+                Write-Host ("first divergence at line {0}:" -f ($i + 1))
+                Write-Host ("  expected:  {0}" -f $eLines[$i])
+                Write-Host ("  published: {0}" -f $pLines[$i])
+                break
+              }
+            }
+            if ($eLines.Count -ne $pLines.Count) {
+              Write-Host ("line counts differ: expected={0} published={1}" -f $eLines.Count, $pLines.Count)
+            }
+          } else {
+            Write-Host "Published body byte-matches composed body. ($($expectedN.Length) chars)"
+          }
 
       - name: Push promoted CHANGELOG back to main
         # Replay the stashed (promoted) files onto main so subsequent commits
