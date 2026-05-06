@@ -161,7 +161,14 @@ if ($DeployDriver) {
     Write-Host "--- Building OpenVR-PairDriver submodule ---" -ForegroundColor Cyan
     Push-Location $PairDriverRoot
     try {
-        & powershell.exe -ExecutionPolicy Bypass -File (Join-Path $PairDriverRoot "build.ps1")
+        # In-process invocation. Calling via `& powershell.exe -File ...` runs
+        # the submodule build in a child process whose stdout PowerShell 5.1
+        # wraps as ErrorRecords (the "NativeCommandError" wrapper around
+        # cmake's `message()` output), and that wrap kills our parent under
+        # $ErrorActionPreference='Stop' even though the build itself succeeded.
+        # The same in-process pattern is already used for SC's own build at
+        # the top of this script.
+        & (Join-Path $PairDriverRoot "build.ps1")
         if ($LASTEXITCODE -ne 0) { throw "Submodule build failed (exit $LASTEXITCODE)" }
     } finally {
         Pop-Location
