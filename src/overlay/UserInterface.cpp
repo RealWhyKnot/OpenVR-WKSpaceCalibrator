@@ -1004,6 +1004,17 @@ void CCal_DrawSettings() {
 					"Off by default; the standard Cauchy + MAD has been adequate on observed data.");
 			}
 
+			// Kalman-filter blend at publish.
+			ImGui::Checkbox("Kalman-filter blend at publish", &CalCtx.useBlendFilter);
+			if (ImGui::IsItemHovered(0)) {
+				ImGui::SetTooltip("Replaces the single-step EMA (alpha=0.3) at the publish point with a\n"
+					"4-state Kalman filter on (yaw, tx, ty, tz). Process noise is tuned to typical\n"
+					"long-term Quest-SLAM drift; measurement noise to validation-gate-pass quality.\n"
+					"On a candidate that diverges from the filter prediction (post-relocalize snap,\n"
+					"geometry-shift recovery), the filter resets and falls back to the EMA path for\n"
+					"that tick. Off by default; the EMA is the validated default.");
+			}
+
 			ImGui::EndGroupPanel();
 		}
 

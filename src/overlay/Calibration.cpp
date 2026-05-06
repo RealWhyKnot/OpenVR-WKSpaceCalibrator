@@ -2578,6 +2578,7 @@ void CalibrationTick(double time)
 		calibration.lockRelativePosition = CalCtx.lockRelativePosition;
 		calibration.useVelocityAwareWeighting = CalCtx.useVelocityAwareWeighting;
 		calibration.useTukeyBiweight = CalCtx.useTukeyBiweight;
+		calibration.useBlendFilter = CalCtx.useBlendFilter;
 		// User-toggled "Pause updates" from the continuous-cal UI: keep the
 		// already-applied driver offset live, skip any new solve cycle so the
 		// math doesn't fight the user trying to inspect the current result.
