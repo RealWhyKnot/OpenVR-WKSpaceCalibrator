@@ -4,6 +4,7 @@
 #include "Protocol.h"
 #include "WatchdogDecisions.h"  // ShouldClearViaWatchdog, IsCalibrationHealthy
 #include "RobustScale.h"        // Qn, TukeyWeight, kQnConsistency, kTukeyTune (opt-in IRLS path)
+#include "BlendFilter.h"        // Kalman-filter blend (opt-in publish path)
 
 #include <chrono>  // steady_clock for throttled diagnostic logs in
                    // CalibrateRotation / CalibrateTranslation. The throttle
@@ -131,6 +132,10 @@ void CalibrationCalc::Clear() {
 	m_relativePosCalibrated = false;
 	m_rotationConditionRatio = 0.0;
 	m_consecutiveRejections = 0;
+	// Kalman blend filter resets here so post-Clear (recovery, geometry-shift,
+	// stuck-loop watchdog) restarts seed the filter from the next accept.
+	spacecal::blendfilter::Reset(m_blendFilter);
+	m_blendFilterLastUpdateTime = 0.0;
 	// `m_lastSampleTime` and `m_lastSuccessfulIncrementalTime` deliberately retained
 	// across Clear() so the watchdog can still see the gap if continuous calibration
 	// is restarted faster than fresh samples can be collected.
@@ -1495,27 +1500,95 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 			CalCtx.Log("Applying temporary transformation...");
 		}
 
-		// Apply a single-step EMA on the published transform when we already had a
-		// valid prior estimate. The 1.5x threshold gate prevents most bad updates
-		// from being accepted, but accepted updates still carry per-cycle noise
-		// that's visible as small jitter on attached objects. Alpha = 0.3 weights
-		// the new estimate at 30% — fast enough for legitimate drift correction,
-		// slow enough to suppress per-tick wobble. Skip for rapid-correct (usingRelPose)
-		// since that path is supposed to snap to a known-better solution.
+		// Publish-time blend. Two paths:
+		//   - Default: single-step EMA at alpha = 0.3 between prior and candidate.
+		//     Slow enough to suppress per-tick wobble, fast enough to track drift.
+		//   - Opt-in (useBlendFilter): Kalman filter on (yaw, tx, ty, tz) with
+		//     proper process and measurement covariances. State carried across
+		//     ticks via m_blendFilter; resets on Clear() and on detected
+		//     divergence (large per-component innovation -> graceful fallback
+		//     to the EMA path for that tick).
+		//
+		// Skip both for rapid-correct (usingRelPose) since that path is supposed
+		// to snap to a known-better solution.
 		if (m_isValid && !usingRelPose) {
-			const double alpha = 0.3;
-			Eigen::Quaterniond priorQ(m_estimatedTransformation.rotation());
-			Eigen::Quaterniond newQ(calibration.rotation());
-			Eigen::Quaterniond blendedQ = priorQ.slerp(alpha, newQ);
-			Eigen::Vector3d blendedT = m_estimatedTransformation.translation() * (1.0 - alpha) +
-				calibration.translation() * alpha;
-			Eigen::AffineCompact3d blended;
-			blended.linear() = blendedQ.toRotationMatrix();
-			blended.translation() = blendedT;
-			m_estimatedTransformation = blended;
+			bool emaThisCycle = !useBlendFilter;
+			if (useBlendFilter) {
+				// Extract scalar yaw of the candidate via swing-twist quaternion
+				// decomposition (same form CalibrateRotation uses); the filter
+				// runs on yaw-only because the calibration rotation is yaw-only.
+				const Eigen::Quaterniond qCand(calibration.rotation());
+				const Eigen::Quaterniond twistY(qCand.w(), 0.0, qCand.y(), 0.0);
+				const double twistNorm = std::sqrt(twistY.w() * twistY.w() + twistY.y() * twistY.y());
+				const double measYaw = (twistNorm > 1e-12)
+					? 2.0 * std::atan2(twistY.y() / twistNorm, twistY.w() / twistNorm)
+					: 0.0;
+				const Eigen::Vector3d measT = calibration.translation();
+
+				const double now = m_lastSampleTime;
+				const double dt = std::max(0.0, now - m_blendFilterLastUpdateTime);
+				m_blendFilterLastUpdateTime = now;
+
+				double yawInnov = 0.0;
+				double posInnov = 0.0;
+				spacecal::blendfilter::Update(m_blendFilter,
+					measYaw, measT.x(), measT.y(), measT.z(),
+					dt, yawInnov, posInnov);
+
+				if (spacecal::blendfilter::IsDivergent(yawInnov, posInnov)) {
+					// Large innovation: filter does not expect this jump (post-
+					// relocalize snap, geometry-shift recovery, etc.). Reset the
+					// filter and fall through to the EMA path so the publish is
+					// still smooth-ish for this one tick. The next accept will
+					// reseed the filter from the new measurement.
+					Metrics::WriteLogAnnotation(
+						"blend_filter_divergence: resetting state and falling back to EMA");
+					spacecal::blendfilter::Reset(m_blendFilter);
+					emaThisCycle = true;
+				} else {
+					// Filter update produced a smoothed estimate; rebuild the
+					// publish transform from the filter state.
+					const Eigen::AngleAxisd yawAA(m_blendFilter.yaw, Eigen::Vector3d::UnitY());
+					Eigen::AffineCompact3d blended;
+					blended.linear() = yawAA.toRotationMatrix();
+					blended.translation() = Eigen::Vector3d(
+						m_blendFilter.tx, m_blendFilter.ty, m_blendFilter.tz);
+					m_estimatedTransformation = blended;
+				}
+			}
+			if (emaThisCycle) {
+				const double alpha = 0.3;
+				Eigen::Quaterniond priorQ(m_estimatedTransformation.rotation());
+				Eigen::Quaterniond newQ(calibration.rotation());
+				Eigen::Quaterniond blendedQ = priorQ.slerp(alpha, newQ);
+				Eigen::Vector3d blendedT = m_estimatedTransformation.translation() * (1.0 - alpha) +
+					calibration.translation() * alpha;
+				Eigen::AffineCompact3d blended;
+				blended.linear() = blendedQ.toRotationMatrix();
+				blended.translation() = blendedT;
+				m_estimatedTransformation = blended;
+			}
 		}
 		else {
 			m_estimatedTransformation = calibration; // first calibration or rapid-correct snap
+			// First-accept: seed the Kalman filter from this measurement so the
+			// next tick has a meaningful prior. Skipped on rapid-correct since
+			// the snap may not be representative of steady-state.
+			if (useBlendFilter && !usingRelPose) {
+				const Eigen::Quaterniond qCand(calibration.rotation());
+				const Eigen::Quaterniond twistY(qCand.w(), 0.0, qCand.y(), 0.0);
+				const double twistNorm = std::sqrt(twistY.w() * twistY.w() + twistY.y() * twistY.y());
+				const double measYaw = (twistNorm > 1e-12)
+					? 2.0 * std::atan2(twistY.y() / twistNorm, twistY.w() / twistNorm)
+					: 0.0;
+				const Eigen::Vector3d measT = calibration.translation();
+				double y = 0.0, p = 0.0;
+				spacecal::blendfilter::Reset(m_blendFilter);
+				spacecal::blendfilter::Update(m_blendFilter,
+					measYaw, measT.x(), measT.y(), measT.z(),
+					0.0, y, p);
+				m_blendFilterLastUpdateTime = m_lastSampleTime;
+			}
 		}
 		m_isValid = true;
 		m_axisVariance = newVariance;

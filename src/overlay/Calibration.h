@@ -237,6 +237,16 @@ struct CalibrationContext
 	// Persisted as irls_use_tukey in profile JSON.
 	bool useTukeyBiweight = false;
 
+	// Opt-in switch for the Kalman-filter blend at publish (replaces the
+	// single-step EMA at alpha=0.3 in CalibrationCalc::ComputeIncremental
+	// with a 4-state filter on yaw + translation, with proper process and
+	// measurement covariances). Default OFF; the EMA path is the
+	// validated default. Filter divergence is detected per-tick via hard
+	// caps on per-component innovation; on divergence the filter resets
+	// to the candidate and the EMA path runs that tick as a graceful
+	// fallback. Persisted as blend_use_kalman in profile JSON.
+	bool useBlendFilter = false;
+
 	// Rolling window of per-solve residual pitch+roll readings (degrees), used
 	// by spacecal::gravity::EvaluateTilt to flag sustained gravity-axis
 	// disagreement between the reference and target tracking systems. Pushed

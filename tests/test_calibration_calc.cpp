@@ -927,3 +927,47 @@ TEST(CalibrationCalcTest, TukeyBiweight_OnPath_RecoversTruthOnCleanData) {
         << "Tukey + Qn IRLS must still recover the truth on clean data";
     EXPECT_LT(RotationErrorDegrees(calc.Transformation(), expected), 1.0);
 }
+
+// ---------------------------------------------------------------------------
+// Kalman blend filter end-to-end (Tier 2 #9, opt-in flag).
+//
+// Off-path: with the toggle off, the publish blend uses the existing EMA
+// path and the recovered transform meets the same accuracy bound as the
+// CalibrationCalcTest.RecoversIdentity case. Pin: solving a known cal with
+// useBlendFilter=false produces a result indistinguishable (within the
+// historical numerical bound) from the un-flagged path.
+//
+// On-path: with the toggle on and one-shot mode (which exercises the same
+// publish path), the recovered transform still lands close to truth.
+// On clean data the filter behaves like a smoother around the truth, not
+// a different fit.
+// ---------------------------------------------------------------------------
+
+TEST(CalibrationCalcTest, BlendFilter_OffPath_RecoversBaseline) {
+    const double yawRad = 18.0 * EIGEN_PI / 180.0;
+    Eigen::AffineCompact3d expected = MakeTransform(
+        yawRad, 0, 0, Eigen::Vector3d(0.30, 0.20, -0.10));
+
+    CalibrationCalc calc;
+    calc.useBlendFilter = false;
+    for (auto& s : MakeSamplePairs(expected, kSampleCount)) calc.PushSample(s);
+    ASSERT_TRUE(calc.ComputeOneshot(/*ignoreOutliers=*/false));
+
+    EXPECT_LT((calc.Transformation().translation() - expected.translation()).norm(), 5e-3);
+    EXPECT_LT(RotationErrorDegrees(calc.Transformation(), expected), 0.5);
+}
+
+TEST(CalibrationCalcTest, BlendFilter_OnPath_RecoversTruthOnCleanData) {
+    const double yawRad = 18.0 * EIGEN_PI / 180.0;
+    Eigen::AffineCompact3d expected = MakeTransform(
+        yawRad, 0, 0, Eigen::Vector3d(0.30, 0.20, -0.10));
+
+    CalibrationCalc calc;
+    calc.useBlendFilter = true;
+    for (auto& s : MakeSamplePairs(expected, kSampleCount)) calc.PushSample(s);
+    ASSERT_TRUE(calc.ComputeOneshot(/*ignoreOutliers=*/false));
+
+    EXPECT_LT((calc.Transformation().translation() - expected.translation()).norm(), 1e-2)
+        << "Kalman-blend path must still recover the truth on clean data";
+    EXPECT_LT(RotationErrorDegrees(calc.Transformation(), expected), 1.0);
+}

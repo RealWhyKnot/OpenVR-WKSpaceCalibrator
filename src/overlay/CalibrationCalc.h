@@ -7,6 +7,8 @@
 #include <deque>
 #include <iostream>
 
+#include "BlendFilter.h"  // spacecal::blendfilter::State (member of CalibrationCalc)
+
 struct Pose
 {
 	Eigen::Matrix3d rot;
@@ -87,6 +89,12 @@ public:
 	// no-saturation 50%-breakdown estimator. Set by the caller per-tick
 	// from CalCtx.useTukeyBiweight; default-off path is unchanged.
 	bool useTukeyBiweight = false;
+	// Opt-in: when true, the publish-time blend uses a Kalman filter on
+	// (yaw, tx, ty, tz) instead of the single-step EMA at alpha=0.3.
+	// Filter state is stored on CalibrationCalc (m_blendFilter) so it
+	// persists across ticks. Set by the caller per-tick from
+	// CalCtx.useBlendFilter; default-off path is unchanged.
+	bool useBlendFilter = false;
 	
 	const Eigen::AffineCompact3d Transformation() const 
 	{
@@ -271,6 +279,12 @@ private:
 	 * That is to say, it's given by transforming the target world pose by the inverse reference pose.
 	 */
 	Eigen::AffineCompact3d m_refToTargetPose = Eigen::AffineCompact3d::Identity();
+
+	// Kalman-filter state for the opt-in blend path. Persists across
+	// ComputeIncremental calls; reset by Clear() and on detected divergence.
+	// Accessed only when useBlendFilter is true; otherwise it sits idle.
+	spacecal::blendfilter::State m_blendFilter;
+	double m_blendFilterLastUpdateTime = 0.0;
 
 	std::deque<Sample> m_samples;
 
