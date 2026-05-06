@@ -16,3 +16,4 @@
 - [In-App Updater](In-App-Updater)
 - [Building](Building)
 - [Troubleshooting](Troubleshooting)
+- [Changelog](Changelog)
