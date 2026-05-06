@@ -30,7 +30,15 @@ param(
 
     # Where Steam lives. Required for -DeployDriver so we can locate the
     # SteamVR drivers folder + the steam.exe to graceful-shutdown / relaunch.
-    [string]$SteamPath = "C:\Program Files (x86)\Steam"
+    [string]$SteamPath = "C:\Program Files (x86)\Steam",
+
+    # Skip the interactive "are you sure?" prompt that fires before -Install /
+    # -DeployDriver shut Steam + SteamVR down. The prompt is the default so
+    # the script cannot disrupt a live VR session unattended (e.g. an agent
+    # iterating in a terminal without the user watching). Pass -Yes for
+    # scripted / unattended runs where you've confirmed in advance that
+    # closing Steam is fine.
+    [switch]$Yes
 )
 
 # -DeployDriver implies -Install: keeping overlay and driver out of sync would
@@ -42,6 +50,37 @@ if ($DeployDriver -and -not $Install) {
 
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
+
+# Interactive confirmation before any disruptive step. Default-on so the
+# script CANNOT close the user's live VR session unattended (e.g. an agent
+# iterating in a terminal without the user watching). -Yes bypasses this for
+# scripted runs where the caller has already confirmed.
+#
+# The prompt fires only when -Install or -DeployDriver is set; a plain
+# `quick.ps1` (build-only) is non-disruptive and proceeds without asking.
+if (($Install -or $DeployDriver) -and -not $Yes) {
+    Write-Host ""
+    Write-Host "About to do a hot-swap install. This will:" -ForegroundColor Yellow
+    if ($DeployDriver) {
+        Write-Host "  - Close Steam (incl. any running game)" -ForegroundColor Yellow
+        Write-Host "  - Force-kill SteamVR helpers (vrserver/vrmonitor/vrcompositor/etc.)" -ForegroundColor Yellow
+        Write-Host "  - Close the SpaceCalibrator overlay" -ForegroundColor Yellow
+        Write-Host "  - Copy the driver DLL into SteamVR\drivers\01spacecalibrator (UAC)" -ForegroundColor Yellow
+        Write-Host "  - Hot-swap the overlay into $InstallPath (UAC)" -ForegroundColor Yellow
+        Write-Host "  - Relaunch Steam" -ForegroundColor Yellow
+    } else {
+        Write-Host "  - Close the SpaceCalibrator overlay (if running)" -ForegroundColor Yellow
+        Write-Host "  - Hot-swap the overlay into $InstallPath (UAC)" -ForegroundColor Yellow
+    }
+    Write-Host ""
+    Write-Host "If you're in VR right now, this WILL kick you out." -ForegroundColor Yellow
+    Write-Host ""
+    $resp = Read-Host "Proceed? [y/N]"
+    if ($resp -notmatch '^[yY]') {
+        Write-Host "Aborted by user. Re-run with -Yes to skip this prompt." -ForegroundColor DarkGray
+        exit 0
+    }
+}
 
 # Forward to build.ps1 with the right flags. quick.ps1 exists purely so the
 # user has a one-word command to run while iterating. Default behaviour:
@@ -76,6 +115,7 @@ if (-not $Install) {
     Write-Host "Or build + hot-swap into your installed copy in one step:" -ForegroundColor DarkGray
     Write-Host "  ./quick.ps1 -Install            (overlay only; SteamVR can stay running)" -ForegroundColor DarkGray
     Write-Host "  ./quick.ps1 -DeployDriver       (overlay + driver; closes Steam, restarts it)" -ForegroundColor DarkGray
+    Write-Host "  ./quick.ps1 -DeployDriver -Yes  (skip the y/N confirmation prompt)" -ForegroundColor DarkGray
     return
 }
 
@@ -123,10 +163,19 @@ if ($DeployDriver) {
         Write-Host "Steam closed." -ForegroundColor Green
     } else {
         Write-Host "Steam not running; skipping shutdown." -ForegroundColor DarkGray
-        # Defensive: if Steam was killed but a SteamVR helper lingered, kill
-        # it now. Their handles on the driver DLL would still block the copy.
-        Stop-Process -Name vrserver,vrmonitor,vrwebhelper,vrcompositor,vrstartup -Force -ErrorAction SilentlyContinue
     }
+
+    # ALWAYS force-kill SteamVR helpers before the file copy. `steam -shutdown`
+    # complies promptly (steam.exe exits) but does NOT always take vrserver /
+    # vrmonitor / vrcompositor with it -- bite from 2026-05-05: three deploys
+    # in a row reported "Driver DLL timestamps match build" while vrserver
+    # held the file open and the actual copy was a no-op. The
+    # ${steamRunning}=false branch above only fires when Steam wasn't running
+    # to begin with; the new ${steamRunning}=true graceful path also needs
+    # this guard. Belt-and-braces: kill them once unconditionally; if they
+    # already exited, Stop-Process is a no-op via SilentlyContinue.
+    Stop-Process -Name vrserver,vrmonitor,vrwebhelper,vrcompositor,vrstartup,vrdashboard -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
 }
 
 # --- Hot-swap install -----------------------------------------------------
