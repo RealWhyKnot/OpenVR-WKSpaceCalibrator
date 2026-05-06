@@ -50,6 +50,117 @@ static void RecoverFromWedgedCalibration(const char* userFacingMessage);
 // directly from earlier in the translation unit.
 static double g_runtimeWedgeSince = -1.0;
 
+// CPU-pressure diagnostic. Samples GetProcessTimes() once per CalibrationTick
+// (~20 Hz). Computes the % of total CPU the SC process used over the wall-clock
+// delta since the last sample, divided by the logical-processor count so 100%
+// means "fully saturating one core's worth of compute". Maintains a 5-second
+// EMA so a one-tick computationTime spike doesn't false-trigger; emits a
+// `cpu_pressure_warning_on` annotation when the EMA crosses 50% and a
+// `_off` annotation when it falls back below 30% (hysteresis stops flapping).
+//
+// Pure diagnostic. No behavior change. The emit-once-on-transition pattern
+// matches the existing gravity_disagreement_sustained_on/off annotations.
+struct CpuPressureState {
+    bool initialized = false;
+    bool alarmed = false;
+    uint64_t lastCpuNs = 0;
+    uint64_t lastWallNs = 0;
+    double emaPct = 0.0;       // 0..100 in single-core-equivalent percent
+    int logicalProcessors = 1;
+};
+static CpuPressureState g_cpuPressureState;
+
+constexpr double kCpuPressureOnThresholdPct  = 50.0;
+constexpr double kCpuPressureOffThresholdPct = 30.0;
+constexpr double kCpuPressureEmaTimeConstSec = 5.0;
+constexpr double kCpuPressureSpikeMs         = 200.0;  // single-tick spike threshold
+
+inline uint64_t FileTimeToNs100(const FILETIME& ft) {
+    return ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;  // units of 100 ns
+}
+
+// Samples this tick's CPU usage + folds into the EMA. Emits transition
+// annotations on EMA crossing and a one-shot `cpu_pressure_spike` on any
+// single ComputeIncremental that took >= kCpuPressureSpikeMs.
+static void TickCpuPressureMonitor(double computationTimeMs, double now_s) {
+    auto& s = g_cpuPressureState;
+    FILETIME ftCreate, ftExit, ftKernel, ftUser;
+    if (!GetProcessTimes(GetCurrentProcess(), &ftCreate, &ftExit, &ftKernel, &ftUser)) {
+        return;  // bail silently; this is diagnostic only
+    }
+    const uint64_t cpuNow = FileTimeToNs100(ftKernel) + FileTimeToNs100(ftUser);
+    LARGE_INTEGER pcNow;
+    QueryPerformanceCounter(&pcNow);
+    LARGE_INTEGER pcFreq;
+    QueryPerformanceFrequency(&pcFreq);
+    const uint64_t wallNow = (uint64_t)((pcNow.QuadPart * 10'000'000ull) / pcFreq.QuadPart);  // 100ns
+
+    if (!s.initialized) {
+        SYSTEM_INFO si{};
+        GetSystemInfo(&si);
+        s.logicalProcessors = si.dwNumberOfProcessors > 0 ? (int)si.dwNumberOfProcessors : 1;
+        s.lastCpuNs = cpuNow;
+        s.lastWallNs = wallNow;
+        s.initialized = true;
+        return;
+    }
+
+    const uint64_t cpuDelta = cpuNow >= s.lastCpuNs ? cpuNow - s.lastCpuNs : 0;
+    const uint64_t wallDelta = wallNow >= s.lastWallNs ? wallNow - s.lastWallNs : 0;
+    s.lastCpuNs = cpuNow;
+    s.lastWallNs = wallNow;
+    if (wallDelta == 0) return;
+
+    const double instPct = 100.0 * (double)cpuDelta /
+        ((double)wallDelta * (double)s.logicalProcessors);
+
+    // EMA toward instPct with time constant kCpuPressureEmaTimeConstSec.
+    const double dtSec = (double)wallDelta / 1.0e7;
+    const double alpha = 1.0 - std::exp(-dtSec / kCpuPressureEmaTimeConstSec);
+    s.emaPct = s.emaPct + alpha * (instPct - s.emaPct);
+
+    // EMA-crossing transition annotations with hysteresis.
+    if (!s.alarmed && s.emaPct > kCpuPressureOnThresholdPct) {
+        s.alarmed = true;
+        char buf[256];
+        snprintf(buf, sizeof buf,
+            "cpu_pressure_warning_on: ema_pct=%.1f inst_pct=%.1f cores=%d"
+            " gcc_phat=%d cusum=%d velocity_aware=%d tukey=%d kalman=%d"
+            " auto_detect_latency=%d state=%d",
+            s.emaPct, instPct, s.logicalProcessors,
+            (int)CalCtx.useGccPhatLatency, (int)CalCtx.useCusumGeometryShift,
+            (int)CalCtx.useVelocityAwareWeighting, (int)CalCtx.useTukeyBiweight,
+            (int)CalCtx.useBlendFilter, (int)CalCtx.latencyAutoDetect,
+            (int)CalCtx.state);
+        Metrics::WriteLogAnnotation(buf);
+    } else if (s.alarmed && s.emaPct < kCpuPressureOffThresholdPct) {
+        s.alarmed = false;
+        char buf[128];
+        snprintf(buf, sizeof buf,
+            "cpu_pressure_warning_off: ema_pct=%.1f", s.emaPct);
+        Metrics::WriteLogAnnotation(buf);
+    }
+
+    // Per-tick spike annotation. Independent of the EMA; a single
+    // ComputeIncremental that took >= 200 ms is worth surfacing on its own
+    // because it indicates a stall-class event regardless of session-average
+    // CPU. Throttled to one annotation per 5 seconds so a sustained-high
+    // window doesn't flood.
+    static double s_lastSpikeAnnotation = -1e9;
+    if (computationTimeMs >= kCpuPressureSpikeMs && (now_s - s_lastSpikeAnnotation) >= 5.0) {
+        s_lastSpikeAnnotation = now_s;
+        char buf[256];
+        snprintf(buf, sizeof buf,
+            "cpu_pressure_spike: computationTime_ms=%.1f ema_pct=%.1f"
+            " gcc_phat=%d cusum=%d velocity_aware=%d tukey=%d kalman=%d state=%d",
+            computationTimeMs, s.emaPct,
+            (int)CalCtx.useGccPhatLatency, (int)CalCtx.useCusumGeometryShift,
+            (int)CalCtx.useVelocityAwareWeighting, (int)CalCtx.useTukeyBiweight,
+            (int)CalCtx.useBlendFilter, (int)CalCtx.state);
+        Metrics::WriteLogAnnotation(buf);
+    }
+}
+
 // Auto-recovery snap flag (option-3 bundle, 2026-05-04). Set true by
 // RecoverFromWedgedCalibration so the next ScanAndApplyProfile cycle sends
 // every device transform with payload.lerp=false, which routes through the
@@ -2829,7 +2940,15 @@ void CalibrationTick(double time)
 	LARGE_INTEGER freq;
 	QueryPerformanceFrequency(&freq);
 	double duration = (end_time.QuadPart - start_time.QuadPart) / (double)freq.QuadPart;
-	Metrics::computationTime.Push(duration * 1000.0);
+	const double computationTimeMs = duration * 1000.0;
+	Metrics::computationTime.Push(computationTimeMs);
+
+	// CPU-pressure diagnostic. Sampled at the end of each CalibrationTick so the
+	// computationTime above is in scope for the per-tick spike check. Pure
+	// logging: emits cpu_pressure_warning_on/_off transitions when the
+	// 5-second EMA of process CPU% crosses 50%/30% (with hysteresis), and a
+	// throttled cpu_pressure_spike on any single ComputeIncremental >= 200 ms.
+	TickCpuPressureMonitor(computationTimeMs, time);
 
 	// Hand the raw reference + target poses to the metrics writer so the v2 CSV
 	// columns get filled. Reconstructing these in the replay harness (tools/replay/)
