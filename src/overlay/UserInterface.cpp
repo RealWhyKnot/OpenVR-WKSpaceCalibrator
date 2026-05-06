@@ -969,6 +969,18 @@ void CCal_DrawSettings() {
 				}
 			}
 
+			// CUSUM geometry-shift detector (Page 1954) replaces the 5x-rolling-
+			// median rule with a cumulative-sum statistical test. Same recovery
+			// action; tunable false-alarm rate via standard ARL tables.
+			ImGui::Checkbox("CUSUM geometry-shift detector", &CalCtx.useCusumGeometryShift);
+			if (ImGui::IsItemHovered(0)) {
+				ImGui::SetTooltip("Statistical change-point test (CUSUM, Page 1954) instead of the fixed\n"
+					"5x-rolling-median rule. Uses standard Average-Run-Length tables for a\n"
+					"tunable false-alarm rate. Same recovery action when fired (clear cal,\n"
+					"demote to standby). Off by default; the existing rolling-median rule\n"
+					"has not misfired in observed sessions.");
+			}
+
 			ImGui::EndGroupPanel();
 		}
 
