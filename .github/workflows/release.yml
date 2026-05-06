@@ -139,9 +139,9 @@ jobs:
               throw "makensis failed with exit code $LASTEXITCODE."
           }
 
-          # OutFile in installer.nsi is "SpaceCalibrator.exe" (relative), so it lands next to the
-          # script in install/.
-          $installer = Join-Path $PWD "install\SpaceCalibrator.exe"
+          # OutFile in installer.nsi is "SpaceCalibrator-Setup.exe" (relative), so it lands
+          # next to the script in install/.
+          $installer = Join-Path $PWD "install\SpaceCalibrator-Setup.exe"
           if (-not (Test-Path $installer)) { throw "Installer not produced at $installer." }
 
           # Rename to include the version so the GitHub release asset name is unambiguous.
@@ -325,37 +325,77 @@ jobs:
             Write-Host "Published body byte-matches composed body. ($($expectedN.Length) chars)"
           }
 
-      - name: Push promoted CHANGELOG back to main
-        # Replay the stashed (promoted) files onto main so subsequent commits
-        # build on the new state -- next push starts with a fresh "## Unreleased".
-        # main is not branch-protected on RealWhyKnot/OpenVR-SpaceCalibrator, so
-        # GITHUB_TOKEN can push directly. [skip changelog] keeps changelog-append
-        # from re-bulleting this commit.
-        # Done last so a build/publish failure doesn't push a phantom-promoted
-        # CHANGELOG to main.
+      - name: Push promoted CHANGELOG back to main (verified)
+        # Use the GraphQL createCommitOnBranch mutation so the promotion
+        # commit is signed server-side with GitHub's bot key. Required by
+        # the project-wide "all new commits must be verified" policy and by
+        # any future protected-branch rule on main. Done last so a build/
+        # publish failure doesn't push a phantom-promoted CHANGELOG to main.
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          git config user.name  'github-actions[bot]'
-          git config user.email 'github-actions[bot]@users.noreply.github.com'
 
-          # Switch to main from the tag-detached HEAD.
           git fetch origin main
-          git checkout main
-          git reset --hard origin/main
-
-          # Replay the stashed promoted files.
-          cp .changelog-stash/CHANGELOG.md           CHANGELOG.md
-          cp .changelog-stash/wiki/Changelog.md wiki/Changelog.md
-
-          if [[ -z "$(git status --porcelain CHANGELOG.md wiki/Changelog.md)" ]]; then
-            echo "Nothing to promote -- main is already in promoted state."
+          if cmp -s .changelog-stash/CHANGELOG.md <(git show origin/main:CHANGELOG.md) \
+             && cmp -s .changelog-stash/wiki/Changelog.md <(git show origin/main:wiki/Changelog.md); then
+            echo "Nothing to promote -- main already carries the promoted bytes."
             exit 0
           fi
 
-          git add CHANGELOG.md wiki/Changelog.md
-          git commit -m "docs(changelog): promote Unreleased -> ${TAG_NAME} [skip changelog]"
-          git push origin main
+          changelog_b64=$(base64 -w 0 .changelog-stash/CHANGELOG.md)
+          wiki_b64=$(base64 -w 0 .changelog-stash/wiki/Changelog.md)
+          expected_oid=$(git rev-parse origin/main)
+
+          headline="docs(changelog): promote Unreleased -> ${TAG_NAME} [skip changelog]"
+          body="Promoted by .github/workflows/release.yml after publishing ${TAG_NAME}."
+
+          payload=$(jq -n \
+            --arg repo "$GITHUB_REPOSITORY" \
+            --arg branch "main" \
+            --arg headline "$headline" \
+            --arg body "$body" \
+            --arg oid "$expected_oid" \
+            --arg changelog "$changelog_b64" \
+            --arg wiki "$wiki_b64" \
+            '{
+              query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid url } } }",
+              variables: {
+                input: {
+                  branch: { repositoryNameWithOwner: $repo, branchName: $branch },
+                  message: { headline: $headline, body: $body },
+                  fileChanges: {
+                    additions: [
+                      { path: "CHANGELOG.md",      contents: $changelog },
+                      { path: "wiki/Changelog.md", contents: $wiki }
+                    ]
+                  },
+                  expectedHeadOid: $oid
+                }
+              }
+            }')
+
+          response=$(printf '%s' "$payload" | gh api graphql --input -)
+          echo "$response" | jq .
+
+          if echo "$response" | jq -e '.errors // empty' >/dev/null; then
+            echo "::error::createCommitOnBranch returned GraphQL errors"
+            exit 1
+          fi
+
+          new_oid=$(echo "$response" | jq -r '.data.createCommitOnBranch.commit.oid')
+          if [[ -z "$new_oid" || "$new_oid" == "null" ]]; then
+            echo "::error::createCommitOnBranch did not return a commit oid"
+            exit 1
+          fi
+
+          verified=$(gh api "repos/$GITHUB_REPOSITORY/commits/$new_oid" --jq '.commit.verification.verified')
+          if [[ "$verified" != "true" ]]; then
+            echo "::error::Commit $new_oid is not verified (got: $verified)"
+            gh api "repos/$GITHUB_REPOSITORY/commits/$new_oid" --jq '.commit.verification'
+            exit 1
+          fi
+          echo "Verified promote commit: $new_oid"
