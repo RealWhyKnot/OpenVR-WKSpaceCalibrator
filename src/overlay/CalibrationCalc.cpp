@@ -541,15 +541,25 @@ Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rot
 	// Item #4: IRLS with Cauchy weight. The previous min-rotation-magnitude
 	// weight was a heuristic that didn't adapt to per-pair residual noise — a
 	// few large-magnitude deltas with bad position data could still pull the
-	// solution. Cauchy is a redescending M-estimator: large residuals get tiny
-	// weights, so heavy-tailed jitter (Slime IMU translations, USB-glitched
-	// frames) stops dominating the LS sum. The cosine-similarity outlier
+	// solution. Cauchy (Lorentzian) is a monotonically-descending M-estimator:
+	// large residuals get progressively smaller but never-zero weights, so
+	// heavy-tailed jitter (Slime IMU translations, USB-glitched frames) stops
+	// dominating the LS sum. (Earlier comment said "redescending"; that was
+	// wrong. Cauchy is monotonically descending; Tukey biweight is the
+	// canonical redescending alternative.) The cosine-similarity outlier
 	// rejection in DetectOutliers becomes redundant after this — keep it as
 	// belt-and-braces; the math review notes considering removal as a follow-up.
 	const int kMaxIters = 5;
 	const double kWeightChangeThreshold = 0.01; // 1%
 	const double kMadFloor = 1e-3;              // 1mm — avoids div-by-zero when residuals collapse
-	const double kCauchyTune = 1.345;           // standard Cauchy tuning constant
+	// Tuning constant for the Cauchy weight w_i = 1 / (1 + (r_i/c)^2).
+	// NOTE: 1.345 is Huber's 95% Gaussian-efficiency constant, NOT Cauchy's
+	// (Cauchy 95% efficiency is ~2.3849). The mislabel is historical; we
+	// keep the value because it is empirically stable on the residual
+	// distributions we observe in real sessions. Switching to true Cauchy
+	// tuning or to Tukey biweight (c=4.685) would be a behavior change
+	// and needs its own regression-test pass before merging.
+	const double kCauchyTune = 1.345;
 
 	Eigen::Vector3d trans = Eigen::Vector3d::Zero();
 	Eigen::VectorXd prevWeights = m_weightsTrans;
