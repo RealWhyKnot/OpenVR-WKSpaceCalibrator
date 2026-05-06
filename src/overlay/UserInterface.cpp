@@ -924,10 +924,28 @@ void CCal_DrawSettings() {
 					"Use this when the target system (e.g. Slime IMU, Quest) lags the reference (e.g. Lighthouse).\n"
 					"At sample-collection time the reference pose is extrapolated by this amount using its\n"
 					"reported velocity, so quick motions don't bias the calibration.\n"
-					"Default 0 disables the feature. Auto-detection is on the roadmap.");
+					"Default 0 disables the feature. Auto-detect below overrides this when on.");
 			}
 			AddResetContextMenu("target_latency_ctx", [] { CalCtx.targetLatencyOffsetMs = 0.0; });
 			ImGui::PopID();
+
+			ImGui::Checkbox("Auto-detect target latency", &CalCtx.latencyAutoDetect);
+			if (ImGui::IsItemHovered(0)) {
+				ImGui::SetTooltip("Uses cross-correlation of tracker velocities to estimate the inter-system\n"
+					"latency once per second when both devices are moving. Overrides the manual\n"
+					"offset above when on.");
+			}
+
+			ImGui::Indent();
+			ImGui::BeginDisabled(!CalCtx.latencyAutoDetect);
+			ImGui::Checkbox("Use experimental whitened-spectrum estimator", &CalCtx.useGccPhatLatency);
+			if (ImGui::IsItemHovered(0)) {
+				ImGui::SetTooltip("Alternative algorithm (GCC-PHAT). May be sharper when the two tracking\n"
+					"systems' velocity signals have very different frequency content. Off by\n"
+					"default; the standard estimator is well-validated.");
+			}
+			ImGui::EndDisabled();
+			ImGui::Unindent();
 
 			ImGui::EndGroupPanel();
 		}
