@@ -482,7 +482,7 @@ struct CalibrationContext
 		validProfile = false;
 		refToTargetPose = Eigen::AffineCompact3d::Identity();
 
-		// Per-profile fields added by recent agent passes. Without these resets
+		// Per-profile fields added by recent passes. Without these resets
 		// the user's stale latency/suppression settings would carry over after a
 		// profile clear and silently apply to the next calibration session.
 		trackerSmoothness.clear();

@@ -800,7 +800,7 @@ TEST(CalibrationCalcTest, ComputeOneshotRejectsTooFewSamples) {
 }
 
 // ---------------------------------------------------------------------------
-// Velocity-aware outlier weighting (Tier 2 #6, opt-in flag).
+// Velocity-aware outlier weighting (opt-in flag).
 //
 // Off-path: when the flag is OFF, the solver must produce identical output
 // regardless of what speeds the samples carry. Pin: solve a known calibration
@@ -885,7 +885,7 @@ TEST(CalibrationCalcTest, VelocityAware_OnPath_SuppressesMotionGlitch) {
 }
 
 // ---------------------------------------------------------------------------
-// Tukey biweight + Qn-scale robust kernel (Tier 2 #8, opt-in flag).
+// Tukey biweight + Qn-scale robust kernel (opt-in flag).
 //
 // Off-path: with the toggle off, the IRLS produces the same fit as it did
 // before the helpers existed. Pin: solve a known calibration with a fresh
@@ -929,7 +929,7 @@ TEST(CalibrationCalcTest, TukeyBiweight_OnPath_RecoversTruthOnCleanData) {
 }
 
 // ---------------------------------------------------------------------------
-// Kalman blend filter end-to-end (Tier 2 #9, opt-in flag).
+// Kalman blend filter end-to-end (opt-in flag).
 //
 // Off-path: with the toggle off, the publish blend uses the existing EMA
 // path and the recovered transform meets the same accuracy bound as the

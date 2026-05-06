@@ -34,9 +34,9 @@ param(
 
     # Skip the interactive "are you sure?" prompt that fires before -Install /
     # -DeployDriver shut Steam + SteamVR down. The prompt is the default so
-    # the script cannot disrupt a live VR session unattended (e.g. an agent
-    # iterating in a terminal without the user watching). Pass -Yes for
-    # scripted / unattended runs where you've confirmed in advance that
+    # the script cannot disrupt a live VR session unattended (e.g. a
+    # non-interactive caller iterating in a terminal). Pass -Yes for
+    # scripted / unattended runs where the caller has already confirmed
     # closing Steam is fine.
     [switch]$Yes
 )
@@ -52,8 +52,8 @@ $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
 # Interactive confirmation before any disruptive step. Default-on so the
-# script CANNOT close the user's live VR session unattended (e.g. an agent
-# iterating in a terminal without the user watching). -Yes bypasses this for
+# script CANNOT close the user's live VR session unattended (e.g. a
+# non-interactive caller iterating in a terminal). -Yes bypasses this for
 # scripted runs where the caller has already confirmed.
 #
 # The prompt fires only when -Install or -DeployDriver is set; a plain
@@ -259,8 +259,8 @@ Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile","-Command",$elev
 # launcher. Hypothesis: parent process tree / session context affects how
 # SteamVR's overlay registration handshakes the new SC instance. A
 # Start-menu launch comes from explorer.exe; the script's Start-Process
-# inherits the PowerShell -> CI/agent -> ... ancestry, which may produce
-# subtly different IPC behaviour with vrserver. Without a confirmed root
+# inherits the PowerShell -> non-interactive shell -> ... ancestry, which may
+# produce subtly different IPC behaviour with vrserver. Without a confirmed root
 # cause, the safest action is to not auto-launch and tell the user to do
 # it themselves the way they know works.
 #

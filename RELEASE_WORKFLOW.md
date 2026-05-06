@@ -63,10 +63,10 @@ the maintainer can tighten discipline before the next release.
    to `## Unreleased` automatically.
 2. Audit at write time. Before each commit, the subject should:
    - Use a recognised conventional-commit type.
-   - Avoid AI-tells from the standard list (see `Update-Changelog.ps1`'s
+   - Avoid marketing puffery from the standard list (see `Update-Changelog.ps1`'s
      Validate mode for the live list).
-   - Avoid internal-tooling vocabulary (`agent`, `investigator`, `tier 2/3`,
-     `Pattern F`, etc.).
+   - Avoid internal-only vocabulary (`investigator`, `tier 2/3`, `scope plan`,
+     `Pattern A-Z`, etc.).
    - Be ASCII (auto-normalised, but cleaner if it's clean to begin with).
 3. Tag and push:
 
@@ -81,9 +81,9 @@ the maintainer can tighten discipline before the next release.
    - Builds the distribution + NSIS installer.
    - Composes the release body: title + download options + integrity
      table + slice body + (optional) Additional notes section.
-   - Validates the composed body for AI-tells / internal-vocab / non-ASCII
-     / stray `@WhyKnot`. Soft mode -- warnings only, doesn't block the
-     publish.
+   - Validates the composed body for marketing puffery / internal-only vocab
+     / non-ASCII / stray `@WhyKnot`. Soft mode -- warnings only, doesn't
+     block the publish.
    - Publishes the release with the composed body.
    - Verifies the published body byte-matches what was composed (warns on
      divergence).
@@ -107,8 +107,8 @@ release/<tag>/extra-details.md
 
 If present, the workflow appends it to the body below the slice with a
 `---` separator and a `## Additional notes` heading. The same Validate
-pass runs against its contents; AI-tells in the extras file get flagged
-the same as AI-tells in commit subjects.
+pass runs against its contents; voice issues in the extras file get
+flagged the same as voice issues in commit subjects.
 
 The extras file is staged on `main` BEFORE you tag the release (it lives
 in the source tree, so the tag includes it). Commit it with `[skip
@@ -133,9 +133,10 @@ mechanically derived from commit subjects in the tag range. The escape
 hatch is the optional extras file above. There is no `gh release edit`
 step in the normal flow.
 
-This rule exists because hand-writing release bodies has produced LLM-
-shaped marketing copy and false-date claims (the v2026.5.5.0 first pass
-opened with "Five weeks of work" when the actual range was six days).
+This rule exists because hand-writing release bodies has produced
+hand-rewritten marketing copy and false-date claims (the v2026.5.5.0
+first pass opened with "Five weeks of work" when the actual range was
+six days).
 The auto-changelog body is mechanical; commit-subject discipline is the
 new gate.
 
@@ -177,5 +178,5 @@ match / excerpt).
   `release.yml` does everything else.
 - Body is sliced from the auto-changelog. Hand-writing is forbidden.
 - Optional context goes in `release/<tag>/extra-details.md`.
-- AI-tells get flagged at workflow run-time. Fix at the source for the
-  next release.
+- Voice issues get flagged at workflow run-time. Fix at the source for
+  the next release.

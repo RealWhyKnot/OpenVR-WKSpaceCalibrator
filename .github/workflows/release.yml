@@ -220,7 +220,7 @@ jobs:
           # Optional extras file at release/<tag>/extra-details.md. If present,
           # appended below the slice with a `---` separator and `## Additional
           # notes` heading. Pre-publish validation runs on the composed body
-          # so any AI-tells in the extras get flagged the same as if they
+          # so any voice issues in the extras get flagged the same as if they
           # were in a commit subject.
           $extrasPath = Join-Path $PWD "release/$tag/extra-details.md"
           $extrasBody = $null
@@ -266,11 +266,11 @@ jobs:
           Write-Host "Composed body: $($body.Length) chars at $stash."
 
       - name: Validate release body
-        # Pre-publish grep: AI-tells, internal-tooling vocabulary, false-date
-        # claims, residual non-ASCII, stray @WhyKnot. Soft mode: warnings only,
-        # exits 0. Findings show up as ::warning:: annotations on the workflow
-        # run; the maintainer reviews and amends commit subjects (or the
-        # extras file) for the next release.
+        # Pre-publish voice check: marketing puffery, internal-only vocabulary,
+        # false-date claims, residual non-ASCII, stray @WhyKnot. Soft mode:
+        # warnings only, exits 0. Findings show up as ::warning:: annotations
+        # on the workflow run; the maintainer reviews and amends commit
+        # subjects (or the extras file) for the next release.
         shell: pwsh
         run: |
           & ./.github/scripts/Update-Changelog.ps1 -Mode Validate -Path '${{ steps.compose.outputs.stash }}'

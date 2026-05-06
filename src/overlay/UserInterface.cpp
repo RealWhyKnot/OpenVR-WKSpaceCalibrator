@@ -946,7 +946,7 @@ void CCal_DrawSettings() {
 		// terms (algorithm names, paper refs) live in the tooltip if anywhere.
 		//
 		// Each toggle is wrapped in a previous-value compare so that a user flip
-		// emits a one-shot log annotation. This gives investigators reading a
+		// emits a one-shot log annotation. This gives anyone reading the
 		// session log direct evidence of "behavior changed at time T because the
 		// user enabled X". The previous-value statics are function-local so they
 		// don't leak; first-frame initialization captures whatever the loaded

@@ -13,7 +13,7 @@
               commits explicitly tagged "[skip changelog]" in the subject. Skips
               types that aren't user-visible (docs/build/ci/chore/test) so the
               changelog stays focused on behavior changes. Auto-remaps stray
-              `@WhyKnot` to `@RealWhyKnot`, normalises Unicode AI-tell
+              `@WhyKnot` to `@RealWhyKnot`, normalises Unicode
               punctuation to ASCII. Logs coverage stats and warns when a high
               fraction of commits fall through to the non-conventional path.
 
@@ -28,8 +28,8 @@
               stdout. Used to inject the section into the GitHub release body.
               Warns on empty / placeholder-only slices.
 
-    Validate  Pre-publish grep checklist. Scans an arbitrary text body
-              (-Body or -Path) for AI-tells, internal-tooling vocabulary,
+    Validate  Pre-publish voice check. Scans an arbitrary text body
+              (-Body or -Path) for marketing puffery, internal-only vocabulary,
               false-date claims, residual non-ASCII bytes, and stray
               `@WhyKnot` mentions. Default is soft (warnings only, exit 0).
               -Strict turns warnings into a non-zero exit.
@@ -104,7 +104,7 @@ if ($Mode -ne 'Validate') {
 
 # --- Warnings collector ----------------------------------------------------
 #
-# Each mode accumulates warnings (auto-handle remaps, AI-tell hits, etc.) into
+# Each mode accumulates warnings (auto-handle remaps, voice findings, etc.) into
 # this list and emits them via Write-Warning at the end. GitHub Actions
 # surfaces Write-Warning as a workflow annotation. The Validate mode also
 # returns a summary on stdout.
@@ -158,7 +158,7 @@ function Remap-AuthorHandles {
     return $remapped
 }
 
-# Replace the common Unicode "AI-tell" punctuation an older commit subject might
+# Replace the common Unicode punctuation an older commit subject might
 # carry (em-dash, en-dash, ellipsis, curly quotes) with ASCII equivalents.
 # CHANGELOG entries are GENERATED public-facing output -- the project rule is
 # ASCII-only -- and a stray Unicode byte from one historical commit should not
@@ -512,7 +512,7 @@ if ($Mode -eq 'Promote') {
 
     $today = (Get-Date -Format 'yyyy-MM-dd')
     # ASCII separator. The project rule is ASCII-only across all generated
-    # public-facing output -- em-dashes are an AI-tell + a Unicode encoding
+    # public-facing output -- em-dashes are a voice issue + a Unicode encoding
     # hazard on PS 5.1.
     $heading = "## [$Version](https://github.com/$Repo/releases/tag/$Version) -- $today"
 
@@ -629,8 +629,8 @@ if ($Mode -eq 'Notes') {
 
 # --- Mode: Validate --------------------------------------------------------
 #
-# Pre-publish grep checklist. Scans an arbitrary text body for AI-tells,
-# internal-tooling vocabulary, residual non-ASCII, false-date claims, and
+# Pre-publish voice check. Scans an arbitrary text body for marketing puffery,
+# internal-only vocabulary, residual non-ASCII, false-date claims, and
 # stray @WhyKnot mentions that the auto-remap missed (e.g. inside
 # code-fenced text, where the remap is more conservative). Default mode
 # is soft: warnings only, exits 0. -Strict turns warnings into a non-zero
@@ -656,19 +656,19 @@ if ($Mode -eq 'Validate') {
 
     # Grep tables. Each entry: regex (case-insensitive unless explicitly
     # cased), human-readable category, advice fragment.
-    $aiTells = @(
-        @{ Pattern = '\bcomprehensive\b';      Category = 'AI-tell';            Advice = 'use a concrete description instead of "comprehensive"' },
-        @{ Pattern = '\brobust(ly)?\b';        Category = 'AI-tell';            Advice = 'OK only when used as a math term (Tukey biweight robust kernel); otherwise drop' },
-        @{ Pattern = '\bleveraging\b';         Category = 'AI-tell';            Advice = 'replace with "uses" or "with"' },
-        @{ Pattern = '\bempowers?\b';          Category = 'AI-tell';            Advice = 'replace with "lets" or remove' },
-        @{ Pattern = '\bstreamlin(es?|ed|ing)\b'; Category = 'AI-tell';         Advice = 'replace with "simplifies" or just describe what changed' },
-        @{ Pattern = "it'?s important to note"; Category = 'AI-tell';            Advice = 'just state the thing' },
-        @{ Pattern = '\b(furthermore|moreover|additionally)\b'; Category = 'AI-tell'; Advice = 'these connectives almost never carry meaning; drop' },
-        @{ Pattern = '\bwhether you\b';        Category = 'AI-tell';            Advice = 'no audience-bracketing; just describe what shipped' },
-        @{ Pattern = '\bcutting-edge\b';       Category = 'AI-tell';            Advice = 'drop' },
-        @{ Pattern = '\bindustry-leading\b';   Category = 'AI-tell';            Advice = 'drop' },
-        @{ Pattern = '\bseamless(ly)?\b';      Category = 'AI-tell';            Advice = 'drop or describe the actual integration' },
-        @{ Pattern = 'investigator triage';    Category = 'AI-tell';            Advice = 'public release notes should not reference internal triage vocabulary' }
+    $voicePatterns = @(
+        @{ Pattern = '\bcomprehensive\b';      Category = 'voice';            Advice = 'use a concrete description instead of "comprehensive"' },
+        @{ Pattern = '\brobust(ly)?\b';        Category = 'voice';            Advice = 'OK only when used as a math term (Tukey biweight robust kernel); otherwise drop' },
+        @{ Pattern = '\bleveraging\b';         Category = 'voice';            Advice = 'replace with "uses" or "with"' },
+        @{ Pattern = '\bempowers?\b';          Category = 'voice';            Advice = 'replace with "lets" or remove' },
+        @{ Pattern = '\bstreamlin(es?|ed|ing)\b'; Category = 'voice';         Advice = 'replace with "simplifies" or just describe what changed' },
+        @{ Pattern = "it'?s important to note"; Category = 'voice';            Advice = 'just state the thing' },
+        @{ Pattern = '\b(furthermore|moreover|additionally)\b'; Category = 'voice'; Advice = 'these connectives almost never carry meaning; drop' },
+        @{ Pattern = '\bwhether you\b';        Category = 'voice';            Advice = 'no audience-bracketing; just describe what shipped' },
+        @{ Pattern = '\bcutting-edge\b';       Category = 'voice';            Advice = 'drop' },
+        @{ Pattern = '\bindustry-leading\b';   Category = 'voice';            Advice = 'drop' },
+        @{ Pattern = '\bseamless(ly)?\b';      Category = 'voice';            Advice = 'drop or describe the actual integration' },
+        @{ Pattern = 'investigator triage';    Category = 'voice';            Advice = 'public release notes should not reference internal triage vocabulary' }
     )
     $internalVocab = @(
         @{ Pattern = '\bagent\b';              Category = 'internal-vocab';     Advice = 'public release notes should not reference internal-tooling concepts' },
@@ -694,7 +694,7 @@ if ($Mode -eq 'Validate') {
             $line = $lines[$i]
             foreach ($p in $Patterns) {
                 # Use Matches (plural) so a line with multiple instances of
-                # the same AI-tell pattern gets one finding per instance.
+                # the same voice pattern gets one finding per instance.
                 $matchSet = [regex]::Matches($line, $p.Pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
                 foreach ($m in $matchSet) {
                     $hits.Add(@{
@@ -712,7 +712,7 @@ if ($Mode -eq 'Validate') {
     }
 
     $allFindings = New-Object System.Collections.Generic.List[hashtable]
-    foreach ($g in (Test-Patterns -Text $text -Patterns $aiTells))      { $allFindings.Add($g) | Out-Null }
+    foreach ($g in (Test-Patterns -Text $text -Patterns $voicePatterns)) { $allFindings.Add($g) | Out-Null }
     foreach ($g in (Test-Patterns -Text $text -Patterns $internalVocab)) { $allFindings.Add($g) | Out-Null }
     foreach ($g in (Test-Patterns -Text $text -Patterns $dateClaims))    { $allFindings.Add($g) | Out-Null }
     foreach ($g in (Test-Patterns -Text $text -Patterns $stray))         { $allFindings.Add($g) | Out-Null }

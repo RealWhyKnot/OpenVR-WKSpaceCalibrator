@@ -858,8 +858,8 @@ void LoadProfile(CalibrationContext &ctx)
 		std::stringstream io(str);
 		ParseProfile(ctx, io);
 		std::cout << "Loaded profile" << std::endl;
-		// Capture the load event in the spacecal log so a session-time
-		// investigator can correlate any post-load behavior change with the
+		// Capture the load event in the spacecal log so anyone reading the
+		// session can correlate any post-load behavior change with the
 		// load itself (rather than guessing whether the user re-applied a
 		// stale profile mid-session).
 		// NOTE: ctx.calibratedTranslation is stored in centimetres (see
@@ -895,11 +895,11 @@ void SaveProfile(CalibrationContext &ctx)
 	const std::string serialized = io.str();
 	WriteRegistryKey(serialized);
 
-	// Annotate the save event so investigators can correlate writes with
-	// the cal-state changes that triggered them. The wedged-state-saved bug
-	// from 2026-05-03 was hard to debug because saves were silent; this
+	// Annotate the save event so the log lets a reader correlate writes
+	// with the cal-state changes that triggered them. The wedged-state-saved
+	// bug from 2026-05-03 was hard to debug because saves were silent; this
 	// closes that gap. Includes the magnitude of what we just persisted so
-	// a future "you saved a wedged cal at time T" can be spot-checked.
+	// a "saved a wedged cal at time T" question can be spot-checked.
 	const double transMagCm =
 		std::sqrt(ctx.calibratedTranslation.x() * ctx.calibratedTranslation.x()
 		        + ctx.calibratedTranslation.y() * ctx.calibratedTranslation.y()

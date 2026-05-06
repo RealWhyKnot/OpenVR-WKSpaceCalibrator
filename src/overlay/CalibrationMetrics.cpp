@@ -490,8 +490,9 @@ namespace Metrics {
 		}
 
 		// --- Environment variable summary --------------------------------------
-		// Don't dump full environment (may contain credentials in CI/agent
-		// contexts). Count total + dump only known-safe VR/Steam-related ones.
+		// Don't dump full environment (may contain credentials in CI / non-
+		// interactive contexts). Count total + dump only known-safe
+		// VR/Steam-related ones.
 		LPWCH env = GetEnvironmentStringsW();
 		int envCount = 0;
 		std::string vrEnvDump;

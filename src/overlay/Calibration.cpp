@@ -1644,7 +1644,7 @@ namespace {
 				// through the gates would have velocity-integrated displacement
 				// comparable to the observed delta. This is logging-only --
 				// the auto-recover decision still runs from the existing
-				// triple-AND gate; this just gives the next investigator
+				// triple-AND gate; the annotation just gives the log enough
 				// data to distinguish "Quest re-anchored" from "base station
 				// bumped" from "false-positive on fast natural motion".
 				{
@@ -2246,7 +2246,7 @@ void CalibrationTick(double time)
 	// One-shot session-start config dump. Fires on the first non-skipped
 	// CalibrationTick after the profile has been loaded, so the annotation
 	// reflects the user's actual saved settings. Captures every experimental
-	// toggle + the load-bearing tunables. Saves a future investigator the
+	// toggle + the load-bearing tunables. Lets a session reader skip the
 	// "what version of the math is running" reverse-derivation from code.
 	{
 		static bool s_loggedConfigDump = false;
@@ -2788,7 +2788,7 @@ void CalibrationTick(double time)
 			// surfaces "your two systems disagree about which way is down"
 			// as a sustained signal so the user can re-run room setup. No
 			// calibration behavior change. See project_future_improvements_
-			// 2026-05-05.md Tier 1 #1 for the eventual Pacher-2021 RFU-style
+			// 2026-05-05.md for the eventual Pacher-2021 RFU-style
 			// correction that this diagnostic is the prerequisite for.
 			{
 				const double tiltDeg = calibration.m_residualPitchRollDeg;
@@ -3144,10 +3144,10 @@ void DismissAutoRecoveryBanner() {
 // doesn't write one so each caller's grep key can differ.
 static void RecoverFromWedgedCalibration(const char* userFacingMessage) {
 	// Capture the prior cal state BEFORE we discard it, so the log line
-	// records what we just threw away. Future investigators reading a
-	// session log can reconstruct "the cal we cleared was X cm with Y mm
-	// RMS" without having to grep for the latest values from earlier
-	// in the file.
+	// records what we just threw away. Anyone reading the session log
+	// later can reconstruct "the cal we cleared was X cm with Y mm RMS"
+	// without having to grep for the latest values from earlier in the
+	// file.
 	{
 		const double priorTransMagCm = calibration.Transformation().translation().norm() * 100.0;
 		const Eigen::Vector3d priorEulerDeg = calibration.EulerRotation();

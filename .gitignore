@@ -21,7 +21,7 @@ ipch
 # Per-session local-build counter (don't commit; is regenerated each build)
 /build/local_build_state.json
 
-# Editor / agent local state
+# Local tooling state
 .claude/
 CLAUDE.md
 .claude.local.json

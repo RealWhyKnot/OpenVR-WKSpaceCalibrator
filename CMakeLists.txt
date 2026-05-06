@@ -74,7 +74,7 @@ elseif ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC" OR "${CMAKE_C_COMPILER_ID}" S
 		/we4002 # too many actual parameters for macro 'identifier'
 		/we4003 # not enough actual parameters for macro 'identifier'
 		# /Zc:threadSafeInit- removed. The original cite was a Server 2003 MSVC-runtime
-		# bug; that OS reached EOL in 2015 (12+ years past EOL as of this commit).
+		# bug; that OS reached EOL in 2015 (12+ years past EOL as of 2026).
 		# Disabling thread-safe init silently breaks C++17's guarantee for
 		# inline-static / function-local-static initialisation across threads — a
 		# real correctness hazard in any code touching things like static caches in
