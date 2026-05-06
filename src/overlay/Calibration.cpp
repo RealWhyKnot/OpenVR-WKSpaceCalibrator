@@ -3000,6 +3000,26 @@ void DismissAutoRecoveryBanner() {
 // annotation is the caller's responsibility — this helper deliberately
 // doesn't write one so each caller's grep key can differ.
 static void RecoverFromWedgedCalibration(const char* userFacingMessage) {
+	// Capture the prior cal state BEFORE we discard it, so the log line
+	// records what we just threw away. Future investigators reading a
+	// session log can reconstruct "the cal we cleared was X cm with Y mm
+	// RMS" without having to grep for the latest values from earlier
+	// in the file.
+	{
+		const double priorTransMagCm = calibration.Transformation().translation().norm() * 100.0;
+		const Eigen::Vector3d priorEulerDeg = calibration.EulerRotation();
+		const bool priorWasValid = calibration.isValid();
+		const double priorBufferSamples = static_cast<double>(calibration.SampleCount());
+		char priorBuf[320];
+		snprintf(priorBuf, sizeof priorBuf,
+			"recovery_prior_state: was_valid=%d trans_mag_cm=%.2f euler_deg=(%.2f,%.2f,%.2f)"
+			" sample_count=%.0f relativePosCalibrated=%d",
+			(int)priorWasValid, priorTransMagCm,
+			priorEulerDeg.x(), priorEulerDeg.y(), priorEulerDeg.z(),
+			priorBufferSamples, (int)CalCtx.relativePosCalibrated);
+		Metrics::WriteLogAnnotation(priorBuf);
+	}
+
 	calibration.Clear();
 	CalCtx.refToTargetPose             = Eigen::AffineCompact3d::Identity();
 	CalCtx.relativePosCalibrated       = false;
