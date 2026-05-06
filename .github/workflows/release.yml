@@ -15,6 +15,13 @@ on:
 permissions:
   contents: write
 
+# Share a concurrency group with changelog-append so an appender push can't
+# race with a release build and add an Unreleased entry that the release itself
+# doesn't carry. Only one of the two workflows runs at a time.
+concurrency:
+  group: changelog-append
+  cancel-in-progress: false
+
 jobs:
   release:
     name: Build and publish release
@@ -27,6 +34,36 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote Unreleased -> tagged section
+        shell: pwsh
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          ./.github/scripts/Update-Changelog.ps1 -Mode Promote -Version '${{ github.ref_name }}'
+          # Stash the promoted files BEFORE build.ps1 mutates the worktree so we can
+          # replay the exact bytes to main after the release ships.
+          New-Item -ItemType Directory -Force -Path .changelog-stash/wiki | Out-Null
+          Copy-Item CHANGELOG.md       .changelog-stash/CHANGELOG.md       -Force
+          Copy-Item wiki/Changelog.md  .changelog-stash/wiki/Changelog.md  -Force
+
+      - name: Capture release notes
+        id: notes
+        shell: pwsh
+        run: |
+          # Pull JUST the body of the section we just promoted -- not the whole
+          # CHANGELOG -- so the GitHub release notes match the slice between this
+          # tag and the previous one. This is the contract that prevents the
+          # 2026-05-06 "five weeks of work" false-date hand-rewrite bug from
+          # recurring: the release body is mechanically derived from commit
+          # subjects in the tag range.
+          $body = & ./.github/scripts/Update-Changelog.ps1 -Mode Notes -ForVersion -Version '${{ github.ref_name }}'
+          if (-not $body) { $body = '_Maintenance release; see commit log for details._' }
+          $delim = "EOF_" + [Guid]::NewGuid().ToString('N')
+          "body<<$delim"  >> $env:GITHUB_OUTPUT
+          $body           >> $env:GITHUB_OUTPUT
+          $delim          >> $env:GITHUB_OUTPUT
 
       - name: Build distribution
         shell: pwsh
@@ -161,19 +198,63 @@ jobs:
           $installer  = "${{ steps.installer.outputs.path }}"
           $instSha    = "${{ steps.installer.outputs.sha256 }}"
           $instName   = "${{ steps.installer.outputs.name }}"
+          $body       = @'
+          ${{ steps.notes.outputs.body }}
+          '@
           # PowerShell variable-with-colon trap: `$instName:` parses as a
           # scoped-variable prefix (`$scope:name`) and aborts the here-string.
           # Use `${instName}` etc. to delimit the variable name explicitly.
-          $notes  = @"
+          # The body comes from Update-Changelog.ps1 -Mode Notes -- mechanically
+          # generated from commit subjects in the prior-tag..this-tag range.
+          $notes = @"
           ## OpenVR-SpaceCalibrator $tag
 
           Two download options:
 
-          - **${instName}** — guided installer. Run it; it places the overlay and the SteamVR driver in the right places automatically.
-          - **${zipName}** — drop-in zip. Extract anywhere, copy the ``driver_01spacecalibrator/`` folder into ``<Steam>\steamapps\common\SteamVR\drivers\``, and run ``SpaceCalibrator.exe`` from wherever you put it.
+          - **${instName}** -- guided installer. Run it; it places the overlay and the SteamVR driver in the right places automatically.
+          - **${zipName}** -- drop-in zip. Extract anywhere, copy the ``driver_01spacecalibrator/`` folder into ``<Steam>\steamapps\common\SteamVR\drivers\``, and run ``SpaceCalibrator.exe`` from wherever you put it.
 
           SHA256:
-          - ${instName}: ``${instSha}``
-          - ${zipName}: ``${zipSha}``
+          - ``${instName}``: ``${instSha}``
+          - ``${zipName}``: ``${zipSha}``
+
+          ---
+
+          $body
           "@
           gh release create $tag $zip $installer --title $tag --notes $notes
+
+      - name: Push promoted CHANGELOG back to main
+        # Replay the stashed (promoted) files onto main so subsequent commits
+        # build on the new state -- next push starts with a fresh "## Unreleased".
+        # main is not branch-protected on RealWhyKnot/OpenVR-SpaceCalibrator, so
+        # GITHUB_TOKEN can push directly. [skip changelog] keeps changelog-append
+        # from re-bulleting this commit.
+        # Done last so a build/publish failure doesn't push a phantom-promoted
+        # CHANGELOG to main.
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+
+          # Switch to main from the tag-detached HEAD.
+          git fetch origin main
+          git checkout main
+          git reset --hard origin/main
+
+          # Replay the stashed promoted files.
+          cp .changelog-stash/CHANGELOG.md           CHANGELOG.md
+          cp .changelog-stash/wiki/Changelog.md wiki/Changelog.md
+
+          if [[ -z "$(git status --porcelain CHANGELOG.md wiki/Changelog.md)" ]]; then
+            echo "Nothing to promote -- main is already in promoted state."
+            exit 0
+          fi
+
+          git add CHANGELOG.md wiki/Changelog.md
+          git commit -m "docs(changelog): promote Unreleased -> ${TAG_NAME} [skip changelog]"
+          git push origin main
