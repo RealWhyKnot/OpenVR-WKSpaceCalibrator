@@ -134,4 +134,4 @@ items in the list above.
 
 ## License
 
-MIT, see [LICENSE](LICENSE). Third-party attributions in [NOTICE](NOTICE).
+GNU General Public License v3.0, see [LICENSE](LICENSE). Project copyright lines and third-party attributions in [NOTICE](NOTICE). Earlier upstream contributions from Justin Li and Hyblocker were originally MIT-licensed and remain available under MIT terms from their origin repos; this fork's combined work is GPL-3.0 going forward.

@@ -1,7 +1,17 @@
-OpenVR-SpaceCalibrator -- third-party notices
+OpenVR-SpaceCalibrator -- copyright and third-party notices
 
-This product is licensed under the MIT License (see LICENSE).
-It bundles or links the following third-party components,
+Project copyright:
+  Copyright (C) 2026 WhyKnot and other contributors
+  Copyright (c) 2023-2025 Hyblocker and other contributors
+  Copyright (c) 2020-2022 Justin Li and other contributors
+
+This product is licensed under the GNU General Public License v3.0
+(see LICENSE). Earlier upstream contributions from Justin Li and
+Hyblocker were originally MIT-licensed and remain available under MIT
+terms from their origin repos; this fork's combined work is GPL-3.0
+going forward.
+
+This product also bundles or links the following third-party components,
 each used under its own license, reproduced below.
 
 Source code for this build (including the MPL-2.0 portions of Eigen) is
