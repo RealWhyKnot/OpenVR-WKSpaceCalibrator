@@ -1928,54 +1928,108 @@ static void TickRestLockedYaw(double now) {
 	}
 	g_restLockedYawLastTickTime = now;
 
-	// Walk all valid devices. v1 considers the primary target only; multi-
-	// tracker fusion (rec I) is a follow-up.
+	// Walk all valid target-system devices. Per rec I (research synthesis
+	// 2026-05-07), multi-tracker fusion via Markley matrix-weighted average
+	// composes contributions from every AT_REST tracker. Each contribution
+	// carries a class weight (Lighthouse 1.0, Quest 0.6, SlimeVR 0.3),
+	// an age weight exp(-age/120 s), and a quality weight 1/(1+sigma^2).
+	// The yaw-only collapse (all contributions are pure yaw rotations)
+	// reduces the symmetric 4x4 Markley eigenproblem to a 1-D weighted mean
+	// implemented in spacecal::rest_yaw::FuseYawContributionsRad.
+	std::vector<spacecal::rest_yaw::YawContribution> contributions;
+	std::vector<uint32_t> seenIds;
+	seenIds.reserve(vr::k_unMaxTrackedDeviceCount);
+
+	auto considerDevice = [&](uint32_t id, const std::string& trackingSystem) {
+		const auto& tp = CalCtx.devicePoses[id];
+		if (!tp.poseIsValid || !tp.deviceIsConnected
+		 || tp.result != vr::ETrackingResult::TrackingResult_Running_OK) {
+			auto it = g_restStates.find(id);
+			if (it != g_restStates.end()) g_restStates.erase(it);
+			return;
+		}
+		const Eigen::Quaterniond worldRot = WorldRotationFromPose(tp);
+		auto& rest = g_restStates[id];
+		const bool freshlyLocked = !rest.haveLock;
+		rest = spacecal::rest_yaw::UpdatePhase(rest, worldRot, now);
+		if (rest.phase == spacecal::rest_yaw::RestPhase::AtRest && rest.haveLock) {
+			if (freshlyLocked) {
+				// Stamp the lock time on first transition into AtRest. Used
+				// for the age-weight term in rec I's fusion.
+				rest.phaseEnteredAt = now;
+			}
+			const double yawErrRad = spacecal::rest_yaw::SignedYawDeltaRad(rest.lockedRot, worldRot);
+			const auto cls = ClassifyTrackingSystem(trackingSystem);
+			spacecal::rest_yaw::YawContribution contrib;
+			contrib.yawErrRad = -yawErrRad; // sign: subtract drift to compensate
+			contrib.cls = cls;
+			const double ageSec = std::max(0.0, now - rest.phaseEnteredAt);
+			// v1 quality is a constant proxy; the Cramer-Rao 1/(1+sigma^2)
+			// term needs per-tracker residual variance, which is not yet
+			// tracked. Use 1.0 as a placeholder so age and class weighting
+			// dominate; promote to real variance when residual tracking
+			// per device lands.
+			contrib.weight = spacecal::rest_yaw::ClassWeight(cls)
+			               * spacecal::rest_yaw::AgeWeight(ageSec)
+			               * spacecal::rest_yaw::QualityWeight(0.0);
+			contributions.push_back(contrib);
+			seenIds.push_back(id);
+		}
+	};
+
 	const int32_t targetID = CalCtx.targetID;
-	if (targetID < 0 || targetID >= (int32_t)vr::k_unMaxTrackedDeviceCount) return;
+	if (targetID >= 0 && targetID < (int32_t)vr::k_unMaxTrackedDeviceCount) {
+		considerDevice((uint32_t)targetID, CalCtx.targetTrackingSystem);
+	}
+	// Multi-ecosystem extras: each entry's targetID is a distinct device on a
+	// potentially distinct tracking system. Adding their contributions makes
+	// rec A robust against a rig where the primary target's IMU drifts but
+	// auxiliary trackers stay anchored.
+	for (const auto& extra : CalCtx.additionalCalibrations) {
+		if (!extra.enabled || !extra.valid) continue;
+		const int32_t exId = extra.targetID;
+		if (exId < 0 || exId >= (int32_t)vr::k_unMaxTrackedDeviceCount) continue;
+		// Skip if already considered (primary and an extra mapped to the same ID).
+		bool already = false;
+		for (auto sid : seenIds) if (sid == (uint32_t)exId) { already = true; break; }
+		if (already) continue;
+		considerDevice((uint32_t)exId, extra.targetTrackingSystem);
+	}
 
-	const auto& tp = CalCtx.devicePoses[targetID];
-	if (!tp.poseIsValid || !tp.deviceIsConnected
-	 || tp.result != vr::ETrackingResult::TrackingResult_Running_OK) {
-		// Lost validity: drop state for this tracker.
-		auto it = g_restStates.find((uint32_t)targetID);
-		if (it != g_restStates.end()) g_restStates.erase(it);
+	if (contributions.empty()) {
 		return;
 	}
 
-	const Eigen::Quaterniond worldRot = WorldRotationFromPose(tp);
+	// Markley fusion. Weighted mean over yaw-only contributions; weights
+	// already include class * age * quality.
+	const double meanErrRad = spacecal::rest_yaw::FuseYawContributionsRad(contributions);
 
-	auto& rest = g_restStates[(uint32_t)targetID];
-	rest = spacecal::rest_yaw::UpdatePhase(rest, worldRot, now);
-
-	if (rest.phase != spacecal::rest_yaw::RestPhase::AtRest || !rest.haveLock) {
-		return;
-	}
-
-	// At-rest with a valid lock. Yaw drift = SignedYawDelta(locked -> current).
-	const double yawErrRad = spacecal::rest_yaw::SignedYawDeltaRad(rest.lockedRot, worldRot);
-
-	// Per-class cap. v1 reads the target tracking system name once per session
-	// classification check is cheap enough to redo on every tick; cache later
-	// if a profile shows it.
-	const auto cls = ClassifyTrackingSystem(CalCtx.targetTrackingSystem);
+	// Apply the per-class cap of the highest-trust contribution. Rationale:
+	// the cap has to be small enough that the worst tracker in the pool can
+	// not inject bias faster than the sensor can drift, but the dominant
+	// source of bias-cancellation is the highest-trust class so cap by
+	// THAT class's expected drift rate.
 	spacecal::rest_yaw::RateCaps caps;
-	const double capDegPerSec = spacecal::rest_yaw::CapForClass(cls, caps);
+	double capDegPerSec = caps.global_ceiling_deg_per_sec;
+	for (const auto& c : contributions) {
+		const double cls_cap = spacecal::rest_yaw::CapForClass(c.cls, caps);
+		if (cls_cap < capDegPerSec) capDegPerSec = cls_cap;
+	}
 
 	if (dt <= 0.0) return;
-	const double stepRad = spacecal::rest_yaw::ApplyBoundedYawStep(-yawErrRad, dt, capDegPerSec);
+	const double stepRad = spacecal::rest_yaw::ApplyBoundedYawStep(meanErrRad, dt, capDegPerSec);
 	const double stepDeg = stepRad * (180.0 / EIGEN_PI);
 
 	CalCtx.calibratedRotation(1) += stepDeg;
 
 	// 1 Hz throttled telemetry. step_deg = bounded; err_deg = unbounded
-	// (so the log shows whether the cap is doing work). locked_trackers = 1
-	// in v1; will be >1 when rec I lands.
+	// (so the log shows whether the cap is doing work).
 	if ((now - g_restLockedYawLastLogTime) >= 1.0) {
 		g_restLockedYawLastLogTime = now;
-		char buf[160];
+		char buf[200];
 		snprintf(buf, sizeof buf,
-			"rest_locked_yaw_tick: step_deg=%.5f err_deg=%.5f locked_trackers=1 cls=%d cap_deg_per_sec=%.4f",
-			stepDeg, yawErrRad * 180.0 / EIGEN_PI, (int)cls, capDegPerSec);
+			"rest_locked_yaw_tick: step_deg=%.5f err_deg=%.5f locked_trackers=%zu cap_deg_per_sec=%.4f",
+			stepDeg, meanErrRad * 180.0 / EIGEN_PI, contributions.size(), capDegPerSec);
 		Metrics::WriteLogAnnotation(buf);
 	}
 }
