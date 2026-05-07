@@ -182,12 +182,12 @@ jobs:
           ZIP_NAME: ${{ steps.zip.outputs.name }}
         run: |
           # Construct the final release body by hand from typed inputs (env
-          # vars + the slice file), NOT by interpolating ${{ ... }} into a
-          # PowerShell here-string. Inline GHA expressions in here-strings
-          # have bitten this workflow before (PowerShell colon-prefix scope
-          # parsing, embedded-quote escaping, multi-line YAML indent rules).
-          # Reading inputs from $env:* keeps the script lint-stable and the
-          # body byte-stable across runs.
+          # vars + the slice file), NOT by interpolating GitHub Actions
+          # expressions into a PowerShell here-string. Inline GHA expressions
+          # in here-strings have bitten this workflow before (PowerShell
+          # colon-prefix scope parsing, embedded-quote escaping, multi-line
+          # YAML indent rules). Reading inputs from $env:* keeps the script
+          # lint-stable and the body byte-stable across runs.
           $tag       = $env:TAG_NAME
           $instPath  = $env:INSTALLER_PATH
           $instSha   = $env:INSTALLER_SHA
