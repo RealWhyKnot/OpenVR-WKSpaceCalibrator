@@ -1042,6 +1042,17 @@ void CCal_DrawSettings() {
 					"recovery-fire frequency, time-to-first-failure, subjective Likert).");
 			}
 
+			// Predictive recovery pre-correction.
+			ImGui::Checkbox("Predictive recovery pre-correction", &CalCtx.predictiveRecoveryEnabled);
+			if (ImGui::IsItemHovered(0)) {
+				ImGui::SetTooltip("Each Quest re-anchor event (the 30 cm HMD-jump trigger) pushes its direction\n"
+					"and magnitude into a 6-deep rolling buffer. Once 3+ events accumulate with a consistent\n"
+					"direction, apply 10 percent of the predicted next-jump per tick as a bounded-rate\n"
+					"translation nudge to the active calibration. Bounded twice (10 percent fraction +\n"
+					"per-tick rate cap) so a misfire cannot reproduce the deleted Phase 1+2 silent-recal\n"
+					"failure mode. Off by default.");
+			}
+
 			// Toggle-flip diagnostic. Compare each flag to its previous value
 			// and emit a one-shot annotation on change. Statics are initialized
 			// to the loaded-profile values on first frame so we do not log a
@@ -1053,6 +1064,7 @@ void CCal_DrawSettings() {
 			static bool s_prevTukey      = CalCtx.useTukeyBiweight;
 			static bool s_prevKalman     = CalCtx.useBlendFilter;
 			static bool s_prevRestYaw    = CalCtx.restLockedYawEnabled;
+			static bool s_prevPredRecov  = CalCtx.predictiveRecoveryEnabled;
 			logToggleFlip("latency_auto_detect",       s_prevAutoDetect, CalCtx.latencyAutoDetect);
 			logToggleFlip("latency_use_gcc_phat",      s_prevGccPhat,    CalCtx.useGccPhatLatency);
 			logToggleFlip("geometry_shift_use_cusum",  s_prevCusum,      CalCtx.useCusumGeometryShift);
@@ -1060,6 +1072,7 @@ void CCal_DrawSettings() {
 			logToggleFlip("irls_use_tukey",            s_prevTukey,      CalCtx.useTukeyBiweight);
 			logToggleFlip("blend_use_kalman",          s_prevKalman,     CalCtx.useBlendFilter);
 			logToggleFlip("rest_locked_yaw",           s_prevRestYaw,    CalCtx.restLockedYawEnabled);
+			logToggleFlip("predictive_recovery",       s_prevPredRecov,  CalCtx.predictiveRecoveryEnabled);
 
 			ImGui::EndGroupPanel();
 		}

@@ -258,6 +258,18 @@ struct CalibrationContext
 	// rest_locked_yaw in profile JSON.
 	bool restLockedYawEnabled = false;
 
+	// Opt-in switch for the predictive recovery pre-correction (rec C).
+	// Each RecoverFromWedgedCalibration fire pushes (HMD-jump direction,
+	// magnitude, time) into a 6-deep ring; if the last 3+ events trend in
+	// a consistent direction (recency-weighted cosine > 0.7), apply a
+	// small fraction (10 percent) of the predicted next-jump per tick as
+	// a bounded-rate translation nudge to the active SE(3). The
+	// 30 cm relocalization detector is the high-SNR signal source; rec C
+	// only chooses how to extrapolate between events. Math is in
+	// src/overlay/RecoveryDeltaBuffer.h. Persisted as predictive_recovery
+	// in profile JSON.
+	bool predictiveRecoveryEnabled = false;
+
 	// Rolling window of per-solve residual pitch+roll readings (degrees), used
 	// by spacecal::gravity::EvaluateTilt to flag sustained gravity-axis
 	// disagreement between the reference and target tracking systems. Pushed

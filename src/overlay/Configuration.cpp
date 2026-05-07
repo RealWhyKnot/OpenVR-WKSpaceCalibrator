@@ -308,6 +308,8 @@ void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		ctx.useBlendFilter = obj["blend_use_kalman"].get<bool>();
 	if (obj["rest_locked_yaw"].is<bool>())
 		ctx.restLockedYawEnabled = obj["rest_locked_yaw"].get<bool>();
+	if (obj["predictive_recovery"].is<bool>())
+		ctx.predictiveRecoveryEnabled = obj["predictive_recovery"].get<bool>();
 
 	// Native prediction-suppression settings.
 	//
@@ -637,6 +639,7 @@ void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	WRITE_IF_CHANGED_BOOL  ("irls_use_tukey",               useTukeyBiweight);
 	WRITE_IF_CHANGED_BOOL  ("blend_use_kalman",             useBlendFilter);
 	WRITE_IF_CHANGED_BOOL  ("rest_locked_yaw",              restLockedYawEnabled);
+	WRITE_IF_CHANGED_BOOL  ("predictive_recovery",          predictiveRecoveryEnabled);
 	WRITE_IF_CHANGED_BOOL  ("recalibrate_on_movement",      recalibrateOnMovement);
 	WRITE_IF_CHANGED_BOOL  ("base_station_drift_correction", baseStationDriftCorrectionEnabled);
 	WRITE_IF_CHANGED_DOUBLE("calibration_speed",            calibrationSpeed);

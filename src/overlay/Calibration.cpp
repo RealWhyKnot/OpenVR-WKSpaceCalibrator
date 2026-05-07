@@ -14,6 +14,8 @@
                              // off while the user is mid-setup so it can't disrupt them.
 #include "RestLockedYaw.h"   // spacecal::rest_yaw::* — rest-locked yaw drift correction
                              // (continuous-cal-OFF mode). Default OFF; opt-in via Experimental tab.
+#include "RecoveryDeltaBuffer.h" // spacecal::recovery_delta::* — predictive pre-correction
+                             // from the rolling buffer of 30 cm relocalization events.
 
 #include <string>
 #include <vector>
@@ -1406,6 +1408,14 @@ namespace {
 	double g_restLockedYawLastTickTime = -1.0;
 	double g_restLockedYawLastLogTime  = -1e9;
 
+	// Predictive recovery (rec C). Each RecoverFromWedgedCalibration fire
+	// pushes the HMD-jump direction and magnitude into this ring; the per-
+	// tick predictive apply reads from it. Cleared on session end. Math is
+	// in src/overlay/RecoveryDeltaBuffer.h.
+	spacecal::recovery_delta::Buffer g_recoveryDeltaBuffer;
+	double g_predictiveRecoveryLastTickTime = -1.0;
+	double g_predictiveRecoveryLastLogTime  = -1e9;
+
 	constexpr double kRelocHmdJumpM       = 0.05;   // 5 cm
 	constexpr double kRelocBodyMaxDeltaM  = 0.05;   // 5 cm (any body tracker moving more = rule out)
 	constexpr double kRelocBaseStableM    = 0.001;  // 1 mm
@@ -1830,6 +1840,15 @@ namespace {
 			// ComputeIncremental will write the post-recovery values via the
 			// existing path at the end of CalibrationTick, which is exactly
 			// what we want.
+
+			// Rec C: push the HMD-jump direction and magnitude into the
+			// rolling buffer before recovery clears state. Subsequent ticks
+			// can predict the next jump from these accumulated events and
+			// apply a small fraction as a bounded-rate translation nudge,
+			// shrinking the magnitude of the next observed event if the
+			// drift trend is consistent.
+			spacecal::recovery_delta::Push(g_recoveryDeltaBuffer, dpos, now);
+
 			char uimsg[128];
 			snprintf(uimsg, sizeof uimsg,
 				"Quest re-localized (%.0f cm jump). Recalibrating...\n",
@@ -2030,6 +2049,69 @@ static void TickRestLockedYaw(double now) {
 		snprintf(buf, sizeof buf,
 			"rest_locked_yaw_tick: step_deg=%.5f err_deg=%.5f locked_trackers=%zu cap_deg_per_sec=%.4f",
 			stepDeg, meanErrRad * 180.0 / EIGEN_PI, contributions.size(), capDegPerSec);
+		Metrics::WriteLogAnnotation(buf);
+	}
+}
+
+// Predictive recovery pre-correction tick. Runs after TickRestLockedYaw when
+// CalCtx.predictiveRecoveryEnabled is true. Reads the rolling buffer of
+// recovery events from g_recoveryDeltaBuffer; if the gate (>= 3 events,
+// consistent direction) passes, applies a bounded-rate translation nudge
+// to ctx.calibratedTranslation. The 30 cm relocalization detector is the
+// high-SNR signal source -- rec C only chooses how to extrapolate between
+// events.
+//
+// Bounded twice: kAmount = 0.10 fraction of predicted magnitude per event,
+// AND kPredictiveRateCapMps = 0.001 m/s (1 mm/s) per-tick rate cap. Either
+// gate alone would prevent the deleted Phase 1+2 silent-recal failure mode;
+// together they make the worst-case bias mathematically bounded.
+//
+// Sign convention: subtract the predicted drift from calibratedTranslation
+// to compensate. If a real-session test surfaces the wrong sign, flip here.
+constexpr double kPredictiveRateCapMps = 0.001; // 1 mm/s
+
+static void TickPredictiveRecovery(double now) {
+	if (!CalCtx.predictiveRecoveryEnabled) {
+		spacecal::recovery_delta::Clear(g_recoveryDeltaBuffer);
+		g_predictiveRecoveryLastTickTime = -1.0;
+		return;
+	}
+	if (!CalCtx.validProfile) return;
+
+	// Same continuous-cal coexistence rule as rec A: skip during active one-
+	// shot sub-states; allow during Continuous, ContinuousStandby, None,
+	// Editing. The predictive nudge IS a hint to continuous-cal -- if both
+	// run, continuous-cal's per-tick fit will dominate the next tick if they
+	// disagree (the nudge becomes a small perturbation absorbed by the EMA
+	// blend).
+	if (CalCtx.state == CalibrationState::Begin
+	 || CalCtx.state == CalibrationState::Rotation
+	 || CalCtx.state == CalibrationState::Translation) {
+		return;
+	}
+
+	double dt = 0.0;
+	if (g_predictiveRecoveryLastTickTime > 0.0) {
+		dt = now - g_predictiveRecoveryLastTickTime;
+	}
+	g_predictiveRecoveryLastTickTime = now;
+
+	const Eigen::Vector3d step = spacecal::recovery_delta::ComputePerTickNudge(
+		g_recoveryDeltaBuffer, now, dt, kPredictiveRateCapMps);
+
+	if (step.norm() <= 0.0) return;
+
+	// calibratedTranslation is in centimeters (per Configuration.cpp:255 and
+	// the publish path's *100.0 conversion). Convert step (meters) to cm.
+	CalCtx.calibratedTranslation -= step * 100.0;
+
+	if ((now - g_predictiveRecoveryLastLogTime) >= 1.0) {
+		g_predictiveRecoveryLastLogTime = now;
+		const size_t live = spacecal::recovery_delta::LiveCount(g_recoveryDeltaBuffer);
+		char buf[200];
+		snprintf(buf, sizeof buf,
+			"predictive_recovery_apply: step_m=(%.6f,%.6f,%.6f) step_norm_mm=%.4f buffer_live=%zu",
+			step.x(), step.y(), step.z(), step.norm() * 1000.0, live);
 		Metrics::WriteLogAnnotation(buf);
 	}
 }
@@ -2502,6 +2584,11 @@ void CalibrationTick(double time)
 	// a bounded-rate yaw nudge to ctx.calibratedRotation(1); the existing
 	// publish path picks up the change via SendFallbackIfChanged.
 	TickRestLockedYaw(time);
+
+	// Predictive recovery pre-correction (rec C). Opt-in via Experimental tab,
+	// default OFF. Reads the rolling buffer of 30 cm relocalization events and
+	// applies a bounded-rate translation nudge if the gate passes.
+	TickPredictiveRecovery(time);
 
 	if (ctx.state == CalibrationState::Continuous || ctx.state == CalibrationState::ContinuousStandby) {
 		ctx.ClearLogOnMessage();
