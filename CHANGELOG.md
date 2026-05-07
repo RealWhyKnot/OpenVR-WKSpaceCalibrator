@@ -15,6 +15,7 @@ The most recent release is at the top.
 - Consume OpenVR-PairDriver via submodule, drop local driver tree (e8678db)
 - **deps:** Bump OpenVR-PairDriver to ceb1416 (InputHealth Stages 1A-1D) (b6bc0d9)
 - **deps:** Bump OpenVR-PairDriver to bded14d (build.ps1 EAP='Continue' fix) (9186194)
+- **deps:** Bump OpenVR-PairDriver to 96a2829 (InputHealth Stages 1E-1F) (76892b8)
 
 ### Fixed
 - **deploy:** Invoke submodule build in-process to dodge PS 5.1 NativeCommandError (2026.5.6.5-B8CD) (c9afdf6)
