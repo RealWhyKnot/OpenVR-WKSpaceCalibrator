@@ -11,6 +11,13 @@ The most recent release is at the top.
 
 ## Unreleased
 
+### Added
+- **overlay:** Drift-subsystem debug instrumentation (f43bc32)
+- **overlay:** Chi-square re-anchor sub-detector (rec F) (b2cb00e)
+- **overlay:** Predictive recovery pre-correction (rec C) (938acba)
+- **overlay:** Multi-tracker Markley fusion for rest-locked yaw (rec I) (46fc8c1)
+- **overlay:** Rest-locked yaw drift correction (rec A) (d24ea11)
+
 ### Changed
 - Consume OpenVR-PairDriver via submodule, drop local driver tree (e8678db)
 - **deps:** Bump OpenVR-PairDriver to ceb1416 (InputHealth Stages 1A-1D) (b6bc0d9)
@@ -19,6 +26,8 @@ The most recent release is at the top.
 
 ### Fixed
 - **deploy:** Invoke submodule build in-process to dodge PS 5.1 NativeCommandError (2026.5.6.5-B8CD) (c9afdf6)
+- **ui:** Gate Experimental toggles by calibration mode (4256d8d)
+- **overlay:** Fisher-rank gate inside ComputeOneshot (rec G) (b81006b)
 
 ---
 
