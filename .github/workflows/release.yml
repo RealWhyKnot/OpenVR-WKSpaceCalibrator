@@ -286,44 +286,95 @@ jobs:
           $stash = "${{ steps.compose.outputs.stash }}"
           gh release create $tag $zip $inst --title $tag --notes-file $stash
 
-      - name: Verify published body matches composed body
-        # Smoke check: fetch the published release body via gh and diff against
-        # what we sent. GitHub occasionally re-encodes line endings and
-        # trailing whitespace; the comparison is line-ending-normalised + Trim
-        # to dodge those false-positives. Real divergence (markdown swallowed,
-        # body truncated, GitHub auto-prepended its own auto-notes, etc.)
-        # surfaces as a workflow warning that the maintainer can react to.
-        shell: pwsh
+      - name: Verify published release body matches composed body
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ github.ref_name }}
+        shell: pwsh
         run: |
-          $stash = '${{ steps.compose.outputs.stash }}'
-          $expected = ([System.IO.File]::ReadAllText($stash, [System.Text.UTF8Encoding]::new($false))).Trim()
-          $published = (gh release view $env:TAG_NAME --json body | ConvertFrom-Json).body.Trim()
-          $expectedN  = ($expected  -replace "`r`n", "`n").TrimEnd()
-          $publishedN = ($published -replace "`r`n", "`n").TrimEnd()
-          if ($expectedN -ne $publishedN) {
-            Write-Warning "Published release body does not byte-match the composed body."
-            Write-Host "expected length: $($expectedN.Length)"
-            Write-Host "published length: $($publishedN.Length)"
-            # Best-effort diff context: dump the first divergent line.
-            $eLines = $expectedN -split "`n"
-            $pLines = $publishedN -split "`n"
-            for ($i = 0; $i -lt [math]::Min($eLines.Count, $pLines.Count); $i++) {
-              if ($eLines[$i] -ne $pLines[$i]) {
-                Write-Host ("first divergence at line {0}:" -f ($i + 1))
-                Write-Host ("  expected:  {0}" -f $eLines[$i])
-                Write-Host ("  published: {0}" -f $pLines[$i])
-                break
+          $tag      = $env:TAG_NAME
+          $stash    = '${{ steps.compose.outputs.stash }}'
+          $expected = ([System.IO.File]::ReadAllText($stash, [System.Text.UTF8Encoding]::new($false))) -replace "`r`n","`n"
+          $expected = $expected.TrimEnd("`n")
+
+          function Get-StringSha256 {
+            param([string]$Text)
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            try { return [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '') }
+            finally { $sha.Dispose() }
+          }
+
+          # GitHub's release-body read-after-write isn't strictly consistent.
+          # Right after gh release create (or gh release edit) the next
+          # gh release view can return a stub or partial body for several
+          # seconds before the API settles on the published value. Compare
+          # via SHA256 (catches length-match-but-content-different corruption
+          # the old length check would miss), and retry with exponential
+          # backoff so the transient settle window doesn't false-fail the
+          # workflow. Total budget across attempts: 2+4+8+16+32 = 62s.
+          function Test-PublishedBodyMatches {
+            param([string]$Tag, [string]$Expected, [int]$MaxAttempts = 6)
+            $expectedSha = Get-StringSha256 -Text $Expected
+            $delay = 2
+            $lastActual = ''
+            for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+              $raw = & gh release view $Tag --json body --jq '.body'
+              if ($LASTEXITCODE -ne 0) { throw "gh release view $Tag failed: $raw" }
+              $actual = ($raw -replace "`r`n","`n").TrimEnd("`n")
+              $lastActual = $actual
+              $actualSha = Get-StringSha256 -Text $actual
+              if ($actualSha -eq $expectedSha) {
+                Write-Host "Attempt $attempt/$MaxAttempts: body matches (len=$($actual.Length) sha256=$($actualSha.Substring(0,12)))."
+                return @{ Match = $true; Actual = $actual; AttemptCount = $attempt }
+              }
+              Write-Host "Attempt $attempt/$MaxAttempts: actual_len=$($actual.Length) expected_len=$($Expected.Length) actual_sha=$($actualSha.Substring(0,12)) expected_sha=$($expectedSha.Substring(0,12))"
+              if ($attempt -lt $MaxAttempts) {
+                Write-Host "Sleeping ${delay}s before retry..."
+                Start-Sleep -Seconds $delay
+                $delay = $delay * 2
               }
             }
-            if ($eLines.Count -ne $pLines.Count) {
-              Write-Host ("line counts differ: expected={0} published={1}" -f $eLines.Count, $pLines.Count)
-            }
-          } else {
-            Write-Host "Published body byte-matches composed body. ($($expectedN.Length) chars)"
+            return @{ Match = $false; Actual = $lastActual; AttemptCount = $MaxAttempts }
           }
+
+          $result = Test-PublishedBodyMatches -Tag $tag -Expected $expected
+          if ($result.Match) {
+            Write-Host "Published release body matches composed body on attempt $($result.AttemptCount) ($($expected.Length) chars)."
+            return
+          }
+
+          Write-Host "::warning::Body still differs after $($result.AttemptCount) attempts. Auto-correcting via gh release edit."
+          gh release edit $tag --notes-file $stash
+          if ($LASTEXITCODE -ne 0) { throw "gh release edit failed during auto-correct" }
+
+          $recheck = Test-PublishedBodyMatches -Tag $tag -Expected $expected
+          if ($recheck.Match) {
+            Write-Host "Auto-correct succeeded; body matches on attempt $($recheck.AttemptCount)."
+            return
+          }
+
+          $diffPath = Join-Path $env:RUNNER_TEMP 'release-body-actual.md'
+          $recheck.Actual | Out-File -LiteralPath $diffPath -Encoding utf8 -NoNewline
+          $headLen = [Math]::Min(200, $expected.Length)
+          $tailStart = [Math]::Max(0, $expected.Length - 200)
+          $expectedHead = $expected.Substring(0, $headLen)
+          $expectedTail = $expected.Substring($tailStart)
+          $actHeadLen = [Math]::Min(200, $recheck.Actual.Length)
+          $actTailStart = [Math]::Max(0, $recheck.Actual.Length - 200)
+          $actualHead = $recheck.Actual.Substring(0, $actHeadLen)
+          $actualTail = $recheck.Actual.Substring($actTailStart)
+          Write-Host "Expected length $($expected.Length); got $($recheck.Actual.Length)."
+          Write-Host "--- Expected head ---"
+          Write-Host $expectedHead
+          Write-Host "--- Expected tail ---"
+          Write-Host $expectedTail
+          Write-Host "--- Actual head ---"
+          Write-Host $actualHead
+          Write-Host "--- Actual tail ---"
+          Write-Host $actualTail
+          Write-Host "Compare $stash vs $diffPath in the runner artifacts."
+          throw "Release body still differs after auto-correct + retries."
 
       - name: Push promoted CHANGELOG back to main (verified)
         # Use the GraphQL createCommitOnBranch mutation so the promotion
