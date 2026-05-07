@@ -218,7 +218,13 @@ Section "Install" SecInstall
 	SetOutPath "$vrRuntimePath\drivers\01openvrpair\resources\settings"
 	File "${DRIVER_BASEDIR}\resources\settings\default.vrsettings"
 	SetOutPath "$vrRuntimePath\drivers\01openvrpair\bin\win64"
-	File "${DRIVER_BASEDIR}\bin\win64\driver_openvrpair.dll"
+	; SteamVR's loader expects bin\win64\driver_<folder>.dll, where <folder>
+	; matches the parent dir name verbatim (`01openvrpair`, including the
+	; load-order prefix). The PairDriver build tree ships the DLL as
+	; driver_openvrpair.dll without the prefix, so /oname= renames at write
+	; time -- otherwise vrserver fails LoadLibrary with FileNotFound(103) and
+	; the overlay reconnects in a pipe-broken loop.
+	File /oname=driver_01openvrpair.dll "${DRIVER_BASEDIR}\bin\win64\driver_openvrpair.dll"
 
 	FileOpen $0 "$vrRuntimePath\drivers\01openvrpair\resources\enable_calibration.flag" w
 	FileWrite $0 "enabled"

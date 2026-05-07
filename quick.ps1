@@ -144,7 +144,13 @@ $PairDriverDll    = Join-Path $PairDriverTree "bin/win64/driver_openvrpair.dll"
 $SteamExe         = Join-Path $SteamPath "steam.exe"
 $SteamDriversDir  = Join-Path $SteamPath "steamapps/common/SteamVR/drivers"
 $DestDriverFolder = Join-Path $SteamDriversDir "01openvrpair"
-$DestDriverDll    = Join-Path $DestDriverFolder "bin/win64/driver_openvrpair.dll"
+# SteamVR's loader expects bin\win64\driver_<folder>.dll, where <folder>
+# matches the destination dir name verbatim ("01openvrpair", with the
+# load-order prefix). The submodule build ships the DLL as
+# driver_openvrpair.dll without the prefix, so the elevated install block
+# below renames it at the destination. $DestDriverDll points at the
+# post-rename path so the timestamp verify check matches reality.
+$DestDriverDll    = Join-Path $DestDriverFolder "bin/win64/driver_01openvrpair.dll"
 $DestResourcesDir = Join-Path $DestDriverFolder "resources"
 $DestCalFlag      = Join-Path $DestResourcesDir "enable_calibration.flag"
 # Legacy driver folders the modular layout supersedes. Migration disables
@@ -266,6 +272,13 @@ $extraCmds = @()
 if ($DeployDriver) {
     $extraCmds += "if (Test-Path '$DestDriverFolder') { Remove-Item -Recurse -Force '$DestDriverFolder' }"
     $extraCmds += "Copy-Item -Recurse -Force -Path '$PairDriverTree' -Destination '$DestDriverFolder'"
+    # The recursive copy preserves the bare driver_openvrpair.dll filename
+    # from the submodule build tree. SteamVR's loader needs the DLL named
+    # to match the destination folder ("driver_01openvrpair.dll" for the
+    # 01openvrpair folder), so rename in place after the copy. Without
+    # this, vrserver fails LoadLibrary with FileNotFound(103) at startup.
+    $BareDestDll    = Join-Path $DestDriverFolder "bin/win64/driver_openvrpair.dll"
+    $extraCmds += "if (Test-Path '$BareDestDll') { Move-Item -Force -Path '$BareDestDll' -Destination '$DestDriverDll' }"
     $extraCmds += "if (-not (Test-Path '$DestResourcesDir')) { New-Item -ItemType Directory -Force -Path '$DestResourcesDir' | Out-Null }"
     $extraCmds += "Set-Content -Path '$DestCalFlag' -Value 'enabled' -NoNewline"
     $extraCmds += "Write-Host 'Installed shared driver tree to $DestDriverFolder + dropped enable_calibration.flag.'"
