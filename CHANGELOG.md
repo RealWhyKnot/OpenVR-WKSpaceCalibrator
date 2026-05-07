@@ -30,6 +30,7 @@ The most recent release is at the top.
 - **overlay:** Fisher-rank gate inside ComputeOneshot (rec G) (b81006b)
 - **ci:** Release.yml workflow parse error from literal expression in comment (58c21e3)
 - **install:** Rename driver DLL to match SteamVR loader convention (03ac4c1)
+- **ci:** Release.yml verify-step parser bug + stale folder name in zip-drop instructions (c1020e3)
 
 ---
 
