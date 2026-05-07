@@ -12,6 +12,8 @@
 #include "TiltDiagnostic.h"    // spacecal::gravity::EvaluateTilt — sustained gravity-disagreement annotation
 #include "Wizard.h"          // spacecal::wizard::IsActive — gate the runtime wedge detector
                              // off while the user is mid-setup so it can't disrupt them.
+#include "RestLockedYaw.h"   // spacecal::rest_yaw::* — rest-locked yaw drift correction
+                             // (continuous-cal-OFF mode). Default OFF; opt-in via Experimental tab.
 
 #include <string>
 #include <vector>
@@ -1392,6 +1394,18 @@ namespace {
 	};
 	RelocalizationDetectorState g_relocDetector;
 
+	// Rest-locked yaw drift correction state. Per-target-tracker phase
+	// machine + locked world-frame orientation. Cleared on AssignTargets
+	// reseats, target ID change, or pose-validity loss. The ID-keyed map is
+	// indexed by OpenVR device ID; entries are removed when the device's
+	// pose goes invalid. Activates only when CalCtx.restLockedYawEnabled is
+	// true and the calibration state is not Continuous (continuous-cal
+	// already handles drift in its own loop). Math is in
+	// src/overlay/RestLockedYaw.h.
+	std::unordered_map<uint32_t, spacecal::rest_yaw::RestState> g_restStates;
+	double g_restLockedYawLastTickTime = -1.0;
+	double g_restLockedYawLastLogTime  = -1e9;
+
 	constexpr double kRelocHmdJumpM       = 0.05;   // 5 cm
 	constexpr double kRelocBodyMaxDeltaM  = 0.05;   // 5 cm (any body tracker moving more = rule out)
 	constexpr double kRelocBaseStableM    = 0.001;  // 1 mm
@@ -1832,6 +1846,137 @@ namespace {
 		// Diagnostic-only: per-base distance cache for next-tick comparison
 		// in the reloc_base_dists log.
 		s.prevHmdToBaseDist = std::move(currentHmdToBaseDist);
+	}
+}
+
+// Classify a tracking-system name string into a coarse class. The name comes
+// from OpenVR's Prop_TrackingSystemName_String for the device. Per-class rate
+// caps live in spacecal::rest_yaw::RateCaps; the dominant axis of variation
+// in drift rate is sensor class, not individual unit (Borenstein & Ojeda
+// 2009/2010 iHDE; SlimeVR v0.16.0 release notes).
+static spacecal::rest_yaw::TrackingSystemClass ClassifyTrackingSystem(const std::string& name) {
+	if (name.empty()) return spacecal::rest_yaw::TrackingSystemClass::Unknown;
+	std::string lower = name;
+	std::transform(lower.begin(), lower.end(), lower.begin(),
+		[](unsigned char c) { return (char)std::tolower(c); });
+	if (lower.find("lighthouse") != std::string::npos) return spacecal::rest_yaw::TrackingSystemClass::Lighthouse;
+	if (lower.find("oculus") != std::string::npos)     return spacecal::rest_yaw::TrackingSystemClass::Quest;
+	if (lower.find("quest") != std::string::npos)      return spacecal::rest_yaw::TrackingSystemClass::Quest;
+	if (lower.find("slime") != std::string::npos)      return spacecal::rest_yaw::TrackingSystemClass::SlimeVR;
+	return spacecal::rest_yaw::TrackingSystemClass::Unknown;
+}
+
+// Lift a target-tracking-system pose into world frame: world_q = qWorldFromDriver * qRotation.
+static inline Eigen::Quaterniond WorldRotationFromPose(const vr::DriverPose_t& p) {
+	const Eigen::Quaterniond qWorld(
+		p.qWorldFromDriverRotation.w,
+		p.qWorldFromDriverRotation.x,
+		p.qWorldFromDriverRotation.y,
+		p.qWorldFromDriverRotation.z);
+	const Eigen::Quaterniond qRot(
+		p.qRotation.w,
+		p.qRotation.x,
+		p.qRotation.y,
+		p.qRotation.z);
+	return qWorld * qRot;
+}
+
+// Rest-locked yaw drift correction tick. Runs after TickHmdRelocalizationDetector
+// when CalCtx.restLockedYawEnabled is true and the calibration state is not
+// Continuous. Updates per-target-tracker rest state, fuses yaw drift signals
+// from all AT_REST trackers via the rec I weighted-mean shape, and applies a
+// bounded-rate yaw nudge to ctx.calibratedRotation(1).
+//
+// Why not run during Continuous: continuous-cal already corrects drift in its
+// own loop; running both produces oscillation unless one is gain-limited well
+// below the other (basic IMC). Q1 supersession (research synthesis 2026-05-07)
+// proposes a 1/10-rate watchdog mode for Continuous; that is deferred -- v1
+// hard-skips Continuous to keep behavior strictly opt-in additive.
+//
+// Sign convention: ctx.calibratedRotation is in degrees, Euler order Z-Y-X
+// (component 1 is yaw about Y). The applied step is
+// -SignedYawDelta(currentWorld, lockedWorld), i.e., "subtract drift to
+// compensate." If the live test shows the wrong sign, flip here -- the toggle
+// is OFF by default so a wrong-sign build cannot regress users.
+static void TickRestLockedYaw(double now) {
+	if (!CalCtx.restLockedYawEnabled) {
+		// Toggle OFF: clear state so a future toggle-on starts fresh.
+		if (!g_restStates.empty()) g_restStates.clear();
+		g_restLockedYawLastTickTime = -1.0;
+		return;
+	}
+
+	// Skip during Continuous and during active one-shot sub-states. Allowed
+	// states: None, Editing, ContinuousStandby, post-completion idle.
+	if (CalCtx.state == CalibrationState::Continuous
+	 || CalCtx.state == CalibrationState::Begin
+	 || CalCtx.state == CalibrationState::Rotation
+	 || CalCtx.state == CalibrationState::Translation) {
+		if (!g_restStates.empty()) g_restStates.clear();
+		g_restLockedYawLastTickTime = -1.0;
+		return;
+	}
+
+	// Need a valid calibration to nudge.
+	if (!CalCtx.validProfile) return;
+
+	// Compute dt. First tick after enable produces dt = 0; we still update
+	// phase state so the next tick has a reference, but skip the apply.
+	double dt = 0.0;
+	if (g_restLockedYawLastTickTime > 0.0) {
+		dt = now - g_restLockedYawLastTickTime;
+	}
+	g_restLockedYawLastTickTime = now;
+
+	// Walk all valid devices. v1 considers the primary target only; multi-
+	// tracker fusion (rec I) is a follow-up.
+	const int32_t targetID = CalCtx.targetID;
+	if (targetID < 0 || targetID >= (int32_t)vr::k_unMaxTrackedDeviceCount) return;
+
+	const auto& tp = CalCtx.devicePoses[targetID];
+	if (!tp.poseIsValid || !tp.deviceIsConnected
+	 || tp.result != vr::ETrackingResult::TrackingResult_Running_OK) {
+		// Lost validity: drop state for this tracker.
+		auto it = g_restStates.find((uint32_t)targetID);
+		if (it != g_restStates.end()) g_restStates.erase(it);
+		return;
+	}
+
+	const Eigen::Quaterniond worldRot = WorldRotationFromPose(tp);
+
+	auto& rest = g_restStates[(uint32_t)targetID];
+	rest = spacecal::rest_yaw::UpdatePhase(rest, worldRot, now);
+
+	if (rest.phase != spacecal::rest_yaw::RestPhase::AtRest || !rest.haveLock) {
+		return;
+	}
+
+	// At-rest with a valid lock. Yaw drift = SignedYawDelta(locked -> current).
+	const double yawErrRad = spacecal::rest_yaw::SignedYawDeltaRad(rest.lockedRot, worldRot);
+
+	// Per-class cap. v1 reads the target tracking system name once per session
+	// classification check is cheap enough to redo on every tick; cache later
+	// if a profile shows it.
+	const auto cls = ClassifyTrackingSystem(CalCtx.targetTrackingSystem);
+	spacecal::rest_yaw::RateCaps caps;
+	const double capDegPerSec = spacecal::rest_yaw::CapForClass(cls, caps);
+
+	if (dt <= 0.0) return;
+	const double stepRad = spacecal::rest_yaw::ApplyBoundedYawStep(-yawErrRad, dt, capDegPerSec);
+	const double stepDeg = stepRad * (180.0 / EIGEN_PI);
+
+	CalCtx.calibratedRotation(1) += stepDeg;
+
+	// 1 Hz throttled telemetry. step_deg = bounded; err_deg = unbounded
+	// (so the log shows whether the cap is doing work). locked_trackers = 1
+	// in v1; will be >1 when rec I lands.
+	if ((now - g_restLockedYawLastLogTime) >= 1.0) {
+		g_restLockedYawLastLogTime = now;
+		char buf[160];
+		snprintf(buf, sizeof buf,
+			"rest_locked_yaw_tick: step_deg=%.5f err_deg=%.5f locked_trackers=1 cls=%d cap_deg_per_sec=%.4f",
+			stepDeg, yawErrRad * 180.0 / EIGEN_PI, (int)cls, capDegPerSec);
+		Metrics::WriteLogAnnotation(buf);
 	}
 }
 
@@ -2296,6 +2441,13 @@ void CalibrationTick(double time)
 	// detector compares against THIS tick's poses; the universe-shift
 	// detector cares about pose changes between consecutive ticks).
 	TickHmdRelocalizationDetector(time);
+
+	// Rest-locked yaw drift correction (rec A). Opt-in via Experimental tab,
+	// default OFF. Skips Continuous mode (continuous-cal already handles drift)
+	// and active one-shot sub-states. When at-rest signal is available, applies
+	// a bounded-rate yaw nudge to ctx.calibratedRotation(1); the existing
+	// publish path picks up the change via SendFallbackIfChanged.
+	TickRestLockedYaw(time);
 
 	if (ctx.state == CalibrationState::Continuous || ctx.state == CalibrationState::ContinuousStandby) {
 		ctx.ClearLogOnMessage();

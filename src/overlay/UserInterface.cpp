@@ -1030,6 +1030,18 @@ void CCal_DrawSettings() {
 					"that tick. Off by default; the EMA is the validated default.");
 			}
 
+			// Rest-locked yaw drift correction.
+			ImGui::Checkbox("Rest-locked yaw drift correction", &CalCtx.restLockedYawEnabled);
+			if (ImGui::IsItemHovered(0)) {
+				ImGui::SetTooltip("When a tracker stays still for 1 s, lock its orientation as an absolute\n"
+					"reference. On every subsequent at-rest tick, compare predicted vs locked yaw\n"
+					"and apply a bounded-rate correction to the active calibration (per-class cap,\n"
+					"global ceiling 0.5 deg/s). Activates only outside Continuous mode; continuous-cal\n"
+					"already handles drift in its own loop. Off by default; flips on after a real\n"
+					"session test passes the four-tier success criterion (p90 error_currentCal,\n"
+					"recovery-fire frequency, time-to-first-failure, subjective Likert).");
+			}
+
 			// Toggle-flip diagnostic. Compare each flag to its previous value
 			// and emit a one-shot annotation on change. Statics are initialized
 			// to the loaded-profile values on first frame so we do not log a
@@ -1040,12 +1052,14 @@ void CCal_DrawSettings() {
 			static bool s_prevVelAware   = CalCtx.useVelocityAwareWeighting;
 			static bool s_prevTukey      = CalCtx.useTukeyBiweight;
 			static bool s_prevKalman     = CalCtx.useBlendFilter;
+			static bool s_prevRestYaw    = CalCtx.restLockedYawEnabled;
 			logToggleFlip("latency_auto_detect",       s_prevAutoDetect, CalCtx.latencyAutoDetect);
 			logToggleFlip("latency_use_gcc_phat",      s_prevGccPhat,    CalCtx.useGccPhatLatency);
 			logToggleFlip("geometry_shift_use_cusum",  s_prevCusum,      CalCtx.useCusumGeometryShift);
 			logToggleFlip("irls_velocity_aware",       s_prevVelAware,   CalCtx.useVelocityAwareWeighting);
 			logToggleFlip("irls_use_tukey",            s_prevTukey,      CalCtx.useTukeyBiweight);
 			logToggleFlip("blend_use_kalman",          s_prevKalman,     CalCtx.useBlendFilter);
+			logToggleFlip("rest_locked_yaw",           s_prevRestYaw,    CalCtx.restLockedYawEnabled);
 
 			ImGui::EndGroupPanel();
 		}

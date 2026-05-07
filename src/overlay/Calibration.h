@@ -247,6 +247,17 @@ struct CalibrationContext
 	// fallback. Persisted as blend_use_kalman in profile JSON.
 	bool useBlendFilter = false;
 
+	// Opt-in switch for the rest-locked yaw drift correction. Per-tracker
+	// rest detector locks the orientation 1 s of dwell; subsequent at-rest
+	// ticks compare current vs locked rotation and apply a bounded-rate
+	// yaw nudge (per-class cap, global ceiling) to the active SE(3).
+	// Activates only outside Continuous mode (continuous-cal already
+	// handles drift in its own loop). Default OFF; flips to ON only after
+	// a real-session test against the four-tier success criterion. The
+	// math lives in src/overlay/RestLockedYaw.h. Persisted as
+	// rest_locked_yaw in profile JSON.
+	bool restLockedYawEnabled = false;
+
 	// Rolling window of per-solve residual pitch+roll readings (degrees), used
 	// by spacecal::gravity::EvaluateTilt to flag sustained gravity-axis
 	// disagreement between the reference and target tracking systems. Pushed

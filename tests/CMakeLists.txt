@@ -37,6 +37,7 @@ add_executable(spacecal_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/test_tilt_diagnostic.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_robust_scale.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_blend_filter.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_rest_locked_yaw.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/stubs.cpp
     ${CMAKE_SOURCE_DIR}/src/overlay/CalibrationCalc.cpp
     ${CMAKE_SOURCE_DIR}/src/overlay/Configuration.cpp
