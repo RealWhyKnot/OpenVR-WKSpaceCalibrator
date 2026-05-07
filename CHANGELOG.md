@@ -11,6 +11,12 @@ The most recent release is at the top.
 
 ## Unreleased
 
+_No notable changes since the last release._
+
+---
+
+## [v2026.5.7.0](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/releases/tag/v2026.5.7.0) -- 2026-05-07
+
 ### Added
 - **overlay:** Drift-subsystem debug instrumentation (f43bc32)
 - **overlay:** Chi-square re-anchor sub-detector (rec F) (b2cb00e)
