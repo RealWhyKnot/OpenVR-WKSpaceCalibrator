@@ -620,34 +620,13 @@ Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rot
 		// Same [0,1] semantic as the prior proxy: 1.0 = perfectly
 		// conditioned, 0.0 = singular. Existing 0.05 hard-gate at the
 		// caller continues to work without re-tuning.
-		if (iter == kMaxIters - 1) {
-			Eigen::Matrix3d normal = m_coefficientsTrans.transpose() * m_coefficientsTrans;
-			Eigen::JacobiSVD<Eigen::Matrix3d> svd(normal);
-			const auto& sv = svd.singularValues();
-			m_translationConditionRatio = (sv(0) > 0.0) ? std::sqrt(sv(2) / sv(0)) : 0.0;
-
-			// Diagnostic: log the condition ratio + sample count so we can
-			// observe how often the gate is near-singular (ratio below the
-			// 0.05 threshold) on real data. Throttled to once per 2 s so a
-			// per-tick solver doesn't flood the log. The 2026-05-04 audit-
-			// fix-cleanup work added this so we have evidence to back-check
-			// whether the SVD-on-normal-matrix gate is producing different
-			// pass/fail decisions than the prior QR-R-diagonal proxy would
-			// have on the user's actual data.
-			static auto s_lastCondLog = std::chrono::steady_clock::time_point{};
-			auto nowTp = std::chrono::steady_clock::now();
-			if (nowTp - s_lastCondLog >= std::chrono::seconds(2)) {
-				s_lastCondLog = nowTp;
-				const double kGateThreshold = 0.05;
-				const bool pass = m_translationConditionRatio >= kGateThreshold;
-				char condbuf[224];
-				snprintf(condbuf, sizeof condbuf,
-					"cal_translation_cond: svd_ratio=%.6f threshold=%.6f pass=%d sample_count=%lld sv=(%.6e, %.6e, %.6e)",
-					m_translationConditionRatio, kGateThreshold, (int)pass,
-					(long long)deltas.size(), sv(0), sv(1), sv(2));
-				Metrics::WriteLogAnnotation(condbuf);
-			}
-		}
+		//
+		// Conditioning ratio compute moved out of the per-iter branch (rec G,
+		// 2026-05-07): it was previously gated on iter == kMaxIters - 1, which
+		// the convergence check at line 744 routinely short-circuits past.
+		// The result was a stale (often zero) ratio reaching the caller's
+		// hard-gate. Compute below the loop instead so every solve emits a
+		// fresh ratio.
 
 		// Compute per-pair residuals (we collapse the per-axis residuals into a
 		// single magnitude per delta-row triple via the L2 norm — this gives
@@ -742,6 +721,40 @@ Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rot
 		}
 		prevWeights = m_weightsTrans;
 		if (iter > 0 && maxDelta < kWeightChangeThreshold) break;
+	}
+
+	// Conditioning ratio computed once after IRLS terminates (rec G, 2026-05-07).
+	// Uses the final weighted system that produced `trans`. JacobiSVD on the
+	// 3x3 normal matrix m_coefficientsTrans^T * m_coefficientsTrans gives
+	// exact singular values; the [0,1] ratio sqrt(sv(2)/sv(0)) is the same
+	// semantic the prior block emitted. Computing here (not gated on
+	// iter == kMaxIters - 1) makes the ratio reliable when IRLS converges
+	// early -- the previous gate left the value stale, often at 0.0, which
+	// the rec G hard-reject in ComputeOneshot mistook for "zero-rank
+	// covariance" on legitimate fits.
+	{
+		Eigen::Matrix3d normal = m_coefficientsTrans.transpose() * m_coefficientsTrans;
+		Eigen::JacobiSVD<Eigen::Matrix3d> svd(normal);
+		const auto& sv = svd.singularValues();
+		m_translationConditionRatio = (sv(0) > 0.0) ? std::sqrt(sv(2) / sv(0)) : 0.0;
+
+		// Diagnostic: log the condition ratio + sample count so we can observe
+		// how often the gate is near-singular (ratio below the 0.05 threshold)
+		// on real data. Throttled to once per 2 s so a per-tick solver does
+		// not flood the log.
+		static auto s_lastCondLog = std::chrono::steady_clock::time_point{};
+		auto nowTp = std::chrono::steady_clock::now();
+		if (nowTp - s_lastCondLog >= std::chrono::seconds(2)) {
+			s_lastCondLog = nowTp;
+			const double kGateThreshold = 0.05;
+			const bool pass = m_translationConditionRatio >= kGateThreshold;
+			char condbuf[224];
+			snprintf(condbuf, sizeof condbuf,
+				"cal_translation_cond: svd_ratio=%.6f threshold=%.6f pass=%d sample_count=%lld sv=(%.6e, %.6e, %.6e)",
+				m_translationConditionRatio, kGateThreshold, (int)pass,
+				(long long)deltas.size(), sv(0), sv(1), sv(2));
+			Metrics::WriteLogAnnotation(condbuf);
+		}
 	}
 
 	auto transcm = trans * 100.0;
@@ -1230,6 +1243,24 @@ bool CalibrationCalc::ComputeOneshot(const bool ignoreOutliers) {
 	// "low quality" shrug. (Item #5 from the math review.)
 	double newVariance = ComputeAxisVariance(calibration)(1);
 	const double RotationConditionMin = 0.05;
+
+	// Rec G: Fisher-rank observability gate. The deleted Phase 1+2 silent-
+	// recal (2026-04-29 main 9fab09d) accepted candidates from stationary
+	// buffers because RMS was tautologically small. The actual degenerate
+	// case is m_rotationConditionRatio == 0.0 (zero-rank cross-covariance,
+	// from CalibrateRotation's empty-deltas early return -- no pair of
+	// samples with > 23 deg of rotation between them). Hard-reject in that
+	// case even when ValidateCalibration's RMS gate would pass. The
+	// existing 0.05 threshold below stays as a rejection-reason label
+	// rather than a hard gate so legitimate-but-marginal motion does not
+	// regress; the hard reject only fires on the truly unobservable
+	// stationary case (Nobre & Heckman 2017/2018 FastCal).
+	if (valid && m_rotationConditionRatio == 0.0) {
+		valid = false;
+	}
+	if (valid && m_translationConditionRatio == 0.0) {
+		valid = false;
+	}
 
 	if (valid) {
 		m_estimatedTransformation = calibration; // @NOTE: Normal calibration

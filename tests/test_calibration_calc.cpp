@@ -228,15 +228,20 @@ TEST(CalibrationCalcTest, DegenerateMotionDoesNotRecoverYaw) {
         calc.PushSample(s);
     }
 
-    // ComputeOneshot may or may not pass ValidateCalibration depending on
-    // numerical noise; what we really care about is that it does NOT recover
-    // 15 deg of yaw, because the sample set has zero information about the
-    // true cross-axis orientation.
-    (void)calc.ComputeOneshot(/*ignoreOutliers=*/false);
+    // Rec G: single-axis motion has zero rotational excitation outside the
+    // yaw plane; the Fisher-rank gate added inside ComputeOneshot must
+    // reject the candidate even if its RMS happens to fall under the
+    // dynamic threshold. Returning false closes the gap that allowed the
+    // deleted Phase 1+2 silent-recal failure mode.
+    const bool accepted = calc.ComputeOneshot(/*ignoreOutliers=*/false);
     auto recovered = calc.Transformation();
 
     SCOPED_TRACE("rotationConditionRatio = " +
                  std::to_string(calc.m_rotationConditionRatio));
+
+    EXPECT_FALSE(accepted)
+        << "Fisher-rank gate must reject a single-axis sample stream "
+           "regardless of RMS";
 
     // Recovered yaw must be far enough from 15 deg that it could not have
     // been a successful recovery. We allow a 5 deg slack to keep the test
@@ -251,6 +256,31 @@ TEST(CalibrationCalcTest, DegenerateMotionDoesNotRecoverYaw) {
     // `m_rotationConditionRatio > 0.0` precondition gate further checks.
     EXPECT_DOUBLE_EQ(calc.m_rotationConditionRatio, 0.0)
         << "Pure single-axis motion should yield a zero-rank covariance";
+}
+
+// ---------------------------------------------------------------------------
+// Rec G regression guard. The Fisher-rank gate inside ComputeOneshot must
+// reject any candidate whose rotational-excitation conditioning falls below
+// 0.05, even when the RMS gate would have passed. Mirrors the gate that has
+// always been active in ComputeIncremental (line ~1392 of CalibrationCalc.cpp);
+// closes the structural gap that allowed the deleted Phase 1+2 silent-recal
+// failure mode (Nobre & Heckman 2017/2018 FastCal: an RMS-based gate is
+// necessarily unreliable when the buffer is stationary).
+//
+// Note: this test does NOT replace DegenerateMotionDoesNotRecoverYaw above.
+// That test pins the math output (recovered yaw is meaningless on single-axis
+// data); this one pins the accept/reject return value of the gate itself.
+// ---------------------------------------------------------------------------
+TEST(CalibrationCalcTest, RecG_FisherRankGateRejectsSingleAxisOneshot) {
+    const double yawRad = 30.0 * EIGEN_PI / 180.0;
+    Eigen::AffineCompact3d expected = MakeTransform(yawRad, 0, 0, Eigen::Vector3d::Zero());
+
+    CalibrationCalc calc;
+    for (auto& s : MakeYOnlySamples(expected, kSampleCount)) {
+        calc.PushSample(s);
+    }
+
+    EXPECT_FALSE(calc.ComputeOneshot(/*ignoreOutliers=*/false));
 }
 
 // ---------------------------------------------------------------------------
