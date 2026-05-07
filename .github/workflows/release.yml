@@ -237,7 +237,7 @@ jobs:
           [void]$sb.AppendLine('Two download options:')
           [void]$sb.AppendLine('')
           [void]$sb.AppendLine("- **$instName** -- guided installer. Run it; it places the overlay and the SteamVR driver in the right places automatically.")
-          [void]$sb.AppendLine("- **$zipName** -- drop-in zip. Extract anywhere, copy the ``driver_01spacecalibrator/`` folder into ``<Steam>\steamapps\common\SteamVR\drivers\``, and run ``SpaceCalibrator.exe`` from wherever you put it.")
+          [void]$sb.AppendLine("- **$zipName** -- drop-in zip. Extract anywhere, copy the ``01openvrpair/`` folder into ``<Steam>\steamapps\common\SteamVR\drivers\``, and run ``SpaceCalibrator.exe`` from wherever you put it.")
           [void]$sb.AppendLine('')
           [void]$sb.AppendLine('| File | Size | SHA256 |')
           [void]$sb.AppendLine('|---|---|---|')
@@ -325,10 +325,10 @@ jobs:
               $lastActual = $actual
               $actualSha = Get-StringSha256 -Text $actual
               if ($actualSha -eq $expectedSha) {
-                Write-Host "Attempt $attempt/$MaxAttempts: body matches (len=$($actual.Length) sha256=$($actualSha.Substring(0,12)))."
+                Write-Host "Attempt ${attempt}/${MaxAttempts}: body matches (len=$($actual.Length) sha256=$($actualSha.Substring(0,12)))."
                 return @{ Match = $true; Actual = $actual; AttemptCount = $attempt }
               }
-              Write-Host "Attempt $attempt/$MaxAttempts: actual_len=$($actual.Length) expected_len=$($Expected.Length) actual_sha=$($actualSha.Substring(0,12)) expected_sha=$($expectedSha.Substring(0,12))"
+              Write-Host "Attempt ${attempt}/${MaxAttempts}: actual_len=$($actual.Length) expected_len=$($Expected.Length) actual_sha=$($actualSha.Substring(0,12)) expected_sha=$($expectedSha.Substring(0,12))"
               if ($attempt -lt $MaxAttempts) {
                 Write-Host "Sleeping ${delay}s before retry..."
                 Start-Sleep -Seconds $delay
