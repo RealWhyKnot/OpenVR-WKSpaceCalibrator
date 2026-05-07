@@ -1585,6 +1585,22 @@ static void CCal_DrawLogsPanel() {
 		ImGui::TextDisabled(" (off)");
 	}
 
+	// Drift-subsystem state dump. Captures rec A rest detector, rec C
+	// recovery delta buffer, rec F chi-square detector state to the log
+	// in a single batch of [drift][state-dump] annotations. Useful to
+	// attach to a bug report alongside the rolling annotations.
+	ImGui::SameLine();
+	if (ImGui::Button("Dump drift state")) {
+		DumpDriftSubsystemState();
+	}
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Write a one-shot snapshot of the drift-correction subsystems\n"
+			"(rest-locked yaw rec A, predictive recovery rec C, chi-square rec F)\n"
+			"to the current debug log. Includes per-device rest state, recovery\n"
+			"event ring contents, and chi-square detector counters. Greppable\n"
+			"by [drift][state-dump] for triage.");
+	}
+
 	ImGui::Spacing();
 	ImGui::Separator();
 

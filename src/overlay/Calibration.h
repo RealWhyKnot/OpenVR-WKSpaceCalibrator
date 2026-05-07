@@ -649,6 +649,14 @@ void PushCalibrationApplyTime();
 void ShowCalibrationDebug(int r, int c);
 void DebugApplyRandomOffset();
 
+// Dump drift-subsystem state (rec A rest detector, rec C recovery delta
+// buffer, rec F chi-square detector) to the structured log. Captures a
+// one-time snapshot of every per-device rest state, ring-buffer contents,
+// freeze status, and toggle values so a user attaching a session log to a
+// bug report can include the in-memory state alongside the rolling
+// annotations. Called from the Logs tab's "Dump drift state" button.
+void DumpDriftSubsystemState();
+
 // Accessor for the session-counter of stuck-loop watchdog firings. The
 // underlying CalibrationCalc instance lives in an anonymous namespace inside
 // Calibration.cpp, so we expose this via a free function.

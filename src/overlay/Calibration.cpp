@@ -1858,6 +1858,14 @@ namespace {
 			// shrinking the magnitude of the next observed event if the
 			// drift trend is consistent.
 			spacecal::recovery_delta::Push(g_recoveryDeltaBuffer, dpos, now);
+			{
+				char b[200];
+				snprintf(b, sizeof b,
+					"[drift][recovery-buffer] event_pushed mag_cm=%.2f dpos=(%.3f,%.3f,%.3f) live_count=%zu",
+					hmdDelta * 100.0, dpos.x(), dpos.y(), dpos.z(),
+					spacecal::recovery_delta::LiveCount(g_recoveryDeltaBuffer));
+				Metrics::WriteLogAnnotation(b);
+			}
 
 			char uimsg[128];
 			snprintf(uimsg, sizeof uimsg,
@@ -1974,18 +1982,35 @@ static void TickRestLockedYaw(double now) {
 		if (!tp.poseIsValid || !tp.deviceIsConnected
 		 || tp.result != vr::ETrackingResult::TrackingResult_Running_OK) {
 			auto it = g_restStates.find(id);
-			if (it != g_restStates.end()) g_restStates.erase(it);
+			if (it != g_restStates.end()) {
+				if (it->second.haveLock) {
+					char b[160];
+					snprintf(b, sizeof b,
+						"[drift][rest-detector] device=%u lock_dropped reason=pose_invalid result=%d",
+						id, (int)tp.result);
+					Metrics::WriteLogAnnotation(b);
+				}
+				g_restStates.erase(it);
+			}
 			return;
 		}
 		const Eigen::Quaterniond worldRot = WorldRotationFromPose(tp);
 		auto& rest = g_restStates[id];
-		const bool freshlyLocked = !rest.haveLock;
+		const bool wasLocked = rest.haveLock;
+		const auto priorPhase = rest.phase;
 		rest = spacecal::rest_yaw::UpdatePhase(rest, worldRot, now);
 		if (rest.phase == spacecal::rest_yaw::RestPhase::AtRest && rest.haveLock) {
-			if (freshlyLocked) {
+			if (!wasLocked) {
 				// Stamp the lock time on first transition into AtRest. Used
 				// for the age-weight term in rec I's fusion.
 				rest.phaseEnteredAt = now;
+				char b[200];
+				snprintf(b, sizeof b,
+					"[drift][rest-detector] device=%u lock_acquired phase=AtRest world_yaw_deg=%.4f tracking_system=%s",
+					id, std::atan2(2.0 * (worldRot.w() * worldRot.y() + worldRot.z() * worldRot.x()),
+					                1.0 - 2.0 * (worldRot.x() * worldRot.x() + worldRot.y() * worldRot.y())) * 180.0 / EIGEN_PI,
+					trackingSystem.c_str());
+				Metrics::WriteLogAnnotation(b);
 			}
 			const double yawErrRad = spacecal::rest_yaw::SignedYawDeltaRad(rest.lockedRot, worldRot);
 			const auto cls = ClassifyTrackingSystem(trackingSystem);
@@ -2003,6 +2028,16 @@ static void TickRestLockedYaw(double now) {
 			               * spacecal::rest_yaw::QualityWeight(0.0);
 			contributions.push_back(contrib);
 			seenIds.push_back(id);
+		} else if (wasLocked && rest.phase != spacecal::rest_yaw::RestPhase::AtRest) {
+			// Phase exited AtRest. Log the transition so a session log can
+			// reconstruct the lock lifecycle without grepping for tick lines.
+			const char* reason = (priorPhase == spacecal::rest_yaw::RestPhase::AtRest)
+				? "motion_detected" : "phase_reset";
+			char b[160];
+			snprintf(b, sizeof b,
+				"[drift][rest-detector] device=%u lock_released reason=%s phase=%d",
+				id, reason, (int)rest.phase);
+			Metrics::WriteLogAnnotation(b);
 		}
 	};
 
@@ -2057,7 +2092,7 @@ static void TickRestLockedYaw(double now) {
 		g_restLockedYawLastLogTime = now;
 		char buf[200];
 		snprintf(buf, sizeof buf,
-			"rest_locked_yaw_tick: step_deg=%.5f err_deg=%.5f locked_trackers=%zu cap_deg_per_sec=%.4f",
+			"[drift][rest-yaw] tick step_deg=%.5f err_deg=%.5f locked_trackers=%zu cap_deg_per_sec=%.4f",
 			stepDeg, meanErrRad * 180.0 / EIGEN_PI, contributions.size(), capDegPerSec);
 		Metrics::WriteLogAnnotation(buf);
 	}
@@ -2105,7 +2140,7 @@ static bool TickReanchorChiSquare(double now) {
 		g_reanchorChiLastLogTime = now;
 		char buf[200];
 		snprintf(buf, sizeof buf,
-			"reanchor_chi_square_fire: chi_sq=%.3f threshold=%.3f freeze_until=%.3f",
+			"[drift][reanchor-chi-square] fire chi_sq=%.3f threshold=%.3f freeze_until=%.3f",
 			g_reanchorChiState.lastChiSquared,
 			spacecal::reanchor_chi::kChiSquare6DoF_p1e4,
 			g_reanchorChiState.freezeUntil);
@@ -2171,9 +2206,87 @@ static void TickPredictiveRecovery(double now) {
 		const size_t live = spacecal::recovery_delta::LiveCount(g_recoveryDeltaBuffer);
 		char buf[200];
 		snprintf(buf, sizeof buf,
-			"predictive_recovery_apply: step_m=(%.6f,%.6f,%.6f) step_norm_mm=%.4f buffer_live=%zu",
+			"[drift][predictive-recovery] apply step_m=(%.6f,%.6f,%.6f) step_norm_mm=%.4f buffer_live=%zu",
 			step.x(), step.y(), step.z(), step.norm() * 1000.0, live);
 		Metrics::WriteLogAnnotation(buf);
+	}
+}
+
+void DumpDriftSubsystemState() {
+	const double now = glfwGetTime();
+
+	{
+		char b[280];
+		snprintf(b, sizeof b,
+			"[drift][state-dump] header now=%.3f state=%d "
+			"rest_locked_yaw=%d predictive_recovery=%d reanchor_chi_square=%d",
+			now, (int)CalCtx.state,
+			(int)CalCtx.restLockedYawEnabled,
+			(int)CalCtx.predictiveRecoveryEnabled,
+			(int)CalCtx.reanchorChiSquareEnabled);
+		Metrics::WriteLogAnnotation(b);
+	}
+
+	// Rest detector: one line per tracker.
+	{
+		char b[200];
+		snprintf(b, sizeof b,
+			"[drift][state-dump] rest_detector tracker_count=%zu last_tick=%.3f",
+			g_restStates.size(), g_restLockedYawLastTickTime);
+		Metrics::WriteLogAnnotation(b);
+	}
+	for (const auto& kv : g_restStates) {
+		const auto& s = kv.second;
+		char b[280];
+		snprintf(b, sizeof b,
+			"[drift][state-dump] rest_detector device=%u phase=%d have_lock=%d phase_entered_at=%.3f locked_yaw_deg=%.4f",
+			kv.first,
+			(int)s.phase,
+			(int)s.haveLock,
+			s.phaseEnteredAt,
+			std::atan2(2.0 * (s.lockedRot.w() * s.lockedRot.y() + s.lockedRot.z() * s.lockedRot.x()),
+			            1.0 - 2.0 * (s.lockedRot.x() * s.lockedRot.x() + s.lockedRot.y() * s.lockedRot.y())) * 180.0 / EIGEN_PI);
+		Metrics::WriteLogAnnotation(b);
+	}
+
+	// Recovery delta buffer: header + per-event lines.
+	{
+		char b[200];
+		snprintf(b, sizeof b,
+			"[drift][state-dump] recovery_buffer total_count=%zu live_count=%zu last_apply_tick=%.3f",
+			g_recoveryDeltaBuffer.count,
+			spacecal::recovery_delta::LiveCount(g_recoveryDeltaBuffer),
+			g_predictiveRecoveryLastTickTime);
+		Metrics::WriteLogAnnotation(b);
+	}
+	const size_t live = spacecal::recovery_delta::LiveCount(g_recoveryDeltaBuffer);
+	for (size_t i = 0; i < live; ++i) {
+		const auto& ev = g_recoveryDeltaBuffer.events[i];
+		char b[260];
+		snprintf(b, sizeof b,
+			"[drift][state-dump] recovery_event idx=%zu timestamp=%.3f mag_cm=%.2f dir=(%.4f,%.4f,%.4f)",
+			i, ev.timestamp, ev.magnitude * 100.0,
+			ev.direction.x(), ev.direction.y(), ev.direction.z());
+		Metrics::WriteLogAnnotation(b);
+	}
+
+	// Chi-square detector summary.
+	{
+		char b[280];
+		snprintf(b, sizeof b,
+			"[drift][state-dump] reanchor_chi history_count=%zu variance_count=%d last_chi_sq=%.3f freeze_until=%.3f frozen_now=%d",
+			g_reanchorChiState.historyCount,
+			g_reanchorChiState.varianceCount,
+			g_reanchorChiState.lastChiSquared,
+			g_reanchorChiState.freezeUntil,
+			(int)spacecal::reanchor_chi::IsFrozen(g_reanchorChiState, now));
+		Metrics::WriteLogAnnotation(b);
+	}
+
+	{
+		char b[120];
+		snprintf(b, sizeof b, "[drift][state-dump] footer end_now=%.3f", now);
+		Metrics::WriteLogAnnotation(b);
 	}
 }
 
