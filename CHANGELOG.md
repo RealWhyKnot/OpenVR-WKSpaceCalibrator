@@ -29,6 +29,7 @@ The most recent release is at the top.
 - **ui:** Gate Experimental toggles by calibration mode (4256d8d)
 - **overlay:** Fisher-rank gate inside ComputeOneshot (rec G) (b81006b)
 - **ci:** Release.yml workflow parse error from literal expression in comment (58c21e3)
+- **install:** Rename driver DLL to match SteamVR loader convention (03ac4c1)
 
 ---
 
