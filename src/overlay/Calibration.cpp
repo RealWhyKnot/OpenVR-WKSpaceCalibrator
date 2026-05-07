@@ -16,6 +16,8 @@
                              // (continuous-cal-OFF mode). Default OFF; opt-in via Experimental tab.
 #include "RecoveryDeltaBuffer.h" // spacecal::recovery_delta::* — predictive pre-correction
                              // from the rolling buffer of 30 cm relocalization events.
+#include "ReanchorChiSquareDetector.h" // spacecal::reanchor_chi::* — sub-30 cm re-anchor
+                             // sub-detector. Detection-only; freezes recs A/C on candidate.
 
 #include <string>
 #include <vector>
@@ -1416,6 +1418,14 @@ namespace {
 	double g_predictiveRecoveryLastTickTime = -1.0;
 	double g_predictiveRecoveryLastLogTime  = -1e9;
 
+	// Chi-square re-anchor sub-detector (rec F). Tracks rolling HMD pose
+	// history, predicts via velocity, computes Mahalanobis distance against
+	// online residual variance. When fired, freezes recs A and C for 500 ms
+	// so the existing 30 cm detector has a clean window to confirm.
+	spacecal::reanchor_chi::DetectorState g_reanchorChiState;
+	double g_reanchorChiLastTickTime = -1.0;
+	double g_reanchorChiLastLogTime  = -1e9;
+
 	constexpr double kRelocHmdJumpM       = 0.05;   // 5 cm
 	constexpr double kRelocBodyMaxDeltaM  = 0.05;   // 5 cm (any body tracker moving more = rule out)
 	constexpr double kRelocBaseStableM    = 0.001;  // 1 mm
@@ -2053,6 +2063,57 @@ static void TickRestLockedYaw(double now) {
 	}
 }
 
+// Chi-square re-anchor sub-detector tick. Detection-only: fires the freeze
+// window for recs A and C so they suspend for 500 ms after a candidate. The
+// existing 30 cm relocalization detector remains the only path to actual
+// recovery. Returns true if rec A and rec C should skip their tick.
+static bool TickReanchorChiSquare(double now) {
+	if (!CalCtx.reanchorChiSquareEnabled) {
+		spacecal::reanchor_chi::Reset(g_reanchorChiState);
+		g_reanchorChiLastTickTime = -1.0;
+		return false;
+	}
+
+	double dt = 0.0;
+	if (g_reanchorChiLastTickTime > 0.0) {
+		dt = now - g_reanchorChiLastTickTime;
+	}
+	g_reanchorChiLastTickTime = now;
+
+	const auto& hmdRaw = CalCtx.devicePoses[vr::k_unTrackedDeviceIndex_Hmd];
+	const bool hmdValid = hmdRaw.poseIsValid && hmdRaw.deviceIsConnected
+		&& hmdRaw.result == vr::ETrackingResult::TrackingResult_Running_OK;
+	if (!hmdValid) return false;
+
+	const Eigen::Quaterniond worldFromDriver(
+		hmdRaw.qWorldFromDriverRotation.w,
+		hmdRaw.qWorldFromDriverRotation.x,
+		hmdRaw.qWorldFromDriverRotation.y,
+		hmdRaw.qWorldFromDriverRotation.z);
+	const Eigen::Vector3d worldFromDriverT(
+		hmdRaw.vecWorldFromDriverTranslation[0],
+		hmdRaw.vecWorldFromDriverTranslation[1],
+		hmdRaw.vecWorldFromDriverTranslation[2]);
+	const Eigen::Quaterniond rot(hmdRaw.qRotation.w, hmdRaw.qRotation.x, hmdRaw.qRotation.y, hmdRaw.qRotation.z);
+	const Eigen::Vector3d pos(hmdRaw.vecPosition[0], hmdRaw.vecPosition[1], hmdRaw.vecPosition[2]);
+	const Eigen::Vector3d worldT = worldFromDriverT + worldFromDriver * pos;
+	const Eigen::Quaterniond worldR = (worldFromDriver * rot).normalized();
+
+	const bool fired = spacecal::reanchor_chi::TickAndCheckCandidate(
+		g_reanchorChiState, worldT, worldR, now, dt);
+	if (fired && (now - g_reanchorChiLastLogTime) >= 1.0) {
+		g_reanchorChiLastLogTime = now;
+		char buf[200];
+		snprintf(buf, sizeof buf,
+			"reanchor_chi_square_fire: chi_sq=%.3f threshold=%.3f freeze_until=%.3f",
+			g_reanchorChiState.lastChiSquared,
+			spacecal::reanchor_chi::kChiSquare6DoF_p1e4,
+			g_reanchorChiState.freezeUntil);
+		Metrics::WriteLogAnnotation(buf);
+	}
+	return spacecal::reanchor_chi::IsFrozen(g_reanchorChiState, now);
+}
+
 // Predictive recovery pre-correction tick. Runs after TickRestLockedYaw when
 // CalCtx.predictiveRecoveryEnabled is true. Reads the rolling buffer of
 // recovery events from g_recoveryDeltaBuffer; if the gate (>= 3 events,
@@ -2578,17 +2639,26 @@ void CalibrationTick(double time)
 	// detector cares about pose changes between consecutive ticks).
 	TickHmdRelocalizationDetector(time);
 
+	// Chi-square re-anchor sub-detector (rec F). When fired, returns true so
+	// recs A and C skip their tick for the freeze window. Detection-only:
+	// the 30 cm detector above is still the only path to actual recovery.
+	const bool restAndRecCFrozen = TickReanchorChiSquare(time);
+
 	// Rest-locked yaw drift correction (rec A). Opt-in via Experimental tab,
 	// default OFF. Skips Continuous mode (continuous-cal already handles drift)
 	// and active one-shot sub-states. When at-rest signal is available, applies
 	// a bounded-rate yaw nudge to ctx.calibratedRotation(1); the existing
 	// publish path picks up the change via SendFallbackIfChanged.
-	TickRestLockedYaw(time);
+	if (!restAndRecCFrozen) {
+		TickRestLockedYaw(time);
+	}
 
 	// Predictive recovery pre-correction (rec C). Opt-in via Experimental tab,
 	// default OFF. Reads the rolling buffer of 30 cm relocalization events and
 	// applies a bounded-rate translation nudge if the gate passes.
-	TickPredictiveRecovery(time);
+	if (!restAndRecCFrozen) {
+		TickPredictiveRecovery(time);
+	}
 
 	if (ctx.state == CalibrationState::Continuous || ctx.state == CalibrationState::ContinuousStandby) {
 		ctx.ClearLogOnMessage();

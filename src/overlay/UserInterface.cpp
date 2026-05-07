@@ -1053,6 +1053,16 @@ void CCal_DrawSettings() {
 					"failure mode. Off by default.");
 			}
 
+			// Chi-square re-anchor sub-detector.
+			ImGui::Checkbox("Chi-square re-anchor sub-detector", &CalCtx.reanchorChiSquareEnabled);
+			if (ImGui::IsItemHovered(0)) {
+				ImGui::SetTooltip("Mahalanobis distance between HMD-pose-from-rolling-velocity and observed\n"
+					"HMD pose. Threshold at chi-square 6 DoF p<1e-4 (about 27.86). When fired,\n"
+					"freezes rec A and rec C corrections for 500 ms so the existing 30 cm detector\n"
+					"can confirm without our nudges contaminating the signal. Detection-only:\n"
+					"never triggers recovery itself. Off by default.");
+			}
+
 			// Toggle-flip diagnostic. Compare each flag to its previous value
 			// and emit a one-shot annotation on change. Statics are initialized
 			// to the loaded-profile values on first frame so we do not log a
@@ -1065,6 +1075,7 @@ void CCal_DrawSettings() {
 			static bool s_prevKalman     = CalCtx.useBlendFilter;
 			static bool s_prevRestYaw    = CalCtx.restLockedYawEnabled;
 			static bool s_prevPredRecov  = CalCtx.predictiveRecoveryEnabled;
+			static bool s_prevChiSq      = CalCtx.reanchorChiSquareEnabled;
 			logToggleFlip("latency_auto_detect",       s_prevAutoDetect, CalCtx.latencyAutoDetect);
 			logToggleFlip("latency_use_gcc_phat",      s_prevGccPhat,    CalCtx.useGccPhatLatency);
 			logToggleFlip("geometry_shift_use_cusum",  s_prevCusum,      CalCtx.useCusumGeometryShift);
@@ -1073,6 +1084,7 @@ void CCal_DrawSettings() {
 			logToggleFlip("blend_use_kalman",          s_prevKalman,     CalCtx.useBlendFilter);
 			logToggleFlip("rest_locked_yaw",           s_prevRestYaw,    CalCtx.restLockedYawEnabled);
 			logToggleFlip("predictive_recovery",       s_prevPredRecov,  CalCtx.predictiveRecoveryEnabled);
+			logToggleFlip("reanchor_chi_square",       s_prevChiSq,      CalCtx.reanchorChiSquareEnabled);
 
 			ImGui::EndGroupPanel();
 		}

@@ -270,6 +270,16 @@ struct CalibrationContext
 	// in profile JSON.
 	bool predictiveRecoveryEnabled = false;
 
+	// Opt-in switch for the chi-square re-anchor sub-detector (rec F).
+	// Runs a 1-D chi-square test on the residual between HMD-pose-from-
+	// rolling-velocity and observed HMD pose. When the Mahalanobis
+	// distance exceeds the 6-DoF p<1e-4 threshold, raises a candidate
+	// flag and freezes recs A/C corrections for 500 ms so the existing
+	// 30 cm detector has a clean window to confirm. Math is in
+	// src/overlay/ReanchorChiSquareDetector.h. Persisted as
+	// reanchor_chi_square in profile JSON.
+	bool reanchorChiSquareEnabled = false;
+
 	// Rolling window of per-solve residual pitch+roll readings (degrees), used
 	// by spacecal::gravity::EvaluateTilt to flag sustained gravity-axis
 	// disagreement between the reference and target tracking systems. Pushed
