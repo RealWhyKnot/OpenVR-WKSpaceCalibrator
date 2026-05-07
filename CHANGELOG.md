@@ -28,6 +28,7 @@ The most recent release is at the top.
 - **deploy:** Invoke submodule build in-process to dodge PS 5.1 NativeCommandError (2026.5.6.5-B8CD) (c9afdf6)
 - **ui:** Gate Experimental toggles by calibration mode (4256d8d)
 - **overlay:** Fisher-rank gate inside ComputeOneshot (rec G) (b81006b)
+- **ci:** Release.yml workflow parse error from literal expression in comment (58c21e3)
 
 ---
 
