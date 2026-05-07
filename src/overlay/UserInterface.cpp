@@ -929,11 +929,25 @@ void CCal_DrawSettings() {
 			AddResetContextMenu("target_latency_ctx", [] { CalCtx.targetLatencyOffsetMs = 0.0; });
 			ImGui::PopID();
 
+			// Auto-detect runs cross-correlation across the rolling sample
+			// buffer that only fills during continuous calibration. In one-shot
+			// mode the calibration is frozen and the estimator never runs, so
+			// grey the checkbox out to make the constraint explicit.
+			const bool kLatencyAutoDetectActive = (CalCtx.state == CalibrationState::Continuous);
+			ImGui::BeginDisabled(!kLatencyAutoDetectActive);
 			ImGui::Checkbox("Auto-detect target latency", &CalCtx.latencyAutoDetect);
+			ImGui::EndDisabled();
 			if (ImGui::IsItemHovered(0)) {
-				ImGui::SetTooltip("Uses cross-correlation of tracker velocities to estimate the inter-system\n"
-					"latency once per second when both devices are moving. Overrides the manual\n"
-					"offset above when on.");
+				if (kLatencyAutoDetectActive) {
+					ImGui::SetTooltip("Uses cross-correlation of tracker velocities to estimate the inter-system\n"
+						"latency once per second when both devices are moving. Overrides the manual\n"
+						"offset above when on.");
+				} else {
+					ImGui::SetTooltip("Active only during continuous calibration. The cross-correlation\n"
+						"estimator runs against the rolling sample buffer continuous mode populates;\n"
+						"in one-shot mode the calibration is frozen and the estimator never fires.\n"
+						"The manual offset slider above still applies in either mode.");
+				}
 			}
 
 			ImGui::EndGroupPanel();
@@ -966,83 +980,157 @@ void CCal_DrawSettings() {
 				"one, turn it back off and the old behavior returns.");
 			ImGui::Spacing();
 
+			// Mode-availability flags. Several toggles only affect runtime
+			// behavior in specific calibration states; greying them out in the
+			// modes where they would be silent no-ops makes the constraint
+			// visible instead of leaving the user to wonder why a flip
+			// produced no observable change.
+			const bool continuousActive = (CalCtx.state == CalibrationState::Continuous);
+			const bool oneShotInProgress = (CalCtx.state == CalibrationState::Begin
+				|| CalCtx.state == CalibrationState::Rotation
+				|| CalCtx.state == CalibrationState::Translation);
+			const bool restLockedActive = !continuousActive && !oneShotInProgress;
+
+			// Status banner: one line stating which subset of toggles will
+			// actually act on the running calibration right now. Avoids the
+			// guessing game of "I flipped it but tracking did not change."
+			ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+			if (continuousActive) {
+				ImGui::TextWrapped("Continuous calibration is active. Continuous-only toggles below are interactive; "
+					"continuous-OFF-only toggles (rest-locked yaw) are inactive while continuous runs.");
+			} else if (oneShotInProgress) {
+				ImGui::TextWrapped("One-shot calibration is in progress. Most toggles are inactive until the "
+					"one-shot finishes or you start continuous calibration.");
+			} else {
+				ImGui::TextWrapped("Continuous calibration is OFF. Continuous-only toggles below are inactive; "
+					"continuous-OFF-only toggles (rest-locked yaw, predictive recovery) are interactive.");
+			}
+			ImGui::PopStyleColor();
+			ImGui::Spacing();
+
 			// Whitened-spectrum latency estimator (GCC-PHAT, Knapp-Carter 1976).
-			// Only active when Auto-detect target latency above is on -- the
-			// flag selects which algorithm runs inside that path.
-			ImGui::BeginDisabled(!CalCtx.latencyAutoDetect);
+			// Doubly gated: requires Auto-detect target latency above (which itself
+			// requires continuous mode). Whichever gate is closed greys this one too.
+			const bool gccPhatActive = continuousActive && CalCtx.latencyAutoDetect;
+			ImGui::BeginDisabled(!gccPhatActive);
 			ImGui::Checkbox("Whitened-spectrum latency estimator", &CalCtx.useGccPhatLatency);
 			ImGui::EndDisabled();
 			if (ImGui::IsItemHovered(0)) {
-				if (CalCtx.latencyAutoDetect) {
+				if (gccPhatActive) {
 					ImGui::SetTooltip("Replaces the default time-domain cross-correlator with a GCC-PHAT\n"
 						"variant (Knapp-Carter 1976). May be sharper when the two tracking systems'\n"
 						"velocity signals have very different frequency content (e.g. heavy IMU\n"
 						"low-pass on one side). The default time-domain estimator is well-validated;\n"
-						"turn this on only if your auto-detected offset reads as jumpy.");
+						"turn this on only if your auto-detected offset reads as jumpy.\n\n"
+						"Active in: continuous calibration with auto-detect target latency on.");
+				} else if (continuousActive) {
+					ImGui::SetTooltip("Requires Auto-detect target latency above. Off by default.\n\n"
+						"Active in: continuous calibration with auto-detect target latency on.");
 				} else {
-					ImGui::SetTooltip("Requires Auto-detect target latency above. Off by default.");
+					ImGui::SetTooltip("Active in: continuous calibration with auto-detect target latency on.\n"
+						"Currently inactive because continuous calibration is off.");
 				}
 			}
 
 			// CUSUM geometry-shift detector (Page 1954) replaces the 5x-rolling-
 			// median rule with a cumulative-sum statistical test. Same recovery
 			// action; tunable false-alarm rate via standard ARL tables.
+			// Continuous-only: the geometry-shift watchdog runs inside the
+			// continuous-cal tick path.
+			ImGui::BeginDisabled(!continuousActive);
 			ImGui::Checkbox("CUSUM geometry-shift detector", &CalCtx.useCusumGeometryShift);
+			ImGui::EndDisabled();
 			if (ImGui::IsItemHovered(0)) {
-				ImGui::SetTooltip("Statistical change-point test (CUSUM, Page 1954) instead of the fixed\n"
-					"5x-rolling-median rule. Uses standard Average-Run-Length tables for a\n"
-					"tunable false-alarm rate. Same recovery action when fired (clear cal,\n"
-					"demote to standby). Off by default; the existing rolling-median rule\n"
-					"has not misfired in observed sessions.");
+				if (continuousActive) {
+					ImGui::SetTooltip("Statistical change-point test (CUSUM, Page 1954) instead of the fixed\n"
+						"5x-rolling-median rule. Uses standard Average-Run-Length tables for a\n"
+						"tunable false-alarm rate. Same recovery action when fired (clear cal,\n"
+						"demote to standby). Off by default; the existing rolling-median rule\n"
+						"has not misfired in observed sessions.\n\n"
+						"Active in: continuous calibration only.");
+				} else {
+					ImGui::SetTooltip("Active in: continuous calibration only.\n"
+						"The geometry-shift watchdog runs inside the continuous-cal tick path; in\n"
+						"one-shot mode the calibration is frozen and the watchdog never fires.");
+				}
 			}
 
 			// Velocity-aware outlier weighting in the IRLS translation solve.
 			// Down-weights residuals taken during fast motion as likely
 			// glitches; preserves residuals taken at rest as legitimate
-			// "cal is wrong here" signal.
+			// "cal is wrong here" signal. IRLS runs in both ComputeOneshot
+			// and ComputeIncremental, so this toggle applies in both modes.
 			ImGui::Checkbox("Velocity-aware outlier weighting", &CalCtx.useVelocityAwareWeighting);
 			if (ImGui::IsItemHovered(0)) {
 				ImGui::SetTooltip("Scales the per-pair IRLS Cauchy threshold inversely with motion magnitude\n"
 					"so high-residual rows from fast-moving frames are suppressed as likely glitches,\n"
 					"while high-residual rows from stationary frames remain informative (the cal\n"
 					"genuinely needs an update there). Off by default; the dominant rejection in\n"
-					"observed logs is axis_variance_low which this does not address.");
+					"observed logs is axis_variance_low which this does not address.\n\n"
+					"Active in: both one-shot and continuous calibration.");
 			}
 
-			// Tukey biweight + Qn-scale alternative robust kernel.
+			// Tukey biweight + Qn-scale alternative robust kernel. Same
+			// IRLS path as velocity-aware weighting: applies in both modes.
 			ImGui::Checkbox("Tukey biweight robust kernel", &CalCtx.useTukeyBiweight);
 			if (ImGui::IsItemHovered(0)) {
 				ImGui::SetTooltip("Replaces the default IRLS Cauchy + MAD with Tukey biweight + Qn-scale\n"
 					"(Rousseeuw-Croux 1993). Tukey is redescending: residuals beyond the threshold\n"
 					"get exactly zero weight, so a single bad-frame outlier cannot drag the fit.\n"
 					"Qn does not saturate at the MAD floor and does not assume residual symmetry.\n"
-					"Off by default; the standard Cauchy + MAD has been adequate on observed data.");
+					"Off by default; the standard Cauchy + MAD has been adequate on observed data.\n\n"
+					"Active in: both one-shot and continuous calibration.");
 			}
 
-			// Kalman-filter blend at publish.
+			// Kalman-filter blend at publish. Replaces the EMA in
+			// ComputeIncremental; ComputeOneshot does not use the EMA path,
+			// so this toggle is a no-op in one-shot mode.
+			ImGui::BeginDisabled(!continuousActive);
 			ImGui::Checkbox("Kalman-filter blend at publish", &CalCtx.useBlendFilter);
+			ImGui::EndDisabled();
 			if (ImGui::IsItemHovered(0)) {
-				ImGui::SetTooltip("Replaces the single-step EMA (alpha=0.3) at the publish point with a\n"
-					"4-state Kalman filter on (yaw, tx, ty, tz). Process noise is tuned to typical\n"
-					"long-term Quest-SLAM drift; measurement noise to validation-gate-pass quality.\n"
-					"On a candidate that diverges from the filter prediction (post-relocalize snap,\n"
-					"geometry-shift recovery), the filter resets and falls back to the EMA path for\n"
-					"that tick. Off by default; the EMA is the validated default.");
+				if (continuousActive) {
+					ImGui::SetTooltip("Replaces the single-step EMA (alpha=0.3) at the publish point with a\n"
+						"4-state Kalman filter on (yaw, tx, ty, tz). Process noise is tuned to typical\n"
+						"long-term Quest-SLAM drift; measurement noise to validation-gate-pass quality.\n"
+						"On a candidate that diverges from the filter prediction (post-relocalize snap,\n"
+						"geometry-shift recovery), the filter resets and falls back to the EMA path for\n"
+						"that tick. Off by default; the EMA is the validated default.\n\n"
+						"Active in: continuous calibration only.");
+				} else {
+					ImGui::SetTooltip("Active in: continuous calibration only.\n"
+						"The blend filter sits in the ComputeIncremental publish path; one-shot mode\n"
+						"does not run incremental publishes, so the filter never sees a candidate.");
+				}
 			}
 
-			// Rest-locked yaw drift correction.
+			// Rest-locked yaw drift correction. Inverse gating: only fires
+			// when continuous-cal is OFF and one-shot is not in progress.
+			ImGui::BeginDisabled(!restLockedActive);
 			ImGui::Checkbox("Rest-locked yaw drift correction", &CalCtx.restLockedYawEnabled);
+			ImGui::EndDisabled();
 			if (ImGui::IsItemHovered(0)) {
-				ImGui::SetTooltip("When a tracker stays still for 1 s, lock its orientation as an absolute\n"
-					"reference. On every subsequent at-rest tick, compare predicted vs locked yaw\n"
-					"and apply a bounded-rate correction to the active calibration (per-class cap,\n"
-					"global ceiling 0.5 deg/s). Activates only outside Continuous mode; continuous-cal\n"
-					"already handles drift in its own loop. Off by default; flips on after a real\n"
-					"session test passes the four-tier success criterion (p90 error_currentCal,\n"
-					"recovery-fire frequency, time-to-first-failure, subjective Likert).");
+				if (restLockedActive) {
+					ImGui::SetTooltip("When a tracker stays still for 1 s, lock its orientation as an absolute\n"
+						"reference. On every subsequent at-rest tick, compare predicted vs locked yaw\n"
+						"and apply a bounded-rate correction to the active calibration (per-class cap,\n"
+						"global ceiling 0.5 deg/s). Off by default; flips on after a real session test\n"
+						"passes the four-tier success criterion (p90 error_currentCal, recovery-fire\n"
+						"frequency, time-to-first-failure, subjective Likert).\n\n"
+						"Active in: continuous calibration OFF (one-shot, idle, editing, standby).");
+				} else if (continuousActive) {
+					ImGui::SetTooltip("Active in: continuous calibration OFF only.\n"
+						"Continuous-cal already corrects drift in its own loop; running both would\n"
+						"produce two integrators acting on the same error and risk oscillation.");
+				} else {
+					ImGui::SetTooltip("Active in: continuous calibration OFF only.\n"
+						"Currently inactive because a one-shot calibration is in progress.");
+				}
 			}
 
-			// Predictive recovery pre-correction.
+			// Predictive recovery pre-correction. Buffer fills on the 30 cm
+			// relocalization fire (continuous mode); per-tick apply runs in
+			// any state. Mostly continuous-relevant.
 			ImGui::Checkbox("Predictive recovery pre-correction", &CalCtx.predictiveRecoveryEnabled);
 			if (ImGui::IsItemHovered(0)) {
 				ImGui::SetTooltip("Each Quest re-anchor event (the 30 cm HMD-jump trigger) pushes its direction\n"
@@ -1050,17 +1138,21 @@ void CCal_DrawSettings() {
 					"direction, apply 10 percent of the predicted next-jump per tick as a bounded-rate\n"
 					"translation nudge to the active calibration. Bounded twice (10 percent fraction +\n"
 					"per-tick rate cap) so a misfire cannot reproduce the deleted Phase 1+2 silent-recal\n"
-					"failure mode. Off by default.");
+					"failure mode. Off by default.\n\n"
+					"Active in: any mode. Buffer fills only when the 30 cm detector fires (continuous\n"
+					"mode); the per-tick predictive nudge applies whenever the buffer has enough events.");
 			}
 
-			// Chi-square re-anchor sub-detector.
+			// Chi-square re-anchor sub-detector. Pose-stream-only; works in
+			// any state.
 			ImGui::Checkbox("Chi-square re-anchor sub-detector", &CalCtx.reanchorChiSquareEnabled);
 			if (ImGui::IsItemHovered(0)) {
 				ImGui::SetTooltip("Mahalanobis distance between HMD-pose-from-rolling-velocity and observed\n"
 					"HMD pose. Threshold at chi-square 6 DoF p<1e-4 (about 27.86). When fired,\n"
 					"freezes rec A and rec C corrections for 500 ms so the existing 30 cm detector\n"
 					"can confirm without our nudges contaminating the signal. Detection-only:\n"
-					"never triggers recovery itself. Off by default.");
+					"never triggers recovery itself. Off by default.\n\n"
+					"Active in: any mode.");
 			}
 
 			// Toggle-flip diagnostic. Compare each flag to its previous value
