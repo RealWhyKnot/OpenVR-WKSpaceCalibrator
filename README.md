@@ -134,4 +134,4 @@ items in the list above.
 
 ## License
 
-Same as upstream. See [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE). Third-party attributions in [NOTICE](NOTICE).
