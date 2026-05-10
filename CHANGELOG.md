@@ -11,6 +11,9 @@ The most recent release is at the top.
 
 ## Unreleased
 
+### Added
+- **inputhealth:** Add SpaceCalibrator inputs diagnostics tab (d3ebcec)
+
 ### Changed
 - **deps:** Bump OpenVR-PairDriver for InputHealth safety (ee049e6)
 - **deps:** Bump PairDriver for InputHealth range snapshots (2026.5.9.0-B032) (fab2048)
