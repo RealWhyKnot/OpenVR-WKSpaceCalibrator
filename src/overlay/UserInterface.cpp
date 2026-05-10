@@ -12,6 +12,7 @@
 #include "Updater.h"
 #include "MotionRecording.h"
 #include "Wizard.h"
+#include "InputHealthPanel.h"
 
 #include <thread>
 #include <string>
@@ -58,6 +59,7 @@ void CCal_BasicInfo();
 void CCal_DrawSettings();
 void CCal_DrawPredictionSuppression();
 void CCal_DrawFingerSmoothing();
+void CCal_DrawInputHealth();
 static void OneShot_DrawSettings();
 
 static bool runningInOverlay;
@@ -154,6 +156,7 @@ void BuildMainWindow(bool runningInOverlay_)
 		}
 	}
 	spacecal::wizard::Draw();
+	InputHealth_Tick();
 
 	if (continuousCalibration) {
 		BuildContinuousCalDisplay();
@@ -198,6 +201,10 @@ void BuildMainWindow(bool runningInOverlay_)
 				}
 				if (ImGui::BeginTabItem("Fingers")) {
 					CCal_DrawFingerSmoothing();
+					ImGui::EndTabItem();
+				}
+				if (ImGui::BeginTabItem("Inputs")) {
+					CCal_DrawInputHealth();
 					ImGui::EndTabItem();
 				}
 				if (ImGui::BeginTabItem("Logs")) {
@@ -599,6 +606,11 @@ void BuildContinuousCalDisplay() {
 
 		if (ImGui::BeginTabItem("Fingers")) {
 			CCal_DrawFingerSmoothing();
+			ImGui::EndTabItem();
+		}
+
+		if (ImGui::BeginTabItem("Inputs")) {
+			CCal_DrawInputHealth();
 			ImGui::EndTabItem();
 		}
 
