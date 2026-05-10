@@ -388,7 +388,7 @@ function Update-OneFile {
 
     $rendered = Render-UnreleasedBody -Buckets $existing
     $before = if ($section.StartIdx -gt 0) { $section.Lines[0..($section.StartIdx)] } else { @($section.Lines[0]) }
-    $after  = $section.Lines[$section.EndIdx..($section.Lines.Length - 1)]
+    $after  = if ($section.EndIdx -lt $section.Lines.Length) { $section.Lines[$section.EndIdx..($section.Lines.Length - 1)] } else { @() }
 
     $newLines = @()
     $newLines += $before
@@ -553,7 +553,7 @@ if ($Mode -eq 'Promote') {
         #   ---
         #   <rest>
         $before = if ($section.StartIdx -gt 0) { $lines[0..($section.StartIdx - 1)] } else { @() }
-        $after  = $lines[$section.EndIdx..($lines.Length - 1)]
+        $after  = if ($section.EndIdx -lt $lines.Length) { $lines[$section.EndIdx..($lines.Length - 1)] } else { @() }
 
         $newLines = @()
         $newLines += $before
