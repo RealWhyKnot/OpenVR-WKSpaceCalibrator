@@ -311,6 +311,8 @@ void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		ctx.useVelocityAwareWeighting = obj["irls_velocity_aware"].get<bool>();
 	if (obj["irls_use_tukey"].is<bool>())
 		ctx.useTukeyBiweight = obj["irls_use_tukey"].get<bool>();
+	if (obj["translation_use_legacy"].is<bool>())
+		ctx.useLegacyMath = obj["translation_use_legacy"].get<bool>();
 	if (obj["blend_use_kalman"].is<bool>())
 		ctx.useBlendFilter = obj["blend_use_kalman"].get<bool>();
 	if (obj["rest_locked_yaw"].is<bool>())
@@ -615,6 +617,7 @@ void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	WRITE_IF_CHANGED_BOOL  ("geometry_shift_use_cusum",     useCusumGeometryShift);
 	WRITE_IF_CHANGED_BOOL  ("irls_velocity_aware",          useVelocityAwareWeighting);
 	WRITE_IF_CHANGED_BOOL  ("irls_use_tukey",               useTukeyBiweight);
+	WRITE_IF_CHANGED_BOOL  ("translation_use_legacy",       useLegacyMath);
 	WRITE_IF_CHANGED_BOOL  ("blend_use_kalman",             useBlendFilter);
 	WRITE_IF_CHANGED_BOOL  ("rest_locked_yaw",              restLockedYawEnabled);
 	WRITE_IF_CHANGED_BOOL  ("predictive_recovery",          predictiveRecoveryEnabled);

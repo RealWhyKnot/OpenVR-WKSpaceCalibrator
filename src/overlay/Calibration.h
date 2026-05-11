@@ -240,6 +240,7 @@ struct CalibrationContext
 	// When true, the translation solve falls back to the pre-revamp pairwise
 	// O(N^2) IRLS path. Provided as a safety hatch if the direct O(N)
 	// latent-offset solve regresses on a real session. Default false.
+	// Persisted as translation_use_legacy in profile JSON.
 	bool useLegacyMath = false;
 
 	// Opt-in switch for the Kalman-filter blend at publish (replaces the

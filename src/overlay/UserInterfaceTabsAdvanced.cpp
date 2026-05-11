@@ -562,6 +562,20 @@ void CCal_DrawSettings() {
 					"Active in: both one-shot and continuous calibration.");
 			}
 
+			// Legacy translation solve. The default path is the direct O(N)
+			// latent-offset solve; flipping this on reverts to the prior
+			// pairwise O(N^2) IRLS as a safety hatch.
+			ImGui::Checkbox("Legacy translation solve (pairwise)", &CalCtx.useLegacyMath);
+			if (ImGui::IsItemHovered(0)) {
+				ImGui::SetTooltip("Reverts the translation solve to the pre-revamp pairwise O(N^2) IRLS\n"
+					"path. The default direct O(N) latent-offset solver jointly estimates the\n"
+					"calibration translation and the reference-to-target offset, then runs\n"
+					"per-sample Cauchy IRLS; it is faster and statistically cleaner. Flip this\n"
+					"on only if a real session shows a regression vs the prior release -- and\n"
+					"please file a session log so the direct path can be fixed.\n\n"
+					"Active in: both one-shot and continuous calibration.");
+			}
+
 			// Kalman-filter blend at publish. Replaces the EMA in
 			// ComputeIncremental; ComputeOneshot does not use the EMA path,
 			// so this toggle is a no-op in one-shot mode.
@@ -644,6 +658,7 @@ void CCal_DrawSettings() {
 			static bool s_prevCusum      = CalCtx.useCusumGeometryShift;
 			static bool s_prevVelAware   = CalCtx.useVelocityAwareWeighting;
 			static bool s_prevTukey      = CalCtx.useTukeyBiweight;
+			static bool s_prevLegacy     = CalCtx.useLegacyMath;
 			static bool s_prevKalman     = CalCtx.useBlendFilter;
 			static bool s_prevRestYaw    = CalCtx.restLockedYawEnabled;
 			static bool s_prevPredRecov  = CalCtx.predictiveRecoveryEnabled;
@@ -653,6 +668,7 @@ void CCal_DrawSettings() {
 			logToggleFlip("geometry_shift_use_cusum",  s_prevCusum,      CalCtx.useCusumGeometryShift);
 			logToggleFlip("irls_velocity_aware",       s_prevVelAware,   CalCtx.useVelocityAwareWeighting);
 			logToggleFlip("irls_use_tukey",            s_prevTukey,      CalCtx.useTukeyBiweight);
+			logToggleFlip("translation_use_legacy",    s_prevLegacy,     CalCtx.useLegacyMath);
 			logToggleFlip("blend_use_kalman",          s_prevKalman,     CalCtx.useBlendFilter);
 			logToggleFlip("rest_locked_yaw",           s_prevRestYaw,    CalCtx.restLockedYawEnabled);
 			logToggleFlip("predictive_recovery",       s_prevPredRecov,  CalCtx.predictiveRecoveryEnabled);
