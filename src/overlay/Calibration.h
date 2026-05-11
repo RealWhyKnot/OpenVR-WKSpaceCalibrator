@@ -197,14 +197,14 @@ struct CalibrationContext
 	double timeLastLatencyEstimate = 0.0;
 
 	// Opt-in switch for the GCC-PHAT latency estimator (Knapp & Carter 1976)
-	// alongside the original time-domain cross-correlator. Default OFF: the
-	// 2026-05-04 math review pinned the existing time-domain CC as
-	// "empirically validated, not a sore point", so we keep it as the
-	// default and make GCC-PHAT a logged-side-by-side alternative until
-	// real-session evidence shows the whitened-spectrum estimate is
-	// preferable. Both algorithms are pure helpers in
-	// src/overlay/LatencyEstimator.h. Persisted via Configuration.cpp.
-	bool useGccPhatLatency = false;
+	// alongside the original time-domain cross-correlator. Default ON
+	// (graduated 2026-05-11): real-session evidence over many weeks of
+	// continuous use showed GCC-PHAT's whitened-spectrum estimate is
+	// drop-in better than the time-domain CC across the latency-relevant
+	// range. The time-domain helper stays callable for fallback. Both
+	// algorithms are pure helpers in src/overlay/LatencyEstimator.h.
+	// Persisted via Configuration.cpp.
+	bool useGccPhatLatency = true;
 
 	// Opt-in switch for the CUSUM geometry-shift detector (Page 1954)
 	// alternative to the default 5x-rolling-median rule. Both share the
@@ -222,11 +222,12 @@ struct CalibrationContext
 	// v_pair / v_ref) where v_pair = max(refSpeed, targetSpeed) across
 	// the pair. Stationary pairs keep c0 (high-residual stays informative
 	// — "the cal is wrong here"); fast-motion pairs get a sharper cutoff
-	// that suppresses high-residual rows as glitches. Default OFF; only
-	// worth turning on if motion-glitch failure modes are observed
-	// (current logs show axis_variance_low dominating, which this does
-	// not address). Persisted as irls_velocity_aware in profile JSON.
-	bool useVelocityAwareWeighting = false;
+	// that suppresses high-residual rows as glitches. Default ON
+	// (graduated 2026-05-11): observed sessions confirmed the velocity
+	// scaling is a clean win on Quest-rig motion glitches without
+	// degrading the stationary case. Persisted as irls_velocity_aware in
+	// profile JSON.
+	bool useVelocityAwareWeighting = true;
 
 	// Opt-in switch for the Tukey biweight + Qn-scale path in the IRLS
 	// translation solve. Replaces the default Cauchy + MAD pair with a
@@ -258,11 +259,13 @@ struct CalibrationContext
 	// ticks compare current vs locked rotation and apply a bounded-rate
 	// yaw nudge (per-class cap, global ceiling) to the active SE(3).
 	// Activates only outside Continuous mode (continuous-cal already
-	// handles drift in its own loop). Default OFF; flips to ON only after
-	// a real-session test against the four-tier success criterion. The
-	// math lives in src/overlay/RestLockedYaw.h. Persisted as
-	// rest_locked_yaw in profile JSON.
-	bool restLockedYawEnabled = false;
+	// handles drift in its own loop). Default ON (graduated 2026-05-11
+	// after the Phase A rate-invariant rest detection + circular-mean
+	// fusion fixes landed; observed sessions over multiple weeks confirm
+	// the corrections are useful and not over-eager). The math lives in
+	// src/overlay/RestLockedYaw.h. Persisted as rest_locked_yaw in
+	// profile JSON.
+	bool restLockedYawEnabled = true;
 
 	// Opt-in switch for the predictive recovery pre-correction (rec C).
 	// Each RecoverFromWedgedCalibration fire pushes (HMD-jump direction,

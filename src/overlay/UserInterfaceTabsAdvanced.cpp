@@ -455,9 +455,11 @@ void CCal_DrawSettings() {
 		};
 		{
 			ImGui::BeginGroupPanel("Experimental (opt-in, may break)", panel_size);
-			ImGui::TextWrapped("Off by default. Enable only if you want to help validate a new path. "
-				"Each toggle changes one specific code path; if tracking regresses after you enable "
-				"one, turn it back off and the old behavior returns.");
+			ImGui::TextWrapped("Behavior-tuning toggles. Most default off and are opt-in for validation; "
+				"a few (whitened-spectrum latency, velocity-aware weighting, rest-locked yaw) have "
+				"graduated to default-on after enough real-session evidence. Each toggle changes "
+				"one specific code path; if tracking regresses after you flip one, flip it back and "
+				"the old behavior returns.");
 			ImGui::Spacing();
 
 			// Mode-availability flags. Several toggles only affect runtime
@@ -497,14 +499,15 @@ void CCal_DrawSettings() {
 			ImGui::EndDisabled();
 			if (ImGui::IsItemHovered(0)) {
 				if (gccPhatActive) {
-					ImGui::SetTooltip("Replaces the default time-domain cross-correlator with a GCC-PHAT\n"
-						"variant (Knapp-Carter 1976). May be sharper when the two tracking systems'\n"
-						"velocity signals have very different frequency content (e.g. heavy IMU\n"
-						"low-pass on one side). The default time-domain estimator is well-validated;\n"
-						"turn this on only if your auto-detected offset reads as jumpy.\n\n"
+					ImGui::SetTooltip("Whitened-spectrum cross-correlator (GCC-PHAT, Knapp-Carter 1976).\n"
+						"Default ON: real-session evidence showed this is drop-in better than the\n"
+						"time-domain CC across the latency-relevant range, especially when the two\n"
+						"tracking systems' velocity signals have different frequency content (e.g.\n"
+						"heavy IMU low-pass on one side). Time-domain remains callable as a fallback;\n"
+						"turn this off only if your auto-detected offset reads as jumpy.\n\n"
 						"Active in: continuous calibration with auto-detect target latency on.");
 				} else if (continuousActive) {
-					ImGui::SetTooltip("Requires Auto-detect target latency above. Off by default.\n\n"
+					ImGui::SetTooltip("Requires Auto-detect target latency above. Default on.\n\n"
 						"Active in: continuous calibration with auto-detect target latency on.");
 				} else {
 					ImGui::SetTooltip("Active in: continuous calibration with auto-detect target latency on.\n"
@@ -545,8 +548,9 @@ void CCal_DrawSettings() {
 				ImGui::SetTooltip("Scales the per-pair IRLS Cauchy threshold inversely with motion magnitude\n"
 					"so high-residual rows from fast-moving frames are suppressed as likely glitches,\n"
 					"while high-residual rows from stationary frames remain informative (the cal\n"
-					"genuinely needs an update there). Off by default; the dominant rejection in\n"
-					"observed logs is axis_variance_low which this does not address.\n\n"
+					"genuinely needs an update there). Default ON (graduated 2026-05-11) -- observed\n"
+					"sessions confirmed it is a clean win on Quest-rig motion glitches without\n"
+					"degrading the stationary case.\n\n"
 					"Active in: both one-shot and continuous calibration.");
 			}
 
@@ -608,9 +612,9 @@ void CCal_DrawSettings() {
 					ImGui::SetTooltip("When a tracker stays still for 1 s, lock its orientation as an absolute\n"
 						"reference. On every subsequent at-rest tick, compare predicted vs locked yaw\n"
 						"and apply a bounded-rate correction to the active calibration (per-class cap,\n"
-						"global ceiling 0.5 deg/s). Off by default; flips on after a real session test\n"
-						"passes the four-tier success criterion (p90 error_currentCal, recovery-fire\n"
-						"frequency, time-to-first-failure, subjective Likert).\n\n"
+						"global ceiling 0.5 deg/s). Default ON (graduated 2026-05-11) after the\n"
+						"Phase A rate-invariant rest detection + circular-mean fusion fixes landed;\n"
+						"observed sessions confirm the corrections are useful and not over-eager.\n\n"
 						"Active in: continuous calibration OFF (one-shot, idle, editing, standby).");
 				} else if (continuousActive) {
 					ImGui::SetTooltip("Active in: continuous calibration OFF only.\n"
