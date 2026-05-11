@@ -20,6 +20,9 @@ The most recent release is at the top.
 - **deps:** Bump PairDriver for InputHealth range snapshots (2026.5.9.0-B032) (fab2048)
 - **inputhealth:** Split diagnostics panel modules (786eca3)
 
+### Fixed
+- **build:** Track BuildStamp.h with a dev fallback (aef2b28)
+
 ---
 
 ## [v2026.5.7.0](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/releases/tag/v2026.5.7.0) -- 2026-05-07
