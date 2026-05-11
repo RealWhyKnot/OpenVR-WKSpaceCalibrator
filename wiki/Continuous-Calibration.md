@@ -78,7 +78,7 @@ where regimeFloor depends on the pending correction's magnitude:
 
 | Regime | Trigger | Still-floor | Behaviour |
 |---|---|---|---|
-| Tiny | <= 1 mm pos OR <= 0.05 deg rot | 10% | drifts slowly, won't fight noise |
+| Tiny | <= 1 mm pos AND <= 0.05 deg rot | 10% | drifts slowly, won't fight noise |
 | Normal | in between | 50% | steady mm-scale convergence |
 | Large | > 5 mm pos OR > 0.5 deg rot | 90% | effectively snaps |
 

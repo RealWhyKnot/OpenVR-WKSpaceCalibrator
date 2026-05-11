@@ -45,12 +45,17 @@ TEST(MotionGateTest, Tiny_NoiseLevelCorrectionsClassifiedAsTiny) {
     EXPECT_EQ(ClassifyCorrection(1.0, 0.05), Regime::Tiny);
 }
 
-TEST(MotionGateTest, Tiny_OrSemantics_NoiseInEitherAxisQualifies) {
-    // Per the 2026-05-04 user spec ("≤1mm OR ≤0.05°"), a correction with
-    // 2mm pos but tiny rot is still treated as Tiny — the rot axis is in
-    // noise, and the OR logic captures that.
-    EXPECT_EQ(ClassifyCorrection(/*posMm=*/2.0, /*rotDeg=*/0.04), Regime::Tiny);
-    EXPECT_EQ(ClassifyCorrection(0.5, 0.4), Regime::Tiny);
+TEST(MotionGateTest, Tiny_AndSemantics_BothAxesMustBeNoise) {
+    // Tiny now requires BOTH axes to be in the noise region. A 4 mm pure
+    // translation with no rotation is a real correction, not noise, and
+    // should ride the Normal floor (50 percent) rather than the Tiny
+    // floor (10 percent). This supersedes the earlier OR rule.
+    EXPECT_EQ(ClassifyCorrection(/*posMm=*/2.0, /*rotDeg=*/0.04), Regime::Normal)
+        << "2 mm pos with tiny rot: pos is above noise, rot is in noise; "
+           "Tiny needs BOTH, so this is Normal";
+    EXPECT_EQ(ClassifyCorrection(0.5, 0.4), Regime::Normal)
+        << "Sub-mm pos with 0.4 deg rot: rot is above noise, pos is in noise; "
+           "Tiny needs BOTH, so this is Normal";
 }
 
 // ---------------------------------------------------------------------------
@@ -98,24 +103,28 @@ TEST(MotionGateTest, Large_TakesPrecedenceOverTiny) {
 // the test rather than silently shifting behaviour.
 // ---------------------------------------------------------------------------
 TEST(MotionGateTest, Boundaries_LargePosThreshold) {
-    EXPECT_EQ(ClassifyCorrection(kLargeMinPosMm, 0.0), Regime::Tiny)
-        << "Exactly 5mm pos with 0° rot is Tiny (rot is in noise band, OR "
-           "rule), and not yet Large because the strict > 5mm comparison "
-           "doesn't fire at exactly 5";
+    EXPECT_EQ(ClassifyCorrection(kLargeMinPosMm, 0.0), Regime::Normal)
+        << "Exactly 5mm pos with 0 deg rot: not Large (strict > 5 mm does "
+           "not fire at exactly 5), pos above tiny so Tiny needs both; "
+           "result is Normal";
     EXPECT_EQ(ClassifyCorrection(kLargeMinPosMm + 0.01, 0.0), Regime::Large)
         << "Just above 5mm fires Large";
 }
 
 TEST(MotionGateTest, Boundaries_LargeRotThreshold) {
-    EXPECT_EQ(ClassifyCorrection(0.0, kLargeMinRotDeg), Regime::Tiny);
+    EXPECT_EQ(ClassifyCorrection(0.0, kLargeMinRotDeg), Regime::Normal)
+        << "Pos in noise, rot exactly at 0.5 deg (Normal upper edge); "
+           "AND rule means Normal";
     EXPECT_EQ(ClassifyCorrection(0.0, kLargeMinRotDeg + 0.001), Regime::Large);
 }
 
 TEST(MotionGateTest, Boundaries_TinyPosThreshold) {
-    // 1.0mm pos + 0.5° rot: rot at the upper Normal edge, pos exactly at the
-    // tiny upper bound. OR logic: tiny on either axis → Tiny.
-    EXPECT_EQ(ClassifyCorrection(kTinyMaxPosMm, 0.5), Regime::Tiny);
+    // 1.0mm pos + 0.5 deg rot: pos at the tiny upper bound, rot at the
+    // upper Normal edge. AND rule: rot is not in noise, so Normal.
+    EXPECT_EQ(ClassifyCorrection(kTinyMaxPosMm, 0.5), Regime::Normal);
     EXPECT_EQ(ClassifyCorrection(kTinyMaxPosMm + 0.01, 0.5), Regime::Normal);
+    // Both in noise -> Tiny.
+    EXPECT_EQ(ClassifyCorrection(kTinyMaxPosMm, kTinyMaxRotDeg), Regime::Tiny);
 }
 
 // ---------------------------------------------------------------------------
