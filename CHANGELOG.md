@@ -23,6 +23,7 @@ The most recent release is at the top.
 - Revert "feat(overlay): wrap calibration UI in shell card and report metadata" (1c83313)
 - **overlay:** Hand prediction + finger smoothing off to Smoothing (v12) (32fd5fb)
 - Rename OpenVR modules to WK variants (c22ce04)
+- **overlay:** Split UserInterface.cpp into per-section files (76c7dad)
 
 ### Fixed
 - **build:** Track BuildStamp.h with a dev fallback (aef2b28)
