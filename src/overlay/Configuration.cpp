@@ -57,6 +57,13 @@
 //   3. Keep the load path tolerant of missing keys for any new field.
 static const int kProfileSchemaVersion = 3;
 
+// Set to true when a chaperone geometry array with a non-multiple-of-12 length
+// is encountered during ParseProfile. The UI reads this to show a banner
+// ("corrupted size -- auto-apply disabled") rather than silently doing nothing.
+// Persists for the lifetime of the process (a second SaveProfile clears the
+// corruption, so the banner is only shown after a load, not during normal use).
+bool g_chaperoneGeometrySizeMismatch = false;
+
 // Forward-migrate an already-parsed profile object in place from `from_version`
 // up to kProfileSchemaVersion. Called between JSON parse and field population.
 // Each future schema bump should add a `if (from_version < N) { ... }` block.
@@ -398,7 +405,8 @@ void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		// boundary). Better to skip the chaperone load and warn.
 		if (geometry.size() > 0 && (geometry.size() % 12) != 0) {
 			std::cerr << "Chaperone geometry length (" << geometry.size()
-				<< ") is not a multiple of 12 — skipping chaperone load." << std::endl;
+				<< ") is not a multiple of 12 -- skipping chaperone load." << std::endl;
+			g_chaperoneGeometrySizeMismatch = true;
 		} else if (geometry.size() > 0) {
 			ctx.chaperone.geometry.resize(geometry.size() * sizeof(float) / sizeof(ctx.chaperone.geometry[0]));
 			LoadFloatArray(chaperone["geometry"], (float *) ctx.chaperone.geometry.data(), geometry.size());
@@ -742,17 +750,38 @@ size_t StripRegistryNullTerminator(DWORD reportedSize) {
 	return reportedSize > 0 ? (size_t)reportedSize - 1 : 0;
 }
 
+// Outcome of the last ReadRegistryKey() call. Distinguishes "key simply
+// absent (first run)" from "key present but value read failed (I/O error,
+// permissions)". Callers use this to decide whether to surface an error
+// banner vs. silently bootstrapping a fresh profile.
+enum class RegistryReadOutcome {
+	Absent,       // Key or value not found -- normal first-run condition.
+	ReadFailed,   // Key found but data read failed -- surface to user.
+	Success,      // Data read successfully.
+};
+static RegistryReadOutcome g_lastRegistryReadOutcome = RegistryReadOutcome::Absent;
+
 static std::string ReadRegistryKey()
 {
 	DWORD size = 0;
 	auto result = RegGetValueA(HKEY_CURRENT_USER_LOCAL_SETTINGS, RegistryKey, "Config", RRF_RT_REG_SZ, 0, 0, &size);
 	if (result != ERROR_SUCCESS) {
-		LogRegistryResult(result);
+		// ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND: key genuinely absent
+		// (first run or profile wiped). Anything else is an I/O / permission
+		// failure that should be surfaced to the user.
+		if (result == ERROR_FILE_NOT_FOUND || result == ERROR_PATH_NOT_FOUND) {
+			g_lastRegistryReadOutcome = RegistryReadOutcome::Absent;
+		} else {
+			g_lastRegistryReadOutcome = RegistryReadOutcome::ReadFailed;
+			std::cerr << "Registry size query failed (not a first-run absence): ";
+			LogRegistryResult(result);
+		}
 		return "";
 	}
 
 	// Empty / malformed registry value: short-circuit before allocating.
 	if (size == 0) {
+		g_lastRegistryReadOutcome = RegistryReadOutcome::Absent;
 		return "";
 	}
 
@@ -761,10 +790,17 @@ static std::string ReadRegistryKey()
 
 	result = RegGetValueA(HKEY_CURRENT_USER_LOCAL_SETTINGS, RegistryKey, "Config", RRF_RT_REG_SZ, 0, &str[0], &size);
 	if (result != ERROR_SUCCESS) {
+		// Key was present and queryable but the data read itself failed.
+		// This is distinct from "key missing" -- log clearly and flag for
+		// the UI so it can show a "failed to read saved calibration" banner
+		// rather than silently zeroing out and pretending it's a fresh start.
+		g_lastRegistryReadOutcome = RegistryReadOutcome::ReadFailed;
+		std::cerr << "Registry value read failed after successful size query: ";
 		LogRegistryResult(result);
 		return "";
 	}
 
+	g_lastRegistryReadOutcome = RegistryReadOutcome::Success;
 	// `size` is re-populated by the data-fetch call. Use the helper so
 	// the truncation logic stays unit-testable.
 	str.resize(StripRegistryNullTerminator(size));
@@ -805,7 +841,16 @@ void LoadProfile(CalibrationContext &ctx)
 
 	auto str = ReadRegistryKey();
 	if (str == "") {
-		std::cout << "Profile is empty" << std::endl;
+		if (g_lastRegistryReadOutcome == RegistryReadOutcome::ReadFailed) {
+			// Registry key exists but the value could not be read (I/O error,
+			// ACL change, corruption). Warn visibly rather than silently
+			// zeroing the calibration.
+			std::cerr << "LoadProfile: failed to read saved calibration from registry; "
+				"running with empty profile. Check registry permissions at "
+				"HKCU\\Software\\Classes\\Local Settings\\" << RegistryKey << std::endl;
+		} else {
+			std::cout << "Profile is empty" << std::endl;
+		}
 		ctx.Clear();
 		return;
 	}

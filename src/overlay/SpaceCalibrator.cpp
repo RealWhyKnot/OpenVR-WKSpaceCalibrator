@@ -268,35 +268,15 @@ void ActivateMultipleDrivers()
 	}
 }
 
-void InitVR()
-{
-	auto initError = vr::VRInitError_None;
-	vr::VR_Init(&initError, vr::VRApplication_Overlay);
-	if (initError != vr::VRInitError_None) {
-		auto error = vr::VR_GetVRInitErrorAsEnglishDescription(initError);
-		throw std::runtime_error("OpenVR error:" + std::string(error));
-	}
-
-	if (!vr::VR_IsInterfaceVersionValid(vr::IVRSystem_Version)) {
-		throw std::runtime_error("OpenVR error: Outdated IVRSystem_Version");
-	} else if (!vr::VR_IsInterfaceVersionValid(vr::IVRSettings_Version)) {
-		throw std::runtime_error("OpenVR error: Outdated IVRSettings_Version");
-	} else if (!vr::VR_IsInterfaceVersionValid(vr::IVROverlay_Version)) {
-		throw std::runtime_error("OpenVR error: Outdated IVROverlay_Version");
-	}
-
-	ActivateMultipleDrivers();
-}
-
 // Forward decls for the deferred-VR connection helpers (full definitions
 // live further down: VerifySetupCorrect at the manifest-handling block,
 // InitCalibrator over in Calibration.cpp).
 void VerifySetupCorrect();
 
 // === Deferred VR connection ================================================
-// The original wWinMain called InitVR() up front and threw a runtime_error if
+// The original startup called VR_Init() up front and threw a runtime_error if
 // SteamVR wasn't running, which terminated the process before the user could
-// see anything. The new flow: bring up the GLFW window + ImGui + load the
+// see anything. The current flow: bring up the GLFW window + ImGui + load the
 // profile FIRST, then attempt the VR connection in a retry loop driven by
 // RunLoop. The user can browse the Settings / Logs / Advanced / Prediction
 // tabs while waiting for SteamVR; calibration actions and device dropdowns
@@ -305,9 +285,9 @@ void VerifySetupCorrect();
 // Flow:
 //   - g_vrReady = false at startup.
 //   - RunLoop calls TryInitVRStack() once per second when !g_vrReady.
-//   - TryInitVRStack does the same work the old InitVR + InitCalibrator +
-//     VerifySetupCorrect chain did, but non-throwing: any failure leaves
-//     g_vrReady false and stashes a human-readable error for the banner.
+//   - TryInitVRStack does the InitCalibrator + VerifySetupCorrect work,
+//     non-throwing: any failure leaves g_vrReady false and stashes a
+//     human-readable error for the banner.
 //   - Once successful, sets g_vrReady = true. CalibrationTick (which already
 //     short-circuits on !vr::VRSystem()) starts producing useful output and
 //     the UI gates flip on.

@@ -516,6 +516,7 @@ static void OneShot_DrawSettings() {
 	// Chaperone -- moved here from BuildMenu for the same reason. Copy/Paste
 	// + auto-apply checkbox; Paste only meaningful when the profile already
 	// has stored bounds.
+	spacecal::ui::DrawChaperoneLoadFailedBanner();
 	ImGui::Spacing();
 	ImGui::BeginGroupPanel("Chaperone bounds", panelSize);
 	{
@@ -1172,11 +1173,18 @@ void BuildDeviceSelections(const VRState &state)
 
 	if (ImGui::Button("Identify selected devices (blinks LED or vibrates)", ImVec2(ImGui::GetWindowContentRegionWidth(), ImGui::GetTextLineHeightWithSpacing() + 4.0f)))
 	{
-		for (unsigned i = 0; i < 100; ++i)
+		// Guard: TriggerHapticPulse with an invalid device index is undefined
+		// behaviour (driver crash or silent no-op depending on the runtime).
+		// Skip the entire loop if either ID hasn't been assigned yet.
+		if (CalCtx.targetID != vr::k_unTrackedDeviceIndexInvalid
+			&& CalCtx.referenceID != vr::k_unTrackedDeviceIndexInvalid)
 		{
-			vr::VRSystem()->TriggerHapticPulse(CalCtx.targetID, 0, 2000);
-			vr::VRSystem()->TriggerHapticPulse(CalCtx.referenceID, 0, 2000);
-			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			for (unsigned i = 0; i < 100; ++i)
+			{
+				vr::VRSystem()->TriggerHapticPulse(CalCtx.targetID, 0, 2000);
+				vr::VRSystem()->TriggerHapticPulse(CalCtx.referenceID, 0, 2000);
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			}
 		}
 	}
 }

@@ -1,6 +1,8 @@
 #include "stdafx.h"
 #include "UserInterfaceBanners.h"
 #include "UserInterface.h"
+#include "Calibration.h"
+#include "Configuration.h"
 #include "VRState.h"
 #include "UpdateChecker.h"
 #include "Updater.h"
@@ -24,6 +26,9 @@ namespace spacecal::ui {
 // connection once per second). Kept compact because the user already
 // knows what state they're in -- they launched the calibrator before
 // starting SteamVR. No need to dump verbose error strings.
+//
+// Interface-version mismatch is surfaced as a distinct error: it requires
+// user action (update SteamVR or the overlay), not just patience.
 void DrawVRWaitingBanner() {
 	if (IsVRReady()) return;
 	// In umbrella mode the same status is already in the footer
@@ -31,20 +36,38 @@ void DrawVRWaitingBanner() {
 	// the calibration tab where it pushes content down.
 	if (s_inUmbrella) return;
 
-	// Yellow-orange shade so it's distinct from the blue update banner --
-	// "attention needed" rather than "FYI." Single-line height to stay
-	// out of the way.
-	ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.45f, 0.34f, 0.10f, 1.0f));
-	ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.95f, 0.78f, 0.30f, 1.0f));
+	const std::string& vrError = LastVRConnectError();
+
+	// Detect interface version mismatch: the error string set by TryInitVRStack
+	// contains "interface version" when the runtime DLL doesn't match build headers.
+	const bool isMismatch = vrError.find("interface version") != std::string::npos
+		|| vrError.find("VR_INTERFACE_VERSION") != std::string::npos;
+
+	// Mismatch: red-tinted banner to signal it needs action, not just waiting.
+	// Normal waiting: yellow-orange "attention needed" shade.
+	if (isMismatch) {
+		ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.40f, 0.10f, 0.10f, 1.0f));
+		ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.90f, 0.35f, 0.35f, 1.0f));
+	} else {
+		ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.45f, 0.34f, 0.10f, 1.0f));
+		ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.95f, 0.78f, 0.30f, 1.0f));
+	}
 	ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 6.0f));
 
-	const float bannerHeight = ImGui::GetFrameHeightWithSpacing() * 1.2f;
+	const float bannerHeight = ImGui::GetFrameHeightWithSpacing() * (isMismatch ? 2.0f : 1.2f);
 	if (ImGui::BeginChild("VRWaitingBanner",
 			ImVec2(ImGui::GetContentRegionAvail().x, bannerHeight),
 			ImGuiChildFlags_Border)) {
-		ImGui::TextColored(ImVec4(1.0f, 0.95f, 0.80f, 1.0f),
-			"Waiting for SteamVR -- calibration controls enable when tracking is live.");
+		if (isMismatch) {
+			ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.75f, 1.0f),
+				"OpenVR interface version mismatch -- SteamVR is too old or too new for this overlay.");
+			ImGui::TextColored(ImVec4(0.90f, 0.70f, 0.70f, 1.0f),
+				"Update SteamVR (or reinstall this overlay) to resolve. Details: %s", vrError.c_str());
+		} else {
+			ImGui::TextColored(ImVec4(1.0f, 0.95f, 0.80f, 1.0f),
+				"Waiting for SteamVR -- calibration controls enable when tracking is live.");
+		}
 	}
 	ImGui::EndChild();
 
@@ -197,6 +220,38 @@ void DrawUpdateBanner() {
 					"  (no SHA published -- verify manually)");
 			}
 		}
+	}
+	ImGui::EndChild();
+
+	ImGui::PopStyleVar(2);
+	ImGui::PopStyleColor(2);
+
+	ImGui::Spacing();
+}
+
+// Warning banner shown when the chaperone geometry in the saved profile has a
+// corrupt size (not a multiple of 12). Auto-apply is disabled when this fires.
+// Dismissed implicitly once the user saves a new chaperone via "Copy bounds"
+// (g_chaperoneGeometrySizeMismatch stays true for the lifetime of the process
+// but chaperone.valid becomes true after the copy, so we hide the banner then).
+void DrawChaperoneLoadFailedBanner() {
+	if (!g_chaperoneGeometrySizeMismatch) return;
+	// Once the user copies fresh bounds the problem is resolved in-session.
+	if (CalCtx.chaperone.valid) return;
+
+	ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.40f, 0.10f, 0.10f, 1.0f));
+	ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.90f, 0.35f, 0.35f, 1.0f));
+	ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 6.0f));
+
+	const float bannerHeight = ImGui::GetFrameHeightWithSpacing() * 2.0f;
+	if (ImGui::BeginChild("ChaperoneFailBanner",
+			ImVec2(ImGui::GetContentRegionAvail().x, bannerHeight),
+			ImGuiChildFlags_Border)) {
+		ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.75f, 1.0f),
+			"Saved chaperone could not be loaded (corrupted size). Auto-apply is disabled.");
+		ImGui::TextColored(ImVec4(0.90f, 0.70f, 0.70f, 1.0f),
+			"Press \"Copy chaperone bounds to profile\" to save a new one and restore auto-apply.");
 	}
 	ImGui::EndChild();
 
