@@ -29,6 +29,7 @@ The most recent release is at the top.
 - **build:** Track BuildStamp.h with a dev fallback (aef2b28)
 - **overlay:** Keep umbrella tab bar reachable from continuous mode and load DroidSans (a125289)
 - **overlay:** Rebrand footer to OpenVR-Pair and silence top VR banner in umbrella (d486246)
+- **overlay:** Surface VR + profile + chaperone failures instead of silent fall-through (ae6b6c3)
 
 ---
 
