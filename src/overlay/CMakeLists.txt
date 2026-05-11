@@ -13,6 +13,16 @@ if(OPENVR_PAIR_BUILD_UMBRELLA)
         endif()
     endif()
 
+    set(SPACECAL_BUILDSTAMP_HEADER "${CMAKE_CURRENT_LIST_DIR}/BuildStamp.h")
+    if(NOT EXISTS "${SPACECAL_BUILDSTAMP_HEADER}")
+        file(WRITE "${SPACECAL_BUILDSTAMP_HEADER}"
+"// Fallback stamp for umbrella cmake builds.\n"
+"// Set by OpenVR-PairDriver's build.ps1 when running a real release.\n"
+"#pragma once\n"
+"#define SPACECAL_BUILD_STAMP \"0.0.0.0-DEV\"\n"
+"#define SPACECAL_BUILD_CHANNEL \"dev\"\n")
+    endif()
+
     file(GLOB SPACECAL_UMBRELLA_SOURCES CONFIGURE_DEPENDS
         "${CMAKE_CURRENT_LIST_DIR}/*.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/*.h")
