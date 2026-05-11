@@ -21,6 +21,8 @@ The most recent release is at the top.
 - **deps:** Bump PairDriver for InputHealth range snapshots (2026.5.9.0-B032) (fab2048)
 - **inputhealth:** Split diagnostics panel modules (786eca3)
 - Revert "feat(overlay): wrap calibration UI in shell card and report metadata" (1c83313)
+- **overlay:** Hand prediction + finger smoothing off to Smoothing (v12) (32fd5fb)
+- Rename OpenVR modules to WK variants (c22ce04)
 
 ### Fixed
 - **build:** Track BuildStamp.h with a dev fallback (aef2b28)
