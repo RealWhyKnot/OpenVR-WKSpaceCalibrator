@@ -20,6 +20,7 @@ The most recent release is at the top.
 - **deps:** Bump OpenVR-PairDriver for InputHealth safety (ee049e6)
 - **deps:** Bump PairDriver for InputHealth range snapshots (2026.5.9.0-B032) (fab2048)
 - **inputhealth:** Split diagnostics panel modules (786eca3)
+- Revert "feat(overlay): wrap calibration UI in shell card and report metadata" (1c83313)
 
 ### Fixed
 - **build:** Track BuildStamp.h with a dev fallback (aef2b28)
