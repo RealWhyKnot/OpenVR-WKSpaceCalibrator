@@ -24,6 +24,7 @@ The most recent release is at the top.
 
 ### Fixed
 - **build:** Track BuildStamp.h with a dev fallback (aef2b28)
+- **overlay:** Keep umbrella tab bar reachable from continuous mode and load DroidSans (a125289)
 
 ---
 
