@@ -12,7 +12,6 @@
 #include "Updater.h"
 #include "MotionRecording.h"
 #include "Wizard.h"
-#include "InputHealthPanel.h"
 
 #include <thread>
 #include <string>
@@ -23,7 +22,7 @@
 #include <imgui/imgui.h>
 #include "imgui_extensions.h"
 
-extern IPCClient Driver;
+extern SCIPCClient Driver;
 
 void TextWithWidth(const char *label, const char *text, float width);
 void DrawVectorElement(const std::string id, const char* text, double* value, int defaultValue = 0, const char* defaultValueStr = " 0 ");
@@ -50,6 +49,7 @@ static void DrawVRWaitingBanner();
 static void CCal_DrawLogsPanel();
 static void DrawDiagnosticsPanel(ImVec2 panelSize);
 static void DrawTipPanel(ImVec2 panelSize);
+static void BuildMainWindowContents(bool runningInOverlay_);
 
 // Forward decls for the tab content called from both modes. CCal_BasicInfo /
 // CCal_DrawSettings / CCal_DrawPredictionSuppression were declared near the
@@ -59,7 +59,6 @@ void CCal_BasicInfo();
 void CCal_DrawSettings();
 void CCal_DrawPredictionSuppression();
 void CCal_DrawFingerSmoothing();
-void CCal_DrawInputHealth();
 static void OneShot_DrawSettings();
 
 static bool runningInOverlay;
@@ -67,7 +66,7 @@ static bool runningInOverlay;
 // Update-check state. Lives for the lifetime of the process. We kick off the
 // initial check on the first BuildMainWindow tick so we don't slow startup.
 // The Updater is reused across retries (it transitions back to Idle on
-// failure when DownloadAndLaunch is called again — see Updater::DownloadAndLaunch).
+// failure when DownloadAndLaunch is called again -- see Updater::DownloadAndLaunch).
 static spacecal::updates::UpdateChecker s_updateChecker;
 static spacecal::updates::Updater s_updater;
 static bool s_updateInitialKicked = false;
@@ -76,9 +75,6 @@ static double s_updateBannerHiddenUntil = 0.0;
 
 void BuildMainWindow(bool runningInOverlay_)
 {
-	runningInOverlay = runningInOverlay_;
-	bool continuousCalibration = CalCtx.state == CalibrationState::Continuous || CalCtx.state == CalibrationState::ContinuousStandby;
-
 	auto& io = ImGui::GetIO();
 
 	ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
@@ -99,6 +95,20 @@ void BuildMainWindow(bool runningInOverlay_)
 		ImGui::End();
 		return;
 	}
+
+	BuildMainWindowContents(runningInOverlay_);
+	ImGui::End();
+}
+
+void CCal_DrawTab()
+{
+	BuildMainWindowContents(false);
+}
+
+static void BuildMainWindowContents(bool runningInOverlay_)
+{
+	runningInOverlay = runningInOverlay_;
+	bool continuousCalibration = CalCtx.state == CalibrationState::Continuous || CalCtx.state == CalibrationState::ContinuousStandby;
 
 	ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImGui::GetStyleColorVec4(ImGuiCol_Button));
 
@@ -156,7 +166,6 @@ void BuildMainWindow(bool runningInOverlay_)
 		}
 	}
 	spacecal::wizard::Draw();
-	InputHealth_Tick();
 
 	if (continuousCalibration) {
 		BuildContinuousCalDisplay();
@@ -203,10 +212,6 @@ void BuildMainWindow(bool runningInOverlay_)
 					CCal_DrawFingerSmoothing();
 					ImGui::EndTabItem();
 				}
-				if (ImGui::BeginTabItem("Inputs")) {
-					CCal_DrawInputHealth();
-					ImGui::EndTabItem();
-				}
 				if (ImGui::BeginTabItem("Logs")) {
 					CCal_DrawLogsPanel();
 					ImGui::EndTabItem();
@@ -219,12 +224,11 @@ void BuildMainWindow(bool runningInOverlay_)
 	ShowVersionLine();
 
 	ImGui::PopStyleColor();
-	ImGui::End();
 }
 
 // Render a small filled circle aligned with the current text baseline. Used as
 // the connection-status dot in the version line. Drawn directly to the window
-// draw list so we don't have to fiddle with widget sizing — the caller manages
+// draw list so we don't have to fiddle with widget sizing -- the caller manages
 // SameLine/spacing.
 static void DrawStatusDot(ImU32 color, float radiusScale = 0.32f) {
 	ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -243,7 +247,7 @@ static void DrawStatusDot(ImU32 color, float radiusScale = 0.32f) {
 void ShowVersionLine() {
 	// Footer is two short rows:
 	//   row 1: Hover for tooltips. Right-click sliders to reset.
-	//   row 2: ● Driver: ...   |   Space Calibrator <build>   |   mode
+	//   row 2: Driver: ...   |   Space Calibrator <build>   |   mode
 	// The hover tip sits above so the more-prominent status row is
 	// visually anchored to the bottom edge of the window.
 	const float lineH  = ImGui::GetTextLineHeight();
@@ -278,7 +282,7 @@ void ShowVersionLine() {
 	} else {
 		DrawStatusDot(IM_COL32(220, 80, 80, 255));
 		ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.45f, 1.0f),
-			"Driver: disconnected — reinstall the SteamVR driver");
+			"Driver: disconnected -- reinstall the SteamVR driver");
 	}
 
 	ImGui::SameLine();
@@ -322,7 +326,7 @@ static void GetModeStatus(const char*& label, const char*& tooltip, ImVec4& acce
 		          "Hit \"Start Calibration\" or \"Continuous Calibration\" below to create one.";
 		accent = ImVec4(0.70f, 0.70f, 0.70f, 1.0f);
 	} else if (state == CalibrationState::ContinuousStandby) {
-		label = "standby — waiting for tracking";
+		label = "standby -- waiting for tracking";
 		tooltip = "Continuous calibration is on, but the reference or target tracker isn't currently\n"
 		          "reporting valid poses. Calibration resumes automatically when both come back online.";
 		accent = ImVec4(0.85f, 0.85f, 0.55f, 1.0f);
@@ -332,13 +336,13 @@ static void GetModeStatus(const char*& label, const char*& tooltip, ImVec4& acce
 		const bool searching = Metrics::consecutiveRejections.last() > 10.0;
 		const bool recentlyUpdated = sinceAccept >= 0.0 && sinceAccept < 5.0;
 		if (searching) {
-			label = "live — searching";
+			label = "live -- searching";
 			tooltip = "Continuous calibration is running but hasn't accepted a new estimate in a while.\n"
 			          "Usually means the user isn't moving enough to give the solver useful samples.\n"
 			          "Try slowly rotating + translating the target tracker through varied directions.";
 			accent = ImVec4(0.95f, 0.70f, 0.20f, 1.0f);
 		} else if (recentlyUpdated) {
-			label = "live — updating";
+			label = "live -- updating";
 			tooltip = "Continuous calibration is running and just accepted a fresh estimate.\n"
 			          "The driver is blending toward the new offset; if Recalibrate-on-movement is on,\n"
 			          "the blend only progresses while the device is actively moving.";
@@ -346,7 +350,7 @@ static void GetModeStatus(const char*& label, const char*& tooltip, ImVec4& acce
 		} else {
 			label = "live";
 			tooltip = "Continuous calibration is running and the current estimate is being applied.\n"
-			          "No recent updates needed — the calibration is stable.";
+			          "No recent updates needed -- the calibration is stable.";
 			accent = ImVec4(0.55f, 0.75f, 0.95f, 1.0f);
 		}
 	} else if (enabled && state == CalibrationState::None) {
@@ -403,7 +407,7 @@ static void DrawVRWaitingBanner() {
 			ImVec2(ImGui::GetContentRegionAvail().x, bannerHeight),
 			ImGuiChildFlags_Border)) {
 		ImGui::TextColored(ImVec4(1.0f, 0.95f, 0.80f, 1.0f),
-			"Waiting for SteamVR — calibration controls enable when tracking is live.");
+			"Waiting for SteamVR -- calibration controls enable when tracking is live.");
 	}
 	ImGui::EndChild();
 
@@ -458,7 +462,7 @@ static void DrawUpdateBanner() {
 
 		if (progress.state == DownloadState::Done) {
 			ImGui::TextColored(ImVec4(0.80f, 0.95f, 0.80f, 1.0f),
-				"Installer launched. Closing Space Calibrator…");
+				"Installer launched. Closing Space Calibrator...");
 			// Closing the program lets the installer replace the EXE without
 			// fighting Windows' file locks. Fire-and-forget; one tick is plenty
 			// to display the message before the main loop notices.
@@ -473,14 +477,14 @@ static void DrawUpdateBanner() {
 			if (progress.bytesTotal > 0)
 				frac = (float)((double)progress.bytesReceived / (double)progress.bytesTotal);
 
-			ImGui::Text("%s — %s / %s", label,
+			ImGui::Text("%s -- %s / %s", label,
 				FormatBytes(progress.bytesReceived).c_str(),
 				FormatBytes(progress.bytesTotal).c_str());
 
 			if (progress.state == DownloadState::Downloading) {
 				ImGui::ProgressBar(frac, ImVec2(-1.0f, 0.0f), "");
 			} else {
-				// Indeterminate-looking bar while we hash / launch — full bar
+				// Indeterminate-looking bar while we hash / launch -- full bar
 				// is wrong (we're not done) but a thin pulsing one needs more
 				// state than we want to track here. Just show 100% during the
 				// final brief steps; they finish in well under a second.
@@ -534,7 +538,7 @@ static void DrawUpdateBanner() {
 			if (info.installerSha256.empty()) {
 				ImGui::SameLine();
 				ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.40f, 1.0f),
-					"  (no SHA published — verify manually)");
+					"  (no SHA published -- verify manually)");
 			}
 		}
 	}
@@ -606,11 +610,6 @@ void BuildContinuousCalDisplay() {
 
 		if (ImGui::BeginTabItem("Fingers")) {
 			CCal_DrawFingerSmoothing();
-			ImGui::EndTabItem();
-		}
-
-		if (ImGui::BeginTabItem("Inputs")) {
-			CCal_DrawInputHealth();
 			ImGui::EndTabItem();
 		}
 
@@ -1193,7 +1192,7 @@ void CCal_DrawSettings() {
 			ImGui::EndGroupPanel();
 		}
 
-		// Tracker offset / Playspace scale stay in advanced — these are rarely
+		// Tracker offset / Playspace scale stay in advanced -- these are rarely
 		// touched by hand and live next to the per-axis math anyway.
 		{
 			ImVec2 panel_size_inner { panel_size.x - 11 * 2, 0};
@@ -1497,7 +1496,7 @@ void RebuildLogsList() {
 }
 
 // Format file age relative to "now" using FILETIME math. We don't bother with
-// localized strings — "5 min ago" / "2 hours ago" / "3 days ago" is plenty
+// localized strings -- "5 min ago" / "2 hours ago" / "3 days ago" is plenty
 // detail for picking the right log out of a list.
 std::string FormatFileAge(uint64_t mtimeFt) {
 	FILETIME nowFt{};
@@ -1592,7 +1591,7 @@ static void CCal_DrawLogsPanel() {
 	ImGui::SameLine();
 	if (Metrics::enableLogs) {
 		ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f),
-			" ● a fresh CSV is being written this session");
+			" -- a fresh CSV is being written this session");
 	} else {
 		ImGui::TextDisabled(" (off)");
 	}
@@ -1721,7 +1720,7 @@ static void CCal_DrawLogsPanel() {
 static bool DrawProfileMismatchBanner() {
 	if (!CalCtx.validProfile || CalCtx.enabled) return false;
 	const char* refSystem = GetPrettyTrackingSystemName(CalCtx.referenceTrackingSystem);
-	// The "actual" tracking system is whatever the current HMD reports — fall
+	// The "actual" tracking system is whatever the current HMD reports -- fall
 	// back to a plain "current HMD" wording when we can't read it cleanly.
 	std::string actualSystem;
 	if (auto vrSystem = vr::VRSystem()) {
@@ -1752,7 +1751,7 @@ static bool DrawProfileMismatchBanner() {
 	}
 	ImGui::SameLine();
 	if (ImGui::Button("Recalibrate")) {
-		// Same trigger BuildMenu uses for "Start Calibration" — kicks the state
+		// Same trigger BuildMenu uses for "Start Calibration" -- kicks the state
 		// machine into Begin via StartCalibration. The popup isn't relevant here
 		// since the user is already inside the continuous-cal window.
 		StartCalibration();
@@ -1785,11 +1784,11 @@ static void DrawDiagnosticsPanel(ImVec2 panelSize) {
 		s_lastWatchdogResetTime = now;
 	}
 
-	// Long-stall counter: HMD stalled for ≥30 ticks (~1.5 s). Previously the
+	// Long-stall counter: HMD stalled for >=30 ticks (~1.5 s). Previously the
 	// calibration tick purged the sample buffer at this point; reverted
 	// 2026-05-04 because the purge + warm-start re-anchor caused cumulative
 	// drift on every HMD off/on cycle. The counter remains as a diagnostic
-	// — frequent long-stalls still indicate a tracking-environment problem.
+	// -- frequent long-stalls still indicate a tracking-environment problem.
 	const int kHmdLongStallThreshold = 30;
 	const int curStalls = CalCtx.consecutiveHmdStalls;
 	if (curStalls >= kHmdLongStallThreshold && s_lastSeenStallCount < kHmdLongStallThreshold) {
@@ -1832,7 +1831,7 @@ static void DrawDiagnosticsPanel(ImVec2 panelSize) {
 	}
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip("HMD long-stall: the headset stopped reporting fresh poses for ~1.5 seconds or more\n"
-		                  "(SteamVR hiccup, tracking loss, headset taken off). Diagnostic counter only —\n"
+		                  "(SteamVR hiccup, tracking loss, headset taken off). Diagnostic counter only --\n"
 		                  "calibration is no longer disturbed during a stall (rolling sample buffer ages out\n"
 		                  "stale samples naturally on recovery). Frequent long-stalls suggest a tracking-\n"
 		                  "environment problem (lighting, USB bandwidth, etc).");
@@ -2240,7 +2239,7 @@ void CCal_BasicInfo() {
 	// Calibration.cpp::CalibrationTick. Per
 	// feedback_no_button_to_recover_broken_tracking.md (memory): a recovery
 	// flow whose precondition is broken tracking can't require interaction
-	// from the user via that same broken tracking — auto-detect + auto-fix
+	// from the user via that same broken tracking -- auto-detect + auto-fix
 	// is the only correct shape.)
 
 	if (ImGui::BeginTable("##CCal_Cancel", 3, 0, ImVec2(width * scale, ImGui::GetTextLineHeight() * 2))) {
@@ -2256,7 +2255,7 @@ void CCal_BasicInfo() {
 
 		ImGui::TableSetColumnIndex(1);
 		// User-facing rename of the old "Debug: Force break calibration"
-		// button. Same underlying call — pushing a random offset forces the
+		// button. Same underlying call -- pushing a random offset forces the
 		// solver to re-search from samples instead of trusting the current
 		// estimate, which is what "restart sampling" means in practice.
 		if (ImGui::Button("Restart sampling", ImVec2(-FLT_MIN, 0.0f))) {
@@ -2583,13 +2582,13 @@ void BuildMenu(bool runningInOverlay)
 		if (isCollecting) {
 			ImGui::Spacing();
 			ImGui::Separator();
-			// Phase banner. The two-phase one-shot flow (Rotation → Translation)
+			// Phase banner. The two-phase one-shot flow (Rotation -> Translation)
 			// is invisible to the user otherwise; surfacing the active phase and
 			// what motion to do removes the "I waved but the bar didn't move"
 			// confusion that the old combined-gate flow created.
 			if (CalCtx.state == CalibrationState::Rotation) {
 				ImGui::TextDisabled("Phase 1 of 2: Rotation");
-				ImGui::TextWrapped("Rotate the tracker through different orientations (≥ 90° between some pair).");
+				ImGui::TextWrapped("Rotate the tracker through different orientations (>= 90 deg between some pair).");
 			} else if (CalCtx.state == CalibrationState::Translation) {
 				ImGui::TextDisabled("Phase 2 of 2: Translation");
 				ImGui::TextWrapped("Wave the tracker through ~30 cm on each of left/right, up/down, and forward/back.");
@@ -3007,7 +3006,7 @@ void TextWithWidth(const char *label, const char *text, float width)
 }
 
 // =============================================================================
-// Finger Smoothing tab — Index Knuckles per-bone slerp smoothing.
+// Finger Smoothing tab -- Index Knuckles per-bone slerp smoothing.
 //
 // The driver hooks IVRDriverInputInternal::UpdateSkeletonComponent (a private
 // Valve interface, reachable via GetGenericInterface; layout recovered by
@@ -3047,7 +3046,7 @@ void CCal_DrawFingerSmoothing()
 	auto &ctx = CalCtx;
 
 	ImGui::Text("Finger smoothing");
-	ImGui::TextDisabled("(Index Knuckles only — smooths per-frame finger bone updates before VRChat sees them.)");
+	ImGui::TextDisabled("(Index Knuckles only -- smooths per-frame finger bone updates before VRChat sees them.)");
 	ImGui::Spacing();
 
 	bool dirty = false;

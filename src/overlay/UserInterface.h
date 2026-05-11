@@ -3,6 +3,7 @@
 #include <string>
 
 void BuildMainWindow(bool runningInOverlay);
+void CCal_DrawTab();
 void RequestImmediateRedraw();
 void RequestExit();
 

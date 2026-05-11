@@ -7,16 +7,16 @@
 #include "VRState.h"
 #include "WedgeDetector.h"   // ShouldFireRuntimeWedgeRecovery, kMaxPlausibleCalibrationMagnitudeCm
 #include "GeometryShiftDetector.h"  // IsCurrentErrorSpike, ShouldFireGeometryShiftRecovery
-#include "MotionGate.h"      // ShouldBlendCycle — auto-recovery snap decision
+#include "MotionGate.h"      // ShouldBlendCycle -- auto-recovery snap decision
 #include "LatencyEstimator.h"  // spacecal::latency::EstimateLagTimeDomain / EstimateLagGccPhat
-#include "TiltDiagnostic.h"    // spacecal::gravity::EvaluateTilt — sustained gravity-disagreement annotation
-#include "Wizard.h"          // spacecal::wizard::IsActive — gate the runtime wedge detector
+#include "TiltDiagnostic.h"    // spacecal::gravity::EvaluateTilt -- sustained gravity-disagreement annotation
+#include "Wizard.h"          // spacecal::wizard::IsActive -- gate the runtime wedge detector
                              // off while the user is mid-setup so it can't disrupt them.
-#include "RestLockedYaw.h"   // spacecal::rest_yaw::* — rest-locked yaw drift correction
+#include "RestLockedYaw.h"   // spacecal::rest_yaw::* -- rest-locked yaw drift correction
                              // (continuous-cal-OFF mode). Default OFF; opt-in via Experimental tab.
-#include "RecoveryDeltaBuffer.h" // spacecal::recovery_delta::* — predictive pre-correction
+#include "RecoveryDeltaBuffer.h" // spacecal::recovery_delta::* -- predictive pre-correction
                              // from the rolling buffer of 30 cm relocalization events.
-#include "ReanchorChiSquareDetector.h" // spacecal::reanchor_chi::* — sub-30 cm re-anchor
+#include "ReanchorChiSquareDetector.h" // spacecal::reanchor_chi::* -- sub-30 cm re-anchor
                              // sub-detector. Detection-only; freezes recs A/C on candidate.
 
 #include <string>
@@ -173,11 +173,11 @@ static void TickCpuPressureMonitor(double computationTimeMs, double now_s) {
 // driver's existing snap path in SetDeviceTransform (transform := target,
 // no blending). Without this, the post-recovery cal would be smoothly
 // interpolated through whatever wrong steady-state the driver had cached
-// — defeating the point of recovery.
+// -- defeating the point of recovery.
 //
 // Rationale (per feedback_calibration_blending_request.md): blending is
 // for smooth steady-state convergence. Recovery events are catastrophic
-// state changes — smoothing them is wrong. Snap on the next tick, then
+// state changes -- smoothing them is wrong. Snap on the next tick, then
 // resume normal blending.
 //
 // Cleared by ScanAndApplyProfile after consuming. One-shot.
@@ -257,7 +257,7 @@ void CalibrationContext::UpdateAutoLockDetector(
 	// observed relative-pose stability. A flip while the user thinks they're
 	// in OFF mode (e.g. from misreading the UI) would change which constraint
 	// CalibrateByRelPose is gated against. Fires only on transitions, so
-	// healthy AUTO sessions produce one annotation per actual flip — not a
+	// healthy AUTO sessions produce one annotation per actual flip -- not a
 	// flood. Use grep `auto_lock_flip:` on session logs to spot any flapping.
 	if (prevLocked != autoLockEffectivelyLocked) {
 		char flipbuf[200];
@@ -289,7 +289,7 @@ CalibrationContext::Speed CalibrationContext::ResolvedCalibrationSpeed() const {
 		return calibrationSpeed;
 	}
 
-	// Sticky state. Mutable-via-cast is fine here — these are pure caches.
+	// Sticky state. Mutable-via-cast is fine here -- these are pure caches.
 	static Speed s_lastResolved = SLOW;          // safe default before first sample
 	static Speed s_pendingResolved = SLOW;
 	static int s_pendingTicks = 0;
@@ -327,7 +327,7 @@ CalibrationContext::Speed CalibrationContext::ResolvedCalibrationSpeed() const {
 
 	return s_lastResolved;
 }
-IPCClient Driver;
+SCIPCClient Driver;
 static protocol::DriverPoseShmem shmem;
 
 namespace {
@@ -453,8 +453,8 @@ namespace {
 		// Normalise the composed quaternion. Eigen's quaternion multiplication
 		// does not auto-normalise, so over a multi-minute session the cumulative
 		// scale drift from non-unit-norm input quaternions (some drivers emit
-		// quaternions slightly off the unit sphere — Quest Pro's IMU fusion
-		// occasionally produces ~10⁻⁵ scale errors per frame) compounds into a
+		// quaternions slightly off the unit sphere -- Quest Pro's IMU fusion
+		// occasionally produces tiny scale errors per frame) compounds into a
 		// non-orthonormal rotation matrix at xform.linear(), which the Kabsch /
 		// SVD downstream silently treats as a mild shear. The metrics-side
 		// composer at the bottom of CalibrationTick already does this; the
@@ -539,12 +539,12 @@ namespace {
 		target = ctx.devicePoses[ctx.targetID];
 
 		// Validity gate. Previously this was `if (!poseIsValid && result != Running_OK)`,
-		// i.e. "fail only when BOTH signals say bad" — permissive. The case the
+		// i.e. "fail only when BOTH signals say bad" -- permissive. The case the
 		// permissive form silently accepts is the one we care about: Quest Pro
 		// (and other inside-out drivers) regularly report `poseIsValid == false`
 		// for one tick during a relocalization while still claiming
 		// `result == Running_OK`. The pose for that single tick is genuinely
-		// invalid — using it injects a phantom translation that the calibration
+		// invalid -- using it injects a phantom translation that the calibration
 		// math sees as legitimate motion and tries to fit. Tighten to `||`:
 		// reject if EITHER signal says bad.
 		//
@@ -592,9 +592,9 @@ namespace {
 		// Manual inter-system latency compensation. With a non-zero offset we shift the
 		// reference pose forward/backward in time to align with the *effective* moment
 		// the target sample represents. We use velocity extrapolation rather than a
-		// history buffer (cheaper, bounded, and good enough for the small ±100 ms range
+		// history buffer (cheaper, bounded, and good enough for the small +/-100 ms range
 		// the UI exposes). If velocity data is invalid the reference pose is left
-		// un-shifted for this tick — better one bad-but-bounded sample than a thrown
+		// un-shifted for this tick -- better one bad-but-bounded sample than a thrown
 		// exception or a teleporting reference.
 		//
 		// Bit-for-bit identical behaviour to before this feature is preserved when the
@@ -609,9 +609,9 @@ namespace {
 		{
 			LARGE_INTEGER freq;
 			QueryPerformanceFrequency(&freq);
-			// Δshmem = how stale the reference pose is relative to the target pose
-			// (target ahead → positive). Then we additionally subtract the user's
-			// configured offset. We extrapolate the reference forward by this Δ to put
+			// Delta shmem = how stale the reference pose is relative to the target pose
+			// (target ahead -> positive). Then we additionally subtract the user's
+			// configured offset. We extrapolate the reference forward by this delta to put
 			// it on the same effective timeline as the target.
 			double shmemDeltaSec =
 				double(ctx.devicePoseSampleTimes[ctx.targetID].QuadPart -
@@ -627,7 +627,7 @@ namespace {
 		// Auto-detection feed: push linear-speed magnitudes for both devices into the
 		// rolling history buffers. The cross-correlation in CalibrationTick consumes
 		// these to estimate the lag between reference and target signal arrival.
-		// Linear velocity is preferred over angular for these speed signals — angular
+		// Linear velocity is preferred over angular for these speed signals -- angular
 		// velocity from optical trackers is often filter-shaped (low-pass), which
 		// blurs the transient that the cross-correlator looks for.
 		auto speedFromVel = [](const double v[3]) -> double {
@@ -757,7 +757,7 @@ namespace {
 	// versioned releases like "OpenVR-SmoothTracking-v2.exe") without us having to
 	// chase every rename. Kept narrow to avoid false positives: a process is
 	// counted as a smoothing tool only if its name contains BOTH "smooth" and
-	// "track" — the combination is specific enough that no unrelated software in
+	// "track" -- the combination is specific enough that no unrelated software in
 	// our use cases will trip the heuristic.
 	struct SubstringSmoothingPattern {
 		const wchar_t* requireA;
@@ -859,11 +859,11 @@ void InitCalibrator()
 	SendFingerSmoothingConfig(CalCtx);
 }
 
-// Called by IPCClient::SendBlocking after a successful reconnect. vrserver crashing
+// Called by SCIPCClient::SendBlocking after a successful reconnect. vrserver crashing
 // and respawning destroys the named file mapping that backs the shmem segment; the
 // overlay's mapped view silently detaches and ReadNewPoses begins reading zeros.
 // Tearing down and reopening the segment restores the link to the new driver process.
-// On Open() failure we leave shmem in a closed state — the next reconnect will retry,
+// On Open() failure we leave shmem in a closed state -- the next reconnect will retry,
 // and ReadNewPoses already guards against pData == nullptr by throwing.
 void ReopenShmem()
 {
@@ -903,7 +903,7 @@ namespace {
 	std::string g_lastTargetSystem;
 	bool g_lastEnabled = false;
 
-	// AlignmentSpeedParams dedupe — avoid spamming the driver with identical params.
+	// AlignmentSpeedParams dedupe -- avoid spamming the driver with identical params.
 	protocol::AlignmentSpeedParams g_lastAlignmentSpeed{};
 	bool g_alignmentSpeedSent = false;
 
@@ -1027,7 +1027,7 @@ namespace {
 	// the runtime's tracking universe only change when the runtime re-origins
 	// (chaperone reset, SetSeatedZeroPose, etc.). When ALL base stations in a
 	// tracking system shift by the same rigid delta D between two consecutive
-	// ticks, that's a re-origin -- we apply D (or D⁻¹, depending on which
+	// ticks, that's a re-origin -- we apply D (or D-^-1, depending on which
 	// system shifted) to the stored calibration so body trackers stay aligned
 	// with the user's physical position.
 	//
@@ -1065,7 +1065,7 @@ namespace {
 	// Apply a universe shift D to every calibration whose ref or target
 	// tracking system matches `system`. The math:
 	//   reference world shifted by D => R_new = D * R_old
-	//   target    world shifted by D => R_new = R_old * D⁻¹
+	//   target    world shifted by D => R_new = R_old * D-^-1
 	// Primary calibration uses CalCtx.referenceTrackingSystem and
 	// CalCtx.targetTrackingSystem. Each AdditionalCalibration only stores
 	// targetTrackingSystem; its reference is implicitly the same as the
@@ -1322,7 +1322,7 @@ namespace {
 		double lastFireRotRad = 0.0;
 
 		// Last time auto-recovery actually clobbered the calibration. Throttled
-		// separately from the 5-second logging fire — the cost of a too-eager
+		// separately from the 5-second logging fire -- the cost of a too-eager
 		// auto-recover is much higher than a too-eager log line. Continuous-cal
 		// needs uninterrupted time to converge after each recover, so we keep
 		// at least 30s between consecutive auto-recovers.
@@ -1511,7 +1511,7 @@ namespace {
 		if (!hmdValid) {
 			// Tracking dropout. Drop the cache so we don't compare across
 			// the dropout (which would produce a spurious jump). Also stamp
-			// the dropout time — the auto-recovery gate uses it to enforce
+			// the dropout time -- the auto-recovery gate uses it to enforce
 			// a post-stall grace window so we don't double-tap the existing
 			// stall-recovery flow's StartContinuousCalibration.
 
@@ -1743,7 +1743,7 @@ namespace {
 		//
 		// Background: continuous-cal can converge to a "self-consistent fit
 		// at the wrong offset" after a Quest re-localization. Once wedged,
-		// continuous-cal cannot recover on its own — the saved relative
+		// continuous-cal cannot recover on its own -- the saved relative
 		// pose constraint pulls every refinement back to the bad neighborhood.
 		// Until 2026-05-02 the only fix was to restart the overlay and
 		// re-do calibration manually. This block makes recovery automatic.
@@ -1761,19 +1761,19 @@ namespace {
 		// since clobbering a working cal is bad and we want zero false-fires.
 		//
 		// Recovery procedure:
-		//   1. calibration.Clear() — wipes m_estimatedTransformation,
+		//   1. calibration.Clear() -- wipes m_estimatedTransformation,
 		//      m_isValid, m_samples, m_refToTargetPose, m_relativePosCalibrated.
 		//   2. CalCtx.refToTargetPose / relativePosCalibrated reset, so the
 		//      restart in step 4 doesn't immediately re-apply the saved bad
 		//      relative-pose constraint via setRelativeTransformation.
-		//   3. SaveProfile() — persist the cleared state. Without this, a
+		//   3. SaveProfile() -- persist the cleared state. Without this, a
 		//      subsequent program restart would re-load the bad cal from
 		//      disk and the recovery would only have helped the live session.
-		//   4. StartContinuousCalibration() — restart cold. Continuous-cal
+		//   4. StartContinuousCalibration() -- restart cold. Continuous-cal
 		//      will bootstrap from new pose pairs and converge to the
 		//      correct (post-relocalization) calibration within seconds.
 		//
-		// User feedback: the fresh-start period IS visible — body trackers
+		// User feedback: the fresh-start period IS visible -- body trackers
 		// will appear at their lighthouse-system positions for a few seconds
 		// before the new fit locks in. That's a much better outcome than
 		// "calibration is permanently 86 cm off until you restart the
@@ -1792,7 +1792,7 @@ namespace {
 		const bool throttleOK        = (now - s.lastAutoRecoverTime) >= kRelocAutoRecoverThrottleSec;
 
 		// If `fired` is true (a relocalization log line was emitted) but a
-		// gate blocked the recovery, log WHY — gives us debug evidence for
+		// gate blocked the recovery, log WHY -- gives us debug evidence for
 		// every borderline event so we can tune thresholds against real data
 		// instead of guessing. Throttled to once per fire (the fire itself
 		// is throttled to 5s by the existing code), so this won't flood.
@@ -2327,7 +2327,7 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 	// sets g_snapNextProfileApply=true so the very next profile-apply cycle sends
 	// every per-ID payload with lerp=false (driver snaps transform := target rather
 	// than smoothly interpolating). Fallback payloads have no lerp field so they
-	// can't snap directly — but in practice every device that needs the cal has a
+	// can't snap directly -- but in practice every device that needs the cal has a
 	// per-ID slot by the time recovery fires, so per-ID snap covers the user-visible
 	// case. Captured at the top of the function and consumed at the end so all
 	// per-ID sends in this cycle see the same value.
@@ -2373,7 +2373,7 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 
 	// Push the per-tracking-system fallback so any device on `targetTrackingSystem`
 	// that connects between scans inherits the calibrated offset on its first pose
-	// update — without waiting for the next per-ID scan. The fallback's freeze flag
+	// update -- without waiting for the next per-ID scan. The fallback's freeze flag
 	// fires whenever an external smoothing tool was detected and auto-suppress is on:
 	// any newly-connected matching-system tracker (handled exclusively by the
 	// fallback path until the next 1Hz scan tick promotes it to a per-ID transform)
@@ -2544,7 +2544,7 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		};
 		// During continuous calibration, lerp toward the smoothly-updating target so
 		// the active offset doesn't snap on every cycle. EXCEPT when this is a freshly
-		// adopted device — those need to snap into place rather than ramping in from
+		// adopted device -- those need to snap into place rather than ramping in from
 		// identity, which would look like a slow drift to the user. ALSO except when
 		// auto-recovery just fired (snapThisCycle): the recovery's brand-new cal must
 		// land discontinuously, blending it would defeat the recovery.
@@ -2584,7 +2584,7 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		}
 		payload.predictionSmoothness = smoothness;
 
-		// Motion-gated blend — when on, the driver-side BlendTransform's lerp
+		// Motion-gated blend -- when on, the driver-side BlendTransform's lerp
 		// only advances proportional to detected per-frame motion. Hides offset
 		// shifts in the user's natural movement; eliminates "phantom drift" while
 		// stationary. Default on at the profile level.
@@ -2595,7 +2595,7 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		// Record this ID as adopted (it's receiving a per-target-system transform with
 		// enabled=true). g_lastSeenSerial[id] is freshly populated above; pair it with
 		// the model name for log readability. RenderModel falls back to empty string
-		// on failure — we don't gate the log on that.
+		// on failure -- we don't gate the log on that.
 		AdoptedTracker tracker;
 		tracker.serial = g_lastSeenSerial[id];
 		char modelBuf[256] = {0};
@@ -2641,7 +2641,7 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		}
 	}
 
-	// Consume the one-shot auto-recovery snap flag — only after every per-ID
+	// Consume the one-shot auto-recovery snap flag -- only after every per-ID
 	// payload in this cycle has been sent, so the snap reaches all devices.
 	// Subsequent cycles return to normal lerp behaviour.
 	if (snapThisCycle) {
@@ -2729,14 +2729,14 @@ void CalibrationTick(double time)
 	// for memory outside the array. We tolerate -1 (the not-yet-assigned sentinel)
 	// because state machines below explicitly handle that, but anything else that
 	// isn't in [0, k_unMaxTrackedDeviceCount) means we cannot run any per-device
-	// logic this tick — bail out and try again next tick.
+	// logic this tick -- bail out and try again next tick.
 	const int32_t maxId = (int32_t)vr::k_unMaxTrackedDeviceCount;
 	auto idInRangeOrUnset = [maxId](int32_t id) {
 		return id == -1 || (id >= 0 && id < maxId);
 	};
 	if (!idInRangeOrUnset(ctx.referenceID) || !idInRangeOrUnset(ctx.targetID)) {
 		// Defensive reset: a corrupted ID is unrecoverable for this tick. Don't
-		// touch state — we just skip the tick so the next AssignTargets() call can
+		// touch state -- we just skip the tick so the next AssignTargets() call can
 		// reseat the IDs cleanly.
 		return;
 	}
@@ -2839,7 +2839,7 @@ void CalibrationTick(double time)
 				}
 
 				if (fire) {
-					CalCtx.Log("Tracking geometry shifted — restarting calibration\n");
+					CalCtx.Log("Tracking geometry shifted -- restarting calibration\n");
 					calibration.Clear();
 					ctx.state = CalibrationState::ContinuousStandby;
 					ctx.relativePosCalibrated = false;
@@ -2883,7 +2883,7 @@ void CalibrationTick(double time)
 					ctx.estimatedLatencyOffsetMs = 0.7 * ctx.estimatedLatencyOffsetMs + 0.3 * lagMs;
 					// Forensic diagnostic for audit row #12 (project_upstream_regression_audit_2026-05-04).
 					// The cross-correlation buffer doesn't reset across HMD
-					// stalls — `dur` here can span the stall duration while
+					// stalls -- `dur` here can span the stall duration while
 					// `intervals` is bounded by buffer size, producing a
 					// deflated sample rate and inflating lagMs. The 200 ms
 					// clamp above bounds this, but the EMA can still drift
@@ -2915,7 +2915,7 @@ void CalibrationTick(double time)
 
 			// Annotate the debug log on every detection state change. This is
 			// invaluable when triaging "smoothing tool wasn't detected" reports
-			// — the log will show whether the detector saw the process at all.
+			// -- the log will show whether the detector saw the process at all.
 			char ann[256];
 			if (detected) {
 				snprintf(ann, sizeof ann,
@@ -2990,7 +2990,7 @@ void CalibrationTick(double time)
 		// REVERTED 2026-05-04: previously, after MaxHmdStalls=30 ticks of stalled
 		// HMD tracking, the sample buffer was purged via calibration.Clear() and
 		// state was demoted to ContinuousStandby. The intent was "stale samples no
-		// longer represent reality" — but the actual effect was much worse than
+		// longer represent reality" -- but the actual effect was much worse than
 		// the problem it solved: on stall recovery, StartContinuousCalibration()
 		// re-applies the saved refToTargetPose warm-start (relativePosCalibrated
 		// is NOT reset, asymmetric vs the geometry-shift detector at line 2120
@@ -3003,7 +3003,7 @@ void CalibrationTick(double time)
 		// events at t=1918 (56 ticks) and t=2096 (95 ticks) each produced a 7-9 cm
 		// Z-axis shift in posOffset_currentCal IMMEDIATELY post-recovery, with the
 		// cal magnitude climbing toward the wedge bound across the session.
-		// Upstream (hyblocker) just `return`s on stall — no clear, no demote — and
+		// Upstream (hyblocker) just `return`s on stall -- no clear, no demote -- and
 		// the user reports this drift didn't happen on the old fork.
 		//
 		// Now matching upstream behavior: just return. Stale samples in the rolling
@@ -3164,22 +3164,22 @@ void CalibrationTick(double time)
 	//
 	// Earlier this was a single combined gate ("both diversities >= 70 % or
 	// keep rolling"). That trapped users in an unwinnable game with the
-	// rolling 250-sample buffer: rotate first → rotation samples age out
-	// before translation samples accumulate; translate first → vice versa.
+	// rolling 250-sample buffer: rotate first -> rotation samples age out
+	// before translation samples accumulate; translate first -> vice versa.
 	// The user-visible symptom was the "Translation %" bar that "never
 	// reaches 100" because the buffer recycled rotation-rich content out
 	// before the user could fill the translation half.
 	//
 	// Two-phase flow:
 	//   Rotation phase: gate on rotationDiversity only. Buffer rolls until
-	//   the user has rotated through ≥ 90° between some pair of samples.
+	//   the user has rotated through >= 90 deg between some pair of samples.
 	//   When the gate passes, freeze the buffer (FreezeRotationPhaseSamples)
 	//   and transition to Translation. The freeze preserves the rotation
 	//   samples for the final solve regardless of how slowly the user fills
 	//   the translation half.
 	//
 	//   Translation phase: gate on translationDiversity only, computed on a
-	//   fresh live buffer. Buffer rolls until the user has waved ≥ 30 cm on
+	//   fresh live buffer. Buffer rolls until the user has waved >= 30 cm on
 	//   every axis. When the gate passes, fall through to ComputeOneshot,
 	//   which splices the frozen rotation samples back in for the math.
 	if (CalCtx.state == CalibrationState::Rotation) {
@@ -3400,7 +3400,7 @@ void CalibrationTick(double time)
 
 		CalCtx.Log("Finished calibration, profile saved\n");
 
-		// Runtime wedge detector REMOVED 2026-05-05 — fired in a 3-fire
+		// Runtime wedge detector REMOVED 2026-05-05 -- fired in a 3-fire
 		// reset loop on the user's Quest+Lighthouse setup whose legitimate
 		// continuous-cal convergence values (~265-295 cm) sit above any
 		// fixed magnitude threshold we picked. See
@@ -3429,7 +3429,7 @@ void CalibrationTick(double time)
 	// Hand the raw reference + target poses to the metrics writer so the v2 CSV
 	// columns get filled. Reconstructing these in the replay harness (tools/replay/)
 	// gives us the same Sample values that fed CalibrationCalc::PushSample, which
-	// is the whole point of the harness — the metric-level columns alone aren't
+	// is the whole point of the harness -- the metric-level columns alone aren't
 	// enough to re-run the math offline.
 	{
 		const vr::DriverPose_t& refPose = ctx.devicePoses[ctx.referenceID];
@@ -3587,7 +3587,7 @@ void DismissAutoRecoveryBanner() {
 	g_relocDetector.autoRecoverBannerDismissed = true;
 }
 
-// Wedge recovery — the canonical wipe routine. Used by both the Quest
+// Wedge recovery -- the canonical wipe routine. Used by both the Quest
 // re-localization auto-recovery (TickHmdRelocalizationDetector) and the
 // runtime wedge detector (CalibrationTick post-cal-update block).
 //
@@ -3602,7 +3602,7 @@ void DismissAutoRecoveryBanner() {
 //   - CalCtx.calibratedTranslation / calibratedRotation (the values that
 //     are actually persisted to the saved profile and applied to the
 //     driver via ScanAndApplyProfile). project_auto_recovery_2026-05-03.md
-//     called out that calibration.Clear() doesn't touch these — leaving
+//     called out that calibration.Clear() doesn't touch these -- leaving
 //     them wedged here is what made the earlier SaveProfile-after-Clear
 //     persist bad state. Zero them explicitly.
 //
@@ -3616,7 +3616,7 @@ void DismissAutoRecoveryBanner() {
 // last). Pass nullptr to suppress the user-facing log if the trigger is
 // ambient/silent (e.g. a runtime wedge clear that shouldn't surface UI text
 // per the 2026-05-04 "user notices nothing" directive). The metrics
-// annotation is the caller's responsibility — this helper deliberately
+// annotation is the caller's responsibility -- this helper deliberately
 // doesn't write one so each caller's grep key can differ.
 static void RecoverFromWedgedCalibration(const char* userFacingMessage) {
 	// Capture the prior cal state BEFORE we discard it, so the log line
@@ -3650,7 +3650,7 @@ static void RecoverFromWedgedCalibration(const char* userFacingMessage) {
 	// SetDeviceTransform handler will see payload.lerp=false and assign
 	// transform := targetTransform directly, bypassing BlendTransform.
 	// Without this, the recovery's brand-new cal would be smoothly
-	// interpolated through the driver's stale cached transform — which
+	// interpolated through the driver's stale cached transform -- which
 	// defeats the point of recovery (we WANT a discontinuity here).
 	g_snapNextProfileApply = true;
 
@@ -3673,7 +3673,7 @@ static void RecoverFromWedgedCalibration(const char* userFacingMessage) {
 //   the standing universe is then:
 //
 //     standing_pose = SZP^-1 * raw_pose
-//                   ↳ translation = R_szp^-1 * (raw_pos - t_szp)
+//                   -> translation = R_szp^-1 * (raw_pos - t_szp)
 //
 //   We want the user's HMD standing-pose translation to become (0, y, 0)
 //   in X/Z while preserving Y. Setting:
@@ -3681,7 +3681,7 @@ static void RecoverFromWedgedCalibration(const char* userFacingMessage) {
 //     t_szp_new = t_szp_old + R_szp * (hmd_standing_x, 0, hmd_standing_z)
 //
 //   makes hmd_standing_new = hmd_standing_old - (hmd_standing_x, 0, hmd_standing_z)
-//                          = (0, hmd_standing_y, 0). ✓
+//                          = (0, hmd_standing_y, 0).
 //
 //   For the common case where SZP's rotation is yaw-only (room
 //   calibration's typical state), R_szp * (x, 0, z) is just (x, 0, z)
@@ -3718,7 +3718,7 @@ bool RecenterPlayspaceToCurrentHmd() {
 	vr::HmdMatrix34_t szp{};
 	vr::VRChaperoneSetup()->GetWorkingStandingZeroPoseToRawTrackingPose(&szp);
 
-	// Δ = R_szp * (hmd_standing_x, 0, hmd_standing_z). Use the X/Z columns
+	// Delta = R_szp * (hmd_standing_x, 0, hmd_standing_z). Use the X/Z columns
 	// of R_szp's row-major 3x3 (the [_][0] and [_][2] columns).
 	const float dx = szp.m[0][0] * hmdStandingX + szp.m[0][2] * hmdStandingZ;
 	const float dz = szp.m[2][0] * hmdStandingX + szp.m[2][2] * hmdStandingZ;
@@ -3736,7 +3736,7 @@ bool RecenterPlayspaceToCurrentHmd() {
 	vr::VRChaperoneSetup()->CommitWorkingCopy(vr::EChaperoneConfigFile_Live);
 
 	// Log enough that a debug-log reader can verify the action did what was
-	// intended: HMD pose pre-shift, Δ applied, expected post-shift HMD
+	// intended: HMD pose pre-shift, delta applied, expected post-shift HMD
 	// position (~0, y, ~0 in X/Z if the math is right).
 	char logbuf[256];
 	snprintf(logbuf, sizeof logbuf,

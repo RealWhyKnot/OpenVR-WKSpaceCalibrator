@@ -1,13 +1,13 @@
 #include "stdafx.h"
 #include "IPCClient.h"
-#include "CalibrationMetrics.h"   // WriteLogAnnotation — see Connect() for why
+#include "CalibrationMetrics.h"   // WriteLogAnnotation -- see Connect() for why
                                   // we trace the IPC handshake outcomes.
 
 #include <cstdio>
 #include <string>
 
 // Forward-declared rather than #include "Calibration.h" because Calibration.h
-// pulls in <openvr.h> while IPCClient.cpp's translation unit (via Protocol.h)
+// pulls in <openvr.h> while SCIPCClient.cpp's translation unit (via Protocol.h)
 // already includes <openvr_driver.h>; the two openvr headers redefine common
 // constants and conflict at compile time. The single function we need is
 // signature-stable, so a local forward declaration is the safe minimum coupling.
@@ -52,20 +52,20 @@ static std::string LastErrorString(DWORD lastError)
 	return WStringToString(message);
 }
 
-IPCClient::~IPCClient()
+SCIPCClient::~SCIPCClient()
 {
 	if (pipe && pipe != INVALID_HANDLE_VALUE)
 		CloseHandle(pipe);
 }
 
-void IPCClient::Connect()
+void SCIPCClient::Connect()
 {
 	LPCTSTR pipeName = TEXT(OPENVR_PAIRDRIVER_CALIBRATION_PIPE_NAME);
 
 	WaitNamedPipe(pipeName, 1000);
 	pipe = CreateFile(pipeName, GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING, 0, 0);
 
-	// Annotate every pipe-open outcome — gives us evidence of whether the
+	// Annotate every pipe-open outcome -- gives us evidence of whether the
 	// IPC connection itself behaves differently across launch contexts. A
 	// script-launched instance with elevated parent might hit ACCESS_DENIED
 	// (5) where a Start-menu launch succeeds; a stale-pipe-from-prev-instance
@@ -111,7 +111,7 @@ void IPCClient::Connect()
 	}
 }
 
-protocol::Response IPCClient::SendBlocking(const protocol::Request &request)
+protocol::Response SCIPCClient::SendBlocking(const protocol::Request &request)
 {
 	try
 	{
@@ -121,14 +121,14 @@ protocol::Response IPCClient::SendBlocking(const protocol::Request &request)
 	catch (const BrokenPipeException &e)
 	{
 		// If we're already inside a reconnect attempt (e.g. handshake-after-reconnect
-		// hit another broken pipe), don't recurse — let the caller handle it.
+		// hit another broken pipe), don't recurse -- let the caller handle it.
 		if (inReconnect)
 			throw;
 
 		// SteamVR's vrserver may have restarted, leaving us with a stale pipe.
 		// Try to reconnect once and re-issue the request transparently.
 		fprintf(stderr,
-			"[IPCClient] Broken pipe (error %lu) during request; attempting reconnect...\n",
+			"[SCIPCClient] Broken pipe (error %lu) during request; attempting reconnect...\n",
 			(unsigned long)e.errorCode);
 
 		if (pipe && pipe != INVALID_HANDLE_VALUE)
@@ -145,14 +145,14 @@ protocol::Response IPCClient::SendBlocking(const protocol::Request &request)
 		catch (const std::exception &reconnectErr)
 		{
 			inReconnect = false;
-			fprintf(stderr, "[IPCClient] Reconnect failed: %s\n", reconnectErr.what());
+			fprintf(stderr, "[SCIPCClient] Reconnect failed: %s\n", reconnectErr.what());
 			throw std::runtime_error(std::string("IPC reconnect failed after broken pipe: ") + reconnectErr.what());
 		}
 		inReconnect = false;
 
 		// Re-open the pose shared-memory segment. vrserver crashing also destroys the
 		// named file mapping that backs it; without this, the overlay's mapped view
-		// silently detaches and ReadNewPoses returns zeros forever — the overlay loops
+		// silently detaches and ReadNewPoses returns zeros forever -- the overlay loops
 		// "healthy" with no data. Done after Connect() (and its handshake) succeeds so
 		// we know the new vrserver is up.
 		ReopenShmem();
@@ -164,7 +164,7 @@ protocol::Response IPCClient::SendBlocking(const protocol::Request &request)
 	}
 }
 
-void IPCClient::Send(const protocol::Request &request)
+void SCIPCClient::Send(const protocol::Request &request)
 {
 	DWORD bytesWritten;
 	BOOL success = WriteFile(pipe, &request, sizeof request, &bytesWritten, 0);
@@ -180,7 +180,7 @@ void IPCClient::Send(const protocol::Request &request)
 	}
 }
 
-protocol::Response IPCClient::Receive()
+protocol::Response SCIPCClient::Receive()
 {
 	protocol::Response response(protocol::ResponseInvalid);
 	DWORD bytesRead;
@@ -201,7 +201,7 @@ protocol::Response IPCClient::Receive()
 
 		// ERROR_MORE_DATA: the message in the pipe is larger than our Response buffer.
 		// The kernel keeps the unread tail queued for the next ReadFile, which would
-		// desync subsequent messages — every following Receive() would parse part of
+		// desync subsequent messages -- every following Receive() would parse part of
 		// this message's tail as a fresh response. Drain the rest of the message
 		// before throwing so the next caller starts on a clean message boundary.
 		char drainBuf[1024];
@@ -216,7 +216,7 @@ protocol::Response IPCClient::Receive()
 			{
 				throw BrokenPipeException("Pipe broken while draining oversized IPC response", drainErr);
 			}
-			// Some other error during drain — give up draining and surface the original
+			// Some other error during drain -- give up draining and surface the original
 			// SIZE_MISMATCH error so the caller knows something was wrong.
 			break;
 		}
