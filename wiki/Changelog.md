@@ -16,6 +16,8 @@ The most recent release is at the top.
 - **repo:** Own Calibration driver request module and umbrella overlay plugin (ed12403)
 - **overlay:** Wrap calibration UI in shell card and report metadata (499b9de)
 - **overlay:** Direct O(N) translation solve replaces pairwise IRLS (fe274c9)
+- **overlay:** Graduate three behavior-tuning flags to default-on (203839f)
+- **overlay:** Surface legacy translation solve toggle in Advanced tab (c4dada5)
 
 ### Changed
 - **deps:** Bump OpenVR-WKPairDriver for InputHealth safety (ee049e6)
