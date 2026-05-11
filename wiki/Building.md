@@ -1,6 +1,6 @@
 # Building
 
-OpenVR-SpaceCalibrator builds from source on Windows with Visual Studio 2022 and CMake. The repo's `build.ps1` orchestrates everything: submodule init, version stamping, CMake configure, MSBuild, and zip packaging. Local rebuilds typically take 30-60 seconds (incremental).
+OpenVR-WKSpaceCalibrator builds from source on Windows with Visual Studio 2022 and CMake. The repo's `build.ps1` orchestrates everything: submodule init, version stamping, CMake configure, MSBuild, and zip packaging. Local rebuilds typically take 30-60 seconds (incremental).
 
 ## Prerequisites
 
@@ -21,7 +21,7 @@ This produces:
 
 - `bin/artifacts/Release/SpaceCalibrator.exe` -- the overlay app.
 - `bin/driver_01spacecalibrator/bin/win64/driver_01spacecalibrator.dll` -- the SteamVR driver.
-- `release/OpenVR-SpaceCalibrator-<version>.zip` -- drop-in distribution: extract the `driver_01spacecalibrator/` folder into `<Steam>/steamapps/common/SteamVR/drivers/` and put `SpaceCalibrator.exe` wherever you want.
+- `release/OpenVR-WKSpaceCalibrator-<version>.zip` -- drop-in distribution: extract the `driver_01spacecalibrator/` folder into `<Steam>/steamapps/common/SteamVR/drivers/` and put `SpaceCalibrator.exe` wherever you want.
 
 Pass `-SkipZip` to skip the release-zip step on rapid local rebuilds.
 
@@ -64,7 +64,7 @@ Output goes to `bin/artifacts/Release/` (overlay + libs) and `bin/driver_01space
 
 ### 5. Release zip (skippable with `-SkipZip`)
 
-Packages the overlay + driver folder structure into `release/OpenVR-SpaceCalibrator-<version>.zip` and computes a SHA256 of the zip. The CI release workflow uses this hash in the GitHub release notes for verification.
+Packages the overlay + driver folder structure into `release/OpenVR-WKSpaceCalibrator-<version>.zip` and computes a SHA256 of the zip. The CI release workflow uses this hash in the GitHub release notes for verification.
 
 ## Submodules
 

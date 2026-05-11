@@ -217,7 +217,7 @@ void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	if (profileVersion > kProfileSchemaVersion) {
 		std::cerr << "Refusing to load profile: schema_version " << profileVersion
 			<< " is newer than this build supports (" << kProfileSchemaVersion << ")."
-			<< " Update OpenVR-SpaceCalibrator to use this profile." << std::endl;
+			<< " Update OpenVR-WKSpaceCalibrator to use this profile." << std::endl;
 		ctx.validProfile = false;
 		return;
 	}
@@ -778,7 +778,7 @@ static void LogRegistryResult(LSTATUS result)
 	std::cerr << "Opening registry key: " << message << std::endl;
 }
 
-static const char *RegistryKey = "Software\\OpenVR-SpaceCalibrator";
+static const char *RegistryKey = "Software\\OpenVR-WKSpaceCalibrator";
 
 // Strip the trailing null terminator that RegGetValueA reports as part of
 // the byte count for REG_SZ. Pure for testability — see
@@ -848,7 +848,7 @@ void LoadProfile(CalibrationContext &ctx)
 	// @TODO: Rewrite this to migrate configs from the registry to the spacecal directory
 	//        I don't know why whoever wrote this thought writing to the registry in the 2020s was a good idea...
 	//        NOTE: HKEY_CURRENT_USER_LOCAL_SETTINGS evaluates to	HKCU\Software\Classes\Local Settings
-	//              Settings are currently stored at				HKCU\Software\Classes\Local Settings\Software\OpenVR-SpaceCalibrator
+	//              Settings are currently stored at				HKCU\Software\Classes\Local Settings\Software\OpenVR-WKSpaceCalibrator
 	//
 	//        Profiles stored at this registry path are now versioned via the top-level
 	//        "schema_version" integer (see kProfileSchemaVersion). Legacy registry blobs

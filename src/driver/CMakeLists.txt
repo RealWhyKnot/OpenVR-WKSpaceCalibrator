@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.15)
 
-set(SPACECAL_PAIRDRIVER_ROOT "${OPENVR_PAIRDRIVER_ROOT}" CACHE PATH "OpenVR-PairDriver checkout")
+set(SPACECAL_PAIRDRIVER_ROOT "${OPENVR_PAIRDRIVER_ROOT}" CACHE PATH "OpenVR-WKPairDriver checkout")
 if(NOT SPACECAL_PAIRDRIVER_ROOT)
-	set(_sibling_pairdriver "${CMAKE_CURRENT_LIST_DIR}/../../../OpenVR-PairDriver")
+	set(_sibling_pairdriver "${CMAKE_CURRENT_LIST_DIR}/../../../OpenVR-WKPairDriver")
 	if(EXISTS "${_sibling_pairdriver}/src/driver/DriverModule.h")
 		get_filename_component(SPACECAL_PAIRDRIVER_ROOT "${_sibling_pairdriver}" ABSOLUTE)
 	else()
-		get_filename_component(SPACECAL_PAIRDRIVER_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../lib/OpenVR-PairDriver" ABSOLUTE)
+		get_filename_component(SPACECAL_PAIRDRIVER_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../lib/OpenVR-WKPairDriver" ABSOLUTE)
 	endif()
 endif()
 

@@ -145,7 +145,7 @@ jobs:
           if (-not (Test-Path $installer)) { throw "Installer not produced at $installer." }
 
           # Rename to include the version so the GitHub release asset name is unambiguous.
-          $named = Join-Path $PWD "install\OpenVR-SpaceCalibrator-$version-Setup.exe"
+          $named = Join-Path $PWD "install\OpenVR-WKSpaceCalibrator-$version-Setup.exe"
           if (Test-Path $named) { Remove-Item -Force $named }
           Move-Item -Path $installer -Destination $named
 
@@ -160,7 +160,7 @@ jobs:
         id: zip
         shell: pwsh
         run: |
-          $zip = Get-ChildItem release/OpenVR-SpaceCalibrator-*.zip | Select-Object -First 1
+          $zip = Get-ChildItem release/OpenVR-WKSpaceCalibrator-*.zip | Select-Object -First 1
           if (-not $zip) { throw "No release zip found in release/ — build.ps1 did not produce one." }
           $hash = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash
           "path=$($zip.FullName)" >> $env:GITHUB_OUTPUT
@@ -232,7 +232,7 @@ jobs:
           }
 
           $sb = New-Object System.Text.StringBuilder
-          [void]$sb.AppendLine("## OpenVR-SpaceCalibrator $tag")
+          [void]$sb.AppendLine("## OpenVR-WKSpaceCalibrator $tag")
           [void]$sb.AppendLine('')
           [void]$sb.AppendLine('Two download options:')
           [void]$sb.AppendLine('')

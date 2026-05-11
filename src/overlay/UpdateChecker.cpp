@@ -19,8 +19,8 @@ namespace {
 // changing the source-of-truth repository requires a recompile (intentional —
 // you don't want a runtime-mutable update URL).
 constexpr wchar_t kHost[] = L"api.github.com";
-constexpr wchar_t kPath[] = L"/repos/RealWhyKnot/OpenVR-SpaceCalibrator/releases/latest";
-constexpr wchar_t kUserAgent[] = L"OpenVR-SpaceCalibrator-Updater/1.0";
+constexpr wchar_t kPath[] = L"/repos/RealWhyKnot/OpenVR-WKSpaceCalibrator/releases/latest";
+constexpr wchar_t kUserAgent[] = L"OpenVR-WKSpaceCalibrator-Updater/1.0";
 
 // Parse a YYYY.M.D.N(-XXXX)? tag (with optional leading "v") into four numeric
 // components. Returns false on malformed input. The trailing -XXXX hex suffix

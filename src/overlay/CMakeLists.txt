@@ -3,13 +3,13 @@ cmake_minimum_required (VERSION 3.15)
 if(OPENVR_PAIR_BUILD_UMBRELLA)
     get_filename_component(SPACECAL_REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
 
-    set(SPACECAL_PAIRDRIVER_ROOT "${OPENVR_PAIRDRIVER_ROOT}" CACHE PATH "OpenVR-PairDriver checkout")
+    set(SPACECAL_PAIRDRIVER_ROOT "${OPENVR_PAIRDRIVER_ROOT}" CACHE PATH "OpenVR-WKPairDriver checkout")
     if(NOT SPACECAL_PAIRDRIVER_ROOT)
-        set(_sibling_pairdriver "${SPACECAL_REPO_ROOT}/../OpenVR-PairDriver")
+        set(_sibling_pairdriver "${SPACECAL_REPO_ROOT}/../OpenVR-WKPairDriver")
         if(EXISTS "${_sibling_pairdriver}/src/overlay/FeaturePlugin.h")
             get_filename_component(SPACECAL_PAIRDRIVER_ROOT "${_sibling_pairdriver}" ABSOLUTE)
         else()
-            get_filename_component(SPACECAL_PAIRDRIVER_ROOT "${SPACECAL_REPO_ROOT}/lib/OpenVR-PairDriver" ABSOLUTE)
+            get_filename_component(SPACECAL_PAIRDRIVER_ROOT "${SPACECAL_REPO_ROOT}/lib/OpenVR-WKPairDriver" ABSOLUTE)
         endif()
     endif()
 
@@ -17,7 +17,7 @@ if(OPENVR_PAIR_BUILD_UMBRELLA)
     if(NOT EXISTS "${SPACECAL_BUILDSTAMP_HEADER}")
         file(WRITE "${SPACECAL_BUILDSTAMP_HEADER}"
 "// Fallback stamp for umbrella cmake builds.\n"
-"// Set by OpenVR-PairDriver's build.ps1 when running a real release.\n"
+"// Set by OpenVR-WKPairDriver's build.ps1 when running a real release.\n"
 "#pragma once\n"
 "#define SPACECAL_BUILD_STAMP \"0.0.0.0-DEV\"\n"
 "#define SPACECAL_BUILD_CHANNEL \"dev\"\n")
@@ -133,10 +133,10 @@ file(GLOB_RECURSE SOURCES_API ${CMAKE_SOURCE_DIR}/src/overlay "*.c" "*.h" "*.hpp
 list(FILTER SOURCES_API EXCLUDE REGEX ".*/SpaceCalibratorPlugin\\.(cpp|h)$")
 list(FILTER SOURCES_API EXCLUDE REGEX ".*/SpaceCalibratorUmbrellaRuntime\\.(cpp|h)$")
 file(GLOB_RECURSE SOURCES_HEADERS ${CMAKE_SOURCE_DIR}/src/common "*.h" "*.hpp")
-# Protocol.h and MotionGate.h live in the OpenVR-PairDriver submodule. Both
+# Protocol.h and MotionGate.h live in the OpenVR-WKPairDriver submodule. Both
 # the overlay (this target) and the driver (built by the submodule) consume
 # them so the wire layout / motion-gate math stays in lock-step.
-file(GLOB_RECURSE SOURCES_SHARED_HEADERS ${CMAKE_SOURCE_DIR}/lib/OpenVR-PairDriver/src/common "*.h" "*.hpp")
+file(GLOB_RECURSE SOURCES_SHARED_HEADERS ${CMAKE_SOURCE_DIR}/lib/OpenVR-WKPairDriver/src/common "*.h" "*.hpp")
 
 foreach(SOURCE IN ITEMS ${SOURCES_API})
     get_filename_component(SOURCE_PATH "${SOURCE}" PATH)
@@ -162,10 +162,10 @@ target_include_directories(SpaceCalibratorOverlay
     PUBLIC ${CMAKE_SOURCE_DIR}
     PUBLIC ${CMAKE_SOURCE_DIR}/src/common
     PUBLIC ${CMAKE_SOURCE_DIR}/src/overlay
-    # Pulls in Protocol.h and MotionGate.h from the OpenVR-PairDriver submodule
+    # Pulls in Protocol.h and MotionGate.h from the OpenVR-WKPairDriver submodule
     # so the overlay's #include "Protocol.h" resolves to the same wire-layout
     # header the shared driver builds against.
-    PUBLIC ${CMAKE_SOURCE_DIR}/lib/OpenVR-PairDriver/src/common
+    PUBLIC ${CMAKE_SOURCE_DIR}/lib/OpenVR-WKPairDriver/src/common
     PUBLIC ${CMAKE_SOURCE_DIR}/lib
     PUBLIC ${CMAKE_SOURCE_DIR}/lib/openvr/headers
     PUBLIC ${CMAKE_SOURCE_DIR}/lib/imgui/backends

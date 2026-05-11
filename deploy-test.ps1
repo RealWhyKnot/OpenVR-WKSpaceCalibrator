@@ -72,12 +72,12 @@ function Get-InstallDirFromRegistry() {
 
 $InstallDir = Get-InstallDirFromRegistry
 if (-not $InstallDir) {
-    $candidate1 = "C:\Program Files\OpenVR-SpaceCalibrator"
+    $candidate1 = "C:\Program Files\OpenVR-WKSpaceCalibrator"
     $candidate2 = "C:\Program Files\SpaceCalibrator"
     if (Test-Path $candidate1) { $InstallDir = $candidate1 }
     elseif (Test-Path $candidate2) { $InstallDir = $candidate2 }
     else {
-        throw "Could not find an installed copy of OpenVR-SpaceCalibrator. Install the latest release first (one-time setup), then re-run this script."
+        throw "Could not find an installed copy of OpenVR-WKSpaceCalibrator. Install the latest release first (one-time setup), then re-run this script."
     }
 }
 

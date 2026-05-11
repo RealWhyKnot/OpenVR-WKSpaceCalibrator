@@ -1,7 +1,7 @@
-# OpenVR-SpaceCalibrator Wiki
+# OpenVR-WKSpaceCalibrator Wiki
 
 Long-form documentation for Space Calibrator. The
-[README](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/blob/main/README.md)
+[README](https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator/blob/main/README.md)
 is the quick-start; pages here go deeper.
 
 ## What it does in 60 seconds

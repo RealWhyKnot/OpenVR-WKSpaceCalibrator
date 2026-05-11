@@ -6,7 +6,7 @@ This page documents what the updater does, what it deliberately does *not* do, a
 
 ## What the user sees
 
-On startup the overlay quietly hits `https://api.github.com/repos/RealWhyKnot/OpenVR-SpaceCalibrator/releases/latest` on a worker thread. If the response's `tag_name` parses as a `YYYY.M.D.N` stamp greater than the local build's stamp, a banner appears at the top of the main window:
+On startup the overlay quietly hits `https://api.github.com/repos/RealWhyKnot/OpenVR-WKSpaceCalibrator/releases/latest` on a worker thread. If the response's `tag_name` parses as a `YYYY.M.D.N` stamp greater than the local build's stamp, a banner appears at the top of the main window:
 
 > **Update available: v2026.5.1.0 (current: 2026.4.28.1)** -- [Update now] [Release notes] [Dismiss]
 
@@ -60,7 +60,7 @@ The local stamp comes from `SPACECAL_BUILD_STAMP` in `src/overlay/BuildStamp.h`,
 The updater itself needs no manual involvement at release time. The release pipeline (`.github/workflows/release.yml`) already:
 
 1. Runs `build.ps1 -Version <tag>` (sets `SPACECAL_BUILD_CHANNEL=release`).
-2. Builds the NSIS installer to `OpenVR-SpaceCalibrator-<version>-Setup.exe`.
+2. Builds the NSIS installer to `OpenVR-WKSpaceCalibrator-<version>-Setup.exe`.
 3. Uploads the installer + the drop-in zip to the GitHub Release.
 
 GitHub auto-populates the `digest` field on each uploaded asset. Once the release is published, every running release-build copy of Space Calibrator notices on next launch.

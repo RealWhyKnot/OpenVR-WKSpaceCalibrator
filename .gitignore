@@ -17,7 +17,7 @@ ipch
 /install/vcredist_x64.exe
 # NSIS-built installer output lands next to installer.nsi.
 /install/SpaceCalibrator.exe
-/install/OpenVR-SpaceCalibrator-*-Setup.exe
+/install/OpenVR-WKSpaceCalibrator-*-Setup.exe
 # Per-session local-build counter (don't commit; is regenerated each build)
 /build/local_build_state.json
 

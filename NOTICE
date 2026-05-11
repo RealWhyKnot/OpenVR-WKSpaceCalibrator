@@ -1,4 +1,4 @@
-OpenVR-SpaceCalibrator -- copyright and third-party notices
+OpenVR-WKSpaceCalibrator -- copyright and third-party notices
 
 Project copyright:
   Copyright (C) 2026 WhyKnot and other contributors
@@ -15,7 +15,7 @@ This product also bundles or links the following third-party components,
 each used under its own license, reproduced below.
 
 Source code for this build (including the MPL-2.0 portions of Eigen) is
-available at https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator.
+available at https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator.
 
 ================================================================================
 OpenVR SDK (BSD-3-Clause)

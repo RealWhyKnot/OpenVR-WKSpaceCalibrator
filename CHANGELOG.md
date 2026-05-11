@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to OpenVR-SpaceCalibrator (RealWhyKnot fork). The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses date-driven versioning (`YYYY.M.D.N` for releases, `YYYY.M.D.N-XXXX` for dev builds -- see [Building](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Building) for shape rules).
+All notable changes to OpenVR-WKSpaceCalibrator (RealWhyKnot fork). The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses date-driven versioning (`YYYY.M.D.N` for releases, `YYYY.M.D.N-XXXX` for dev builds -- see [Building](https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator/wiki/Building) for shape rules).
 
 The most recent release is at the top.
 
@@ -17,7 +17,7 @@ The most recent release is at the top.
 - **overlay:** Wrap calibration UI in shell card and report metadata (499b9de)
 
 ### Changed
-- **deps:** Bump OpenVR-PairDriver for InputHealth safety (ee049e6)
+- **deps:** Bump OpenVR-WKPairDriver for InputHealth safety (ee049e6)
 - **deps:** Bump PairDriver for InputHealth range snapshots (2026.5.9.0-B032) (fab2048)
 - **inputhealth:** Split diagnostics panel modules (786eca3)
 - Revert "feat(overlay): wrap calibration UI in shell card and report metadata" (1c83313)
@@ -29,7 +29,7 @@ The most recent release is at the top.
 
 ---
 
-## [v2026.5.7.0](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/releases/tag/v2026.5.7.0) -- 2026-05-07
+## [v2026.5.7.0](https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator/releases/tag/v2026.5.7.0) -- 2026-05-07
 
 ### Added
 - **overlay:** Drift-subsystem debug instrumentation (f43bc32)
@@ -39,10 +39,10 @@ The most recent release is at the top.
 - **overlay:** Rest-locked yaw drift correction (rec A) (d24ea11)
 
 ### Changed
-- Consume OpenVR-PairDriver via submodule, drop local driver tree (e8678db)
-- **deps:** Bump OpenVR-PairDriver to ceb1416 (InputHealth Stages 1A-1D) (b6bc0d9)
-- **deps:** Bump OpenVR-PairDriver to bded14d (build.ps1 EAP='Continue' fix) (9186194)
-- **deps:** Bump OpenVR-PairDriver to 96a2829 (InputHealth Stages 1E-1F) (76892b8)
+- Consume OpenVR-WKPairDriver via submodule, drop local driver tree (e8678db)
+- **deps:** Bump OpenVR-WKPairDriver to ceb1416 (InputHealth Stages 1A-1D) (b6bc0d9)
+- **deps:** Bump OpenVR-WKPairDriver to bded14d (build.ps1 EAP='Continue' fix) (9186194)
+- **deps:** Bump OpenVR-WKPairDriver to 96a2829 (InputHealth Stages 1E-1F) (76892b8)
 
 ### Fixed
 - **deploy:** Invoke submodule build in-process to dodge PS 5.1 NativeCommandError (2026.5.6.5-B8CD) (c9afdf6)
@@ -54,7 +54,7 @@ The most recent release is at the top.
 
 ---
 
-## [v2026.5.5.0](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/releases/tag/v2026.5.5.0) -- 2026-05-06
+## [v2026.5.5.0](https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator/releases/tag/v2026.5.5.0) -- 2026-05-06
 
 ### Added
 - **diagnostics:** "who moved" annotation on relocalization fire (a2e638d)

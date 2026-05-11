@@ -6,9 +6,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        Before filing, skim the [Troubleshooting wiki page](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Troubleshooting) — common failure modes are documented there.
+        Before filing, skim the [Troubleshooting wiki page](https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator/wiki/Troubleshooting) — common failure modes are documented there.
 
-        If you are having issues after updating SteamVR, please check for a new release at the [releases page](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/releases) before posting an issue.
+        If you are having issues after updating SteamVR, please check for a new release at the [releases page](https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator/releases) before posting an issue.
 
   - type: textarea
     id: what-happened

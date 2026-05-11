@@ -1,4 +1,4 @@
-# OpenVR-SpaceCalibrator
+# OpenVR-WKSpaceCalibrator
 
 Run two VR tracking systems together, get their coordinate frames aligned.
 Quest HMD + Vive trackers. Pico HMD + Lighthouse base stations. Knuckles
@@ -6,8 +6,8 @@ controllers on a Quest setup. Mix the gear, calibrate once, all the
 trackers show up where they actually are.
 
 This is the WhyKnot fork. Built on
-[hyblocker/OpenVR-SpaceCalibrator](https://github.com/hyblocker/OpenVR-SpaceCalibrator)
-which is built on [pushrax's original](https://github.com/pushrax/OpenVR-SpaceCalibrator).
+[hyblocker/OpenVR-WKSpaceCalibrator](https://github.com/hyblocker/OpenVR-WKSpaceCalibrator)
+which is built on [pushrax's original](https://github.com/pushrax/OpenVR-WKSpaceCalibrator).
 
 ## What it does
 
@@ -24,8 +24,8 @@ in one playspace for VRChat / Resonite / iRacing / etc.
 
 ## Get it
 
-[Latest release](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/releases/latest)
-ships an installer (`OpenVR-SpaceCalibrator-<version>-Setup.exe`) and
+[Latest release](https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator/releases/latest)
+ships an installer (`OpenVR-WKSpaceCalibrator-<version>-Setup.exe`) and
 a portable zip. Installer registers the SteamVR overlay and drops the
 driver into the SteamVR `drivers/` folder. SteamVR must restart once
 after install for the driver to load.
@@ -65,7 +65,7 @@ after install for the driver to load.
 ## Quick start
 
 1. Grab the installer from
-   [Releases](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/releases),
+   [Releases](https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator/releases),
    run it. Restart SteamVR.
 2. Open Space Calibrator from the SteamVR dashboard. The setup wizard
    pops up on first launch.
@@ -78,7 +78,7 @@ after install for the driver to load.
    correct themselves while you move.
 
 The Wiki has step-by-step screenshots:
-[Setup Wizard](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Setup-Wizard).
+[Setup Wizard](https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator/wiki/Setup-Wizard).
 
 ## What it doesn't do
 
@@ -107,7 +107,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 
 Full toolchain notes (MSVC, signing, version stamping) are in the
-[Building](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Building)
+[Building](https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator/wiki/Building)
 wiki page.
 
 For inner-loop iteration: `quick.ps1 -Install` rebuilds and hot-swaps
@@ -116,19 +116,19 @@ swap (closes Steam, copies the DLL, relaunches Steam).
 
 ## Documentation
 
-Full docs in the [Wiki](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki).
+Full docs in the [Wiki](https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator/wiki).
 Notable pages:
 
-- [Setup Wizard](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Setup-Wizard)
-- [Continuous Calibration](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Continuous-Calibration)
-- [Settings Reference](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Settings-Reference)
-- [Troubleshooting](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Troubleshooting)
-- [Architecture](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Architecture) (for contributors)
+- [Setup Wizard](https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator/wiki/Setup-Wizard)
+- [Continuous Calibration](https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator/wiki/Continuous-Calibration)
+- [Settings Reference](https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator/wiki/Settings-Reference)
+- [Troubleshooting](https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator/wiki/Troubleshooting)
+- [Architecture](https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator/wiki/Architecture) (for contributors)
 
 ## Credits
 
-[pushrax](https://github.com/pushrax/OpenVR-SpaceCalibrator) wrote the
-original calibration solver and SteamVR driver. [hyblocker](https://github.com/hyblocker/OpenVR-SpaceCalibrator)
+[pushrax](https://github.com/pushrax/OpenVR-WKSpaceCalibrator) wrote the
+original calibration solver and SteamVR driver. [hyblocker](https://github.com/hyblocker/OpenVR-WKSpaceCalibrator)
 added continuous calibration and the modern UI. This fork adds the
 items in the list above.
 

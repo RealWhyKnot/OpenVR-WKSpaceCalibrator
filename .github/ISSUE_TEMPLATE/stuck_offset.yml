@@ -8,7 +8,7 @@ body:
       value: |
         Thanks for reporting a stuck-offset case — these are tricky and the data below makes them actionable.
 
-        **Before filing**, please check the [Troubleshooting wiki page](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Troubleshooting).
+        **Before filing**, please check the [Troubleshooting wiki page](https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator/wiki/Troubleshooting).
         Common causes (lighthouse base station bumped, IMU-only extrapolation, tracker reconnect mid-calibration) are documented there.
 
   - type: dropdown
@@ -100,9 +100,9 @@ body:
     attributes:
       label: Confirmations
       options:
-        - label: I read the [Troubleshooting wiki page](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Troubleshooting).
+        - label: I read the [Troubleshooting wiki page](https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator/wiki/Troubleshooting).
           required: true
         - label: I tried toggling continuous calibration off and back on; the offset persisted.
           required: true
-        - label: I am using the WhyKnot fork (this repo). For upstream issues, file at pushrax/OpenVR-SpaceCalibrator instead.
+        - label: I am using the WhyKnot fork (this repo). For upstream issues, file at pushrax/OpenVR-WKSpaceCalibrator instead.
           required: true

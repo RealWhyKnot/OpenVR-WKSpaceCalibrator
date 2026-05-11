@@ -26,7 +26,7 @@ Key files:
 - **`Calibration.cpp`** -- the per-tick state machine. Pulls the latest poses, drives the calibration solver, handles the standby/active state transitions, and pushes results to the driver via IPC.
 - **`CalibrationCalc.cpp`** -- the math. Sample buffer, Kabsch SVD on differential-rotation axes, BDCSVD weighted least squares for translation, validation against RMS error and axis variance, the continuous-calibration accept/reject loop.
 - **`VRState.cpp`** -- enumerates OpenVR devices and classifies them by tracking-system name (with special cases for Pimax Crystal HMDs/controllers that masquerade as something else).
-- **`Configuration.cpp`** -- persists the calibrated profile to the Windows registry under `HKEY_CURRENT_USER_LOCAL_SETTINGS\Software\OpenVR-SpaceCalibrator\Config`. Profile is keyed by reference + target tracking-system names (e.g. "lighthouse" + "oculus").
+- **`Configuration.cpp`** -- persists the calibrated profile to the Windows registry under `HKEY_CURRENT_USER_LOCAL_SETTINGS\Software\OpenVR-WKSpaceCalibrator\Config`. Profile is keyed by reference + target tracking-system names (e.g. "lighthouse" + "oculus").
 - **`UserInterface.cpp`** -- the ImGui front-end. Device picker, calibration progress, settings.
 - **`CalibrationMetrics.cpp`** -- rolling 30-second time series of every interesting per-tick value (RMS error, axis variance, jitter, computation time, condition ratio). Driven into a CSV log file for postmortem analysis when `enableLogs` is on. The graphs you see in the Debug tab are these series.
 

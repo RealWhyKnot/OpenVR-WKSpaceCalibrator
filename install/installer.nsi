@@ -1,4 +1,4 @@
-; OpenVR-SpaceCalibrator module installer.
+; OpenVR-WKSpaceCalibrator module installer.
 ; Enables the Space Calibrator module in an existing OpenVR-Pair install.
 
 !include "MUI2.nsh"
@@ -7,16 +7,16 @@
 	!define VERSION "0.1.0.0"
 !endif
 
-Name "OpenVR-SpaceCalibrator"
-OutFile "..\build\artifacts\Release\OpenVR-SpaceCalibrator-Installer.exe"
-InstallDir "$PROGRAMFILES64\OpenVR-Pair\features\OpenVR-SpaceCalibrator"
+Name "OpenVR-WKSpaceCalibrator"
+OutFile "..\build\artifacts\Release\OpenVR-WKSpaceCalibrator-Installer.exe"
+InstallDir "$PROGRAMFILES64\OpenVR-Pair\features\OpenVR-WKSpaceCalibrator"
 RequestExecutionLevel admin
 ShowInstDetails show
 
 VIProductVersion "${VERSION}"
-VIAddVersionKey /LANG=1033 "ProductName" "OpenVR-SpaceCalibrator"
-VIAddVersionKey /LANG=1033 "FileDescription" "OpenVR-SpaceCalibrator Module Installer"
-VIAddVersionKey /LANG=1033 "LegalCopyright" "Open source at https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator"
+VIAddVersionKey /LANG=1033 "ProductName" "OpenVR-WKSpaceCalibrator"
+VIAddVersionKey /LANG=1033 "FileDescription" "OpenVR-WKSpaceCalibrator Module Installer"
+VIAddVersionKey /LANG=1033 "LegalCopyright" "Open source at https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator"
 VIAddVersionKey /LANG=1033 "FileVersion" "${VERSION}"
 VIAddVersionKey /LANG=1033 "ProductVersion" "${VERSION}"
 
@@ -30,8 +30,8 @@ Var vrRuntimePath
 
 Function RequirePair
 	IfFileExists "$PROGRAMFILES64\OpenVR-Pair\OpenVR-Pair.exe" done
-		MessageBox MB_YESNO|MB_ICONEXCLAMATION "OpenVR-Pair must be installed before OpenVR-SpaceCalibrator. Open the OpenVR-Pair releases page now?" IDNO abort
-		ExecShell "open" "https://github.com/RealWhyKnot/OpenVR-PairDriver/releases"
+		MessageBox MB_YESNO|MB_ICONEXCLAMATION "OpenVR-Pair must be installed before OpenVR-WKSpaceCalibrator. Open the OpenVR-Pair releases page now?" IDNO abort
+		ExecShell "open" "https://github.com/RealWhyKnot/OpenVR-WKPairDriver/releases"
 	abort:
 		Abort
 	done:
@@ -81,22 +81,22 @@ Section "Install"
 
 	SetOutPath "$INSTDIR"
 	WriteUninstaller "$INSTDIR\Uninstall.exe"
-	WriteRegStr HKLM "Software\OpenVR-SpaceCalibrator\Main" "" "$INSTDIR"
-	WriteRegStr HKLM "Software\OpenVR-SpaceCalibrator\Driver" "" "$vrRuntimePath"
-	WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\OpenVR-SpaceCalibrator" "DisplayName" "OpenVR-SpaceCalibrator"
-	WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\OpenVR-SpaceCalibrator" "DisplayVersion" "${VERSION}"
-	WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\OpenVR-SpaceCalibrator" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""
+	WriteRegStr HKLM "Software\OpenVR-WKSpaceCalibrator\Main" "" "$INSTDIR"
+	WriteRegStr HKLM "Software\OpenVR-WKSpaceCalibrator\Driver" "" "$vrRuntimePath"
+	WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\OpenVR-WKSpaceCalibrator" "DisplayName" "OpenVR-WKSpaceCalibrator"
+	WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\OpenVR-WKSpaceCalibrator" "DisplayVersion" "${VERSION}"
+	WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\OpenVR-WKSpaceCalibrator" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""
 SectionEnd
 
 Section "Uninstall"
-	ReadRegStr $vrRuntimePath HKLM "Software\OpenVR-SpaceCalibrator\Driver" ""
+	ReadRegStr $vrRuntimePath HKLM "Software\OpenVR-WKSpaceCalibrator\Driver" ""
 	StrCmp $vrRuntimePath "" skipFlag
 	Delete "$vrRuntimePath\drivers\01openvrpair\resources\enable_calibration.flag"
 	skipFlag:
 	Delete "$INSTDIR\Uninstall.exe"
 	RMDir "$INSTDIR"
-	DeleteRegKey HKLM "Software\OpenVR-SpaceCalibrator\Driver"
-	DeleteRegKey HKLM "Software\OpenVR-SpaceCalibrator\Main"
-	DeleteRegKey /ifempty HKLM "Software\OpenVR-SpaceCalibrator"
-	DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\OpenVR-SpaceCalibrator"
+	DeleteRegKey HKLM "Software\OpenVR-WKSpaceCalibrator\Driver"
+	DeleteRegKey HKLM "Software\OpenVR-WKSpaceCalibrator\Main"
+	DeleteRegKey /ifempty HKLM "Software\OpenVR-WKSpaceCalibrator"
+	DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\OpenVR-WKSpaceCalibrator"
 SectionEnd

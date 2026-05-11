@@ -156,21 +156,21 @@ try {
 }
 
 # --- Locate built artifacts ---
-# Driver source moved to the OpenVR-PairDriver submodule. Build it here so
+# Driver source moved to the OpenVR-WKPairDriver submodule. Build it here so
 # the resulting tree is available for the release-zip stage below; the
 # submodule's own build.ps1 handles the CMake configure + compile and lays
 # out a deployable driver folder under build/driver_openvrpair/.
 $OverlayExe       = Join-Path $PSScriptRoot "bin/artifacts/Release/SpaceCalibrator.exe"
-$PairDriverRoot   = Join-Path $PSScriptRoot "lib/OpenVR-PairDriver"
+$PairDriverRoot   = Join-Path $PSScriptRoot "lib/OpenVR-WKPairDriver"
 $PairDriverTree   = Join-Path $PairDriverRoot "build/driver_openvrpair"
 $PairDriverDll    = Join-Path $PairDriverTree "bin/win64/driver_openvrpair.dll"
 
 if (!(Test-Path $OverlayExe)) { throw "Expected overlay exe not found at $OverlayExe" }
 if (-not $SkipZip) {
     if (-not (Test-Path $PairDriverRoot)) {
-        throw "OpenVR-PairDriver submodule not found at '$PairDriverRoot'. Run 'git submodule update --init --recursive'."
+        throw "OpenVR-WKPairDriver submodule not found at '$PairDriverRoot'. Run 'git submodule update --init --recursive'."
     }
-    Write-Host "`n--- Building OpenVR-PairDriver submodule ---" -ForegroundColor Cyan
+    Write-Host "`n--- Building OpenVR-WKPairDriver submodule ---" -ForegroundColor Cyan
     Push-Location $PairDriverRoot
     try {
         & powershell.exe -ExecutionPolicy Bypass -File (Join-Path $PairDriverRoot "build.ps1") -Version $FullVersion
@@ -209,13 +209,13 @@ if ($SkipZip) {
     Copy-Item -Recurse -Path $PairDriverTree -Destination $StagedDriverDir
     # Drop the calibration flag so SC's installer / drag-drop install enables
     # only the calibration feature out of the box. Smoothing flag stays absent;
-    # the OpenVR-Smoothing installer drops its own.
+    # the OpenVR-WKSmoothing installer drops its own.
     $StagedFlagDir = Join-Path $StagedDriverDir "resources"
     if (-not (Test-Path $StagedFlagDir)) { New-Item -ItemType Directory -Force -Path $StagedFlagDir | Out-Null }
     Set-Content -Path (Join-Path $StagedFlagDir "enable_calibration.flag") -Value 'enabled' -NoNewline
     $FullVersion | Set-Content -Path (Join-Path $StageDir "version.txt") -Encoding UTF8 -NoNewline
 
-    $ZipPath = Join-Path $ReleaseDir "OpenVR-SpaceCalibrator-$FullVersion.zip"
+    $ZipPath = Join-Path $ReleaseDir "OpenVR-WKSpaceCalibrator-$FullVersion.zip"
     if (Test-Path $ZipPath) { Remove-Item -Force $ZipPath }
     Compress-Archive -Path (Join-Path $StageDir "*") -DestinationPath $ZipPath -Force
     Remove-Item -Recurse -Force $StageDir

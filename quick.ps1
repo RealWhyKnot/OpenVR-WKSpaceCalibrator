@@ -16,7 +16,7 @@ param(
     [switch]$Install,
 
     # Full deploy: closes Steam (which holds the driver DLL locked while
-    # running), builds the OpenVR-PairDriver submodule, copies the shared
+    # running), builds the OpenVR-WKPairDriver submodule, copies the shared
     # driver tree into <SteamVR>/drivers/01openvrpair, drops
     # enable_calibration.flag into its resources/, hot-swaps the overlay
     # (implies -Install), migrates any legacy 01spacecalibrator/ or
@@ -138,7 +138,7 @@ if (-not $Install) {
 # enough (real-world bite from 2026-05-01: copy succeeded but the OS
 # silently kept the old DLL mapped because steam.exe still had a handle).
 # Documented in reference_install_procedure.md.
-$PairDriverRoot   = Join-Path $PSScriptRoot "lib/OpenVR-PairDriver"
+$PairDriverRoot   = Join-Path $PSScriptRoot "lib/OpenVR-WKPairDriver"
 $PairDriverTree   = Join-Path $PairDriverRoot "build/driver_openvrpair"
 $PairDriverDll    = Join-Path $PairDriverTree "bin/win64/driver_openvrpair.dll"
 $SteamExe         = Join-Path $SteamPath "steam.exe"
@@ -161,10 +161,10 @@ $LegacyFsManifest = Join-Path $SteamDriversDir "01fingersmoothing/driver.vrdrive
 
 if ($DeployDriver) {
     if (-not (Test-Path $PairDriverRoot)) {
-        throw "OpenVR-PairDriver submodule not found at '$PairDriverRoot'. Run 'git submodule update --init --recursive'."
+        throw "OpenVR-WKPairDriver submodule not found at '$PairDriverRoot'. Run 'git submodule update --init --recursive'."
     }
     Write-Host ""
-    Write-Host "--- Building OpenVR-PairDriver submodule ---" -ForegroundColor Cyan
+    Write-Host "--- Building OpenVR-WKPairDriver submodule ---" -ForegroundColor Cyan
     Push-Location $PairDriverRoot
     try {
         # In-process invocation. Calling via `& powershell.exe -File ...` runs

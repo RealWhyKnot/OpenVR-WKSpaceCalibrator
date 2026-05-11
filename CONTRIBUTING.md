@@ -1,17 +1,17 @@
 # Contributing
 
-Welcome, and thanks for taking an interest in this project. This is the WhyKnot fork of OpenVR-SpaceCalibrator. Bug reports, feature requests, and pull requests are all welcome — open an issue or PR against this repo and we'll take a look.
+Welcome, and thanks for taking an interest in this project. This is the WhyKnot fork of OpenVR-WKSpaceCalibrator. Bug reports, feature requests, and pull requests are all welcome — open an issue or PR against this repo and we'll take a look.
 
 ## Before you start
 
 A bit of orientation goes a long way:
 
-- Skim the [Architecture](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Architecture) and [Continuous Calibration](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Continuous-Calibration) wiki pages to get the lay of the land.
-- For a bug report, the [Troubleshooting](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Troubleshooting) wiki page covers the common scenarios first — please check it before filing. If you do file an issue and it's a stuck-offset / drift problem, the issue template asks for specific log columns; capturing those up-front saves a round-trip.
+- Skim the [Architecture](https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator/wiki/Architecture) and [Continuous Calibration](https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator/wiki/Continuous-Calibration) wiki pages to get the lay of the land.
+- For a bug report, the [Troubleshooting](https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator/wiki/Troubleshooting) wiki page covers the common scenarios first — please check it before filing. If you do file an issue and it's a stuck-offset / drift problem, the issue template asks for specific log columns; capturing those up-front saves a round-trip.
 
 ## Setting up the build
 
-**Prerequisites** (full details on the [Building](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/wiki/Building) wiki page):
+**Prerequisites** (full details on the [Building](https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator/wiki/Building) wiki page):
 
 - Windows 10/11
 - Visual Studio 2022 with the *Desktop development with C++* workload

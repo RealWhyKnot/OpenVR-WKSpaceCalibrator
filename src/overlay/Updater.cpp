@@ -24,7 +24,7 @@ namespace spacecal::updates {
 
 namespace {
 
-constexpr wchar_t kUserAgent[] = L"OpenVR-SpaceCalibrator-Updater/1.0";
+constexpr wchar_t kUserAgent[] = L"OpenVR-WKSpaceCalibrator-Updater/1.0";
 
 std::wstring Utf8ToWide(const std::string& utf8) {
 	if (utf8.empty()) return {};
@@ -392,7 +392,7 @@ void Updater::Run(std::string url, std::string expectedSha256, std::string filen
 		m_state.store(DownloadState::Failed);
 	};
 
-	if (filename.empty()) filename = "OpenVR-SpaceCalibrator-Setup.exe";
+	if (filename.empty()) filename = "OpenVR-WKSpaceCalibrator-Setup.exe";
 	// Reject any path-traversal in the asset name; we control the source
 	// (RealWhyKnot fork release manifest) but defense in depth costs nothing.
 	for (char c : filename) {

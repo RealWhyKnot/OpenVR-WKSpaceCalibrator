@@ -2,13 +2,13 @@
 
 ## Reporting a vulnerability
 
-If you find a security issue in this fork, please **don't** file a public GitHub issue. Instead use GitHub's [private vulnerability reporting](https://github.com/RealWhyKnot/OpenVR-SpaceCalibrator/security/advisories/new) form.
+If you find a security issue in this fork, please **don't** file a public GitHub issue. Instead use GitHub's [private vulnerability reporting](https://github.com/RealWhyKnot/OpenVR-WKSpaceCalibrator/security/advisories/new) form.
 
 I'll acknowledge within a week and aim to release a fix or workaround within 30 days. If the issue has user-impacting consequences (e.g. a malicious peer can crash SteamVR via the IPC pipe), I'll coordinate disclosure with you.
 
 ## Threat model summary
 
-OpenVR-SpaceCalibrator runs as:
+OpenVR-WKSpaceCalibrator runs as:
 
 - **An overlay app** (`SpaceCalibrator.exe`) — runs at user privilege, talks only to the local SteamVR session.
 - **A SteamVR driver DLL** — loaded into `vrserver.exe`, runs at user privilege.
