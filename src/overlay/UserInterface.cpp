@@ -292,7 +292,7 @@ void ShowVersionLine() {
 	}
 
 	ImGui::SameLine();
-	ImGui::Text("  |  Space Calibrator " SPACECAL_BUILD_STAMP);
+	ImGui::Text("  |  OpenVR-Pair " SPACECAL_BUILD_STAMP);
 	if (runningInOverlay)
 	{
 		ImGui::SameLine();
@@ -399,6 +399,10 @@ static std::string FormatBytes(uint64_t n) {
 // starting SteamVR. No need to dump verbose error strings.
 static void DrawVRWaitingBanner() {
 	if (IsVRReady()) return;
+	// In umbrella mode the same status is already in the footer
+	// (Driver: waiting for SteamVR). Don't duplicate it at the top of
+	// the calibration tab where it pushes content down.
+	if (s_inUmbrella) return;
 
 	// Yellow-orange shade so it's distinct from the blue update banner --
 	// "attention needed" rather than "FYI." Single-line height to stay
