@@ -24,12 +24,14 @@ The most recent release is at the top.
 - **overlay:** Hand prediction + finger smoothing off to Smoothing (v12) (32fd5fb)
 - Rename OpenVR modules to WK variants (c22ce04)
 - **overlay:** Split UserInterface.cpp into per-section files (76c7dad)
+- **deps:** Bump driver to MotionGate Tiny=AND fix; update tests + wiki (527039a)
 
 ### Fixed
 - **build:** Track BuildStamp.h with a dev fallback (aef2b28)
 - **overlay:** Keep umbrella tab bar reachable from continuous mode and load DroidSans (a125289)
 - **overlay:** Rebrand footer to OpenVR-Pair and silence top VR banner in umbrella (d486246)
 - **overlay:** Surface VR + profile + chaperone failures instead of silent fall-through (ae6b6c3)
+- **overlay:** Correctness pass on calibration math helpers (b0aa3e5)
 
 ---
 
