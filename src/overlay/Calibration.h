@@ -383,41 +383,11 @@ struct CalibrationContext
 	// hip tracker that's barely moving wants more smoothing than a wrist
 	// tracker that's swinging fast.
 	//
-	// trackerSmoothness: serial number -> 0..100 strength. Anything not in
-	// the map (or with value 0) gets no suppression. The HMD and the active
-	// calibration reference + target trackers are hard-blocked at the UI and
-	// at ScanAndApplyProfile -- their entries are forced to 0 even if the
-	// map contains a non-zero value, because suppressing them corrupts either
-	// the user's view or the calibration math.
-	std::unordered_map<std::string, int> trackerSmoothness;
-
-	// Finger smoothing for Index Knuckles. Driver hooks the per-frame bone
-	// arrays via IVRDriverInputInternal::UpdateSkeletonComponent and slerps
-	// each bone toward the incoming pose with the configured strength.
-	// Default-OFF so a user who only cares about calibration sees zero
-	// behaviour change. Settings persist across profile clears (they're a
-	// preference, not calibration data tied to a tracker serial).
-	//
-	// fingerSmoothingEnabled: master kill-switch (false = passthrough).
-	// fingerSmoothingStrength: 0..100. 0 = no smoothing; 100 = max
-	//   (slerp factor 0.05, never fully freezes). Linear in between.
-	// fingerSmoothingMask: per-finger enable bits, see protocol::kAllFingersMask.
-	//   Defaults to all 10 fingers enabled.
-	bool     fingerSmoothingEnabled  = false;
-	int      fingerSmoothingStrength = 50;
-	uint16_t fingerSmoothingMask     = 0x03FF;
-
-	// Set by the periodic external-tool detector. Read by the UI (warning
-	// banner). Third-party tools fight our suppression; we don't try to
-	// interop -- we just tell the user to stop the external tool.
-	bool externalSmoothingDetected = false;
-	// Name of the detected external tool (for the warning text). Empty when
-	// nothing is detected.
-	std::string externalSmoothingToolName;
-	// Time-of-last-detector-run, in glfw seconds. CalibrationTick re-runs the
-	// scan every ~5 seconds to keep detection responsive without burning CPU
-	// on a tight process-enumeration loop.
-	double timeLastSmoothingScan = 0;
+	// Per-tracker prediction smoothness, finger-smoothing config, and
+	// external-smoothing-tool detection relocated to the Smoothing overlay
+	// (Protocol v12 migration, 2026-05-11). SC's calibration context no
+	// longer carries that state; it lives in the Smoothing plugin's Config
+	// and is pushed over its own IPC pipe.
 
 	Eigen::AffineCompact3d refToTargetPose = Eigen::AffineCompact3d::Identity();
 	bool relativePosCalibrated = false;
@@ -516,9 +486,10 @@ struct CalibrationContext
 		refToTargetPose = Eigen::AffineCompact3d::Identity();
 
 		// Per-profile fields added by recent passes. Without these resets
-		// the user's stale latency/suppression settings would carry over after a
-		// profile clear and silently apply to the next calibration session.
-		trackerSmoothness.clear();
+		// the user's stale latency settings would carry over after a profile
+		// clear and silently apply to the next calibration session.
+		// (trackerSmoothness lives on the Smoothing overlay now, Protocol
+		// v12 migration 2026-05-11.)
 		targetLatencyOffsetMs = 0.0;
 		latencyAutoDetect = false;
 		estimatedLatencyOffsetMs = 0.0;
@@ -538,9 +509,8 @@ struct CalibrationContext
 		lockRelativePosition = false;
 		autoLockHistory.clear();
 		autoLockEffectivelyLocked = false;
-		// Note: showAdvancedSettings and the externalSmoothing* runtime-detection
-		// fields are intentionally NOT reset -- they're user preferences and
-		// detector state that span profiles.
+		// Note: showAdvancedSettings is intentionally NOT reset -- it's a
+		// user preference that spans profiles.
 		// No calibration was performed — relative pose is NOT calibrated. The
 		// previous value here was `true`, which left a stale-identity-matrix
 		// believed-good and caused StartContinuousCalibration to pass `true` to

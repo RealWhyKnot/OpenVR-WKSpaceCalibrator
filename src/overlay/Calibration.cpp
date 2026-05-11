@@ -24,12 +24,9 @@
 #include <iostream>
 #include <algorithm>
 #include <map>
-#include <psapi.h>
 
 #include <Eigen/Dense>
 #include <GLFW/glfw3.h>
-
-#pragma comment(lib, "psapi.lib")
 
 inline vr::HmdQuaternion_t operator*(const vr::HmdQuaternion_t& lhs, const vr::HmdQuaternion_t& rhs) {
 	return {
@@ -727,46 +724,10 @@ namespace {
 		return CalCtx.referenceID >= 0 && CalCtx.targetID >= 0;
 	}
 
-	// Periodically scan running processes for known external "smooth tracking"
-	// tools (OVR-SmoothTracking by yuumu, the most common one). When detected,
-	// the overlay shows a warning banner asking the user to stop the external
-	// tool and use our native per-tracker smoothness sliders instead. We DON'T
-	// try to interop -- our pose-update hook scales velocity/acceleration in a
-	// way that fights any external tool doing the same thing, and the resulting
-	// behaviour is unpredictable. Better to tell the user clearly than ship
-	// half-working interop.
-	struct ExternalSmoothingTool {
-		const wchar_t* exeName;
-		const char* humanName;
-	};
-	static const ExternalSmoothingTool kKnownTools[] = {
-		// Exact filenames we've seen in the wild. Case-insensitive comparison.
-		// The actual published binary on yuumu's BOOTH ships as
-		// "OpenVR-SmoothTracking.exe" (note: "Open" prefix, not "OVR").
-		// We keep the older "OVR-..." names as fallbacks for renamed/repacked
-		// variants and any third-party rebuild.
-		{ L"OpenVR-SmoothTracking.exe", "OpenVR-SmoothTracking" },
-		{ L"OpenVRSmoothTracking.exe",  "OpenVR-SmoothTracking" },
-		{ L"OVR-SmoothTracking.exe",    "OVR-SmoothTracking" },
-		{ L"OVRSmoothTracking.exe",     "OVR-SmoothTracking" },
-		{ L"ovr_smooth_tracking.exe",   "OVR-SmoothTracking" },
-	};
-
-	// Substring patterns checked when no exact name matched. Lowercase comparison
-	// against the lowercased process name. Catches future filename variants (e.g.
-	// versioned releases like "OpenVR-SmoothTracking-v2.exe") without us having to
-	// chase every rename. Kept narrow to avoid false positives: a process is
-	// counted as a smoothing tool only if its name contains BOTH "smooth" and
-	// "track" -- the combination is specific enough that no unrelated software in
-	// our use cases will trip the heuristic.
-	struct SubstringSmoothingPattern {
-		const wchar_t* requireA;
-		const wchar_t* requireB;
-		const char* humanName;
-	};
-	static const SubstringSmoothingPattern kSubstringTools[] = {
-		{ L"smooth", L"track", "external smoothing tool" },
-	};
+	// External smoothing-tool detection (kKnownTools, kSubstringTools,
+	// DetectExternalSmoothingTool) relocated to the Smoothing overlay on
+	// 2026-05-11 (Protocol v12 migration). The Smoothing plugin scans on
+	// its own Tick and surfaces the banner inside its Prediction sub-tab.
 
 	// Discrete cross-correlation between two equal-length speed series. Returns false
 	// if there isn't enough signal energy to produce a trustworthy estimate. On
@@ -794,69 +755,15 @@ namespace {
 		return spacecal::latency::EstimateLagTimeDomain(ref, tgt, maxTau, lagSamplesOut);
 	}
 
-	bool DetectExternalSmoothingTool(std::string& outName) {
-		// EnumProcesses returns at most cb/sizeof(DWORD) PIDs; bump if it ever fills.
-		DWORD pids[2048];
-		DWORD bytesNeeded = 0;
-		if (!EnumProcesses(pids, sizeof pids, &bytesNeeded)) return false;
-		const DWORD count = bytesNeeded / sizeof(DWORD);
-
-		for (DWORD i = 0; i < count; i++) {
-			HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, pids[i]);
-			if (!h) continue;
-			wchar_t name[MAX_PATH] = {0};
-			DWORD len = GetModuleBaseNameW(h, NULL, name, MAX_PATH);
-			CloseHandle(h);
-			if (len == 0) continue;
-
-			// 1. Case-insensitive match against the exact-name table. Highest
-			//    confidence; produces the canonical human name in the UI.
-			for (const auto& tool : kKnownTools) {
-				if (_wcsicmp(name, tool.exeName) == 0) {
-					outName = tool.humanName;
-					return true;
-				}
-			}
-
-			// 2. Substring fallback. Lowercase the process name once, then
-			//    require both required substrings to appear. Cheap; the loop
-			//    only runs when the exact match above didn't fire.
-			std::wstring lower(name, len);
-			for (auto& c : lower) c = (wchar_t)towlower(c);
-			for (const auto& pat : kSubstringTools) {
-				if (lower.find(pat.requireA) != std::wstring::npos &&
-				    lower.find(pat.requireB) != std::wstring::npos) {
-					// Convert the actual filename to UTF-8 for display.
-					// The user benefits from seeing the real binary name when
-					// it's something we hadn't catalogued in kKnownTools.
-					int n = WideCharToMultiByte(CP_UTF8, 0, name, (int)len, nullptr, 0, nullptr, nullptr);
-					std::string utf8(n, '\0');
-					WideCharToMultiByte(CP_UTF8, 0, name, (int)len, utf8.data(), n, nullptr, nullptr);
-					outName = utf8;
-					return true;
-				}
-			}
-		}
-		return false;
-	}
 }
-
-// Defined in UserInterface.cpp. Pushes the current finger-smoothing config
-// (persisted from disk via LoadProfile) to the driver. Called once on initial
-// connect so the driver picks up the user's setting without requiring a UI
-// interaction; later changes flow through the slider handler in
-// CCal_DrawFingerSmoothing.
-extern void SendFingerSmoothingConfig(CalibrationContext &ctx);
 
 void InitCalibrator()
 {
 	Driver.Connect();
 	shmem.Open(OPENVR_PAIRDRIVER_SHMEM_NAME);
-	// Push the persisted finger-smoothing config so the driver matches what
-	// the overlay just loaded from registry. Default-constructed FingerCfg in
-	// the driver is "feature off" so this is a no-op for users who haven't
-	// opted in, and the slider handler picks up subsequent changes live.
-	SendFingerSmoothingConfig(CalCtx);
+	// Finger smoothing config is now owned by the Smoothing overlay
+	// (Protocol v12, 2026-05-11). Its plugin pushes the persisted config
+	// on its own driver connect; SC no longer participates in that path.
 }
 
 // Called by SCIPCClient::SendBlocking after a successful reconnect. vrserver crashing
@@ -2557,32 +2464,10 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		payload.quash = CalCtx.state == CalibrationState::Continuous && id == CalCtx.targetID && CalCtx.quashTargetInContinuous;
 		SetTargetSystemField(payload, ctx.targetTrackingSystem);
 
-		// Native prediction-suppression. Looks up the per-tracker smoothness
-		// (0..100) the user picked in the Prediction tab, with three hard
-		// blocks: HMD, calibration reference, and calibration target. Those
-		// must always run with raw poses -- suppressing the HMD causes judder
-		// in the user's view, and suppressing the calibration trackers feeds
-		// the math zeroed velocity (defeating cross-correlation latency
-		// estimation, motion-gated blend, etc.).
-		uint8_t smoothness = 0;
-		if (!g_lastSeenSerial[id].empty()) {
-			auto it = ctx.trackerSmoothness.find(g_lastSeenSerial[id]);
-			if (it != ctx.trackerSmoothness.end()) {
-				int v = it->second;
-				if (v < 0) v = 0;
-				if (v > 100) v = 100;
-				smoothness = (uint8_t)v;
-			}
-		}
-		const bool isHmd = vr::VRSystem()->GetTrackedDeviceClass(id)
-			== vr::TrackedDeviceClass_HMD;
-		const bool isRefOrTarget =
-			static_cast<int32_t>(id) == ctx.referenceID
-			|| static_cast<int32_t>(id) == ctx.targetID;
-		if (isHmd || isRefOrTarget) {
-			smoothness = 0;
-		}
-		payload.predictionSmoothness = smoothness;
+		// predictionSmoothness moved to the Smoothing overlay on 2026-05-11
+		// (Protocol v12). The driver ignores this field on SetDeviceTransform
+		// from v12 onward; SC sends 0 to keep wire layout stable.
+		payload.predictionSmoothness = 0;
 
 		// Motion-gated blend -- when on, the driver-side BlendTransform's lerp
 		// only advances proportional to detected per-frame motion. Hides offset
@@ -2902,38 +2787,9 @@ void CalibrationTick(double time)
 		}
 	}
 
-	// Re-scan for known external smoothing tools every 5 seconds. Cheap; the
-	// process enumeration is bounded and the result feeds both the UI banner and
-	// the auto-suppress logic in ScanAndApplyProfile.
-	if ((time - ctx.timeLastSmoothingScan) > 5.0) {
-		ctx.timeLastSmoothingScan = time;
-		std::string detectedName;
-		bool detected = DetectExternalSmoothingTool(detectedName);
-		if (detected != ctx.externalSmoothingDetected || detectedName != ctx.externalSmoothingToolName) {
-			ctx.externalSmoothingDetected = detected;
-			ctx.externalSmoothingToolName = detected ? detectedName : std::string();
-
-			// Annotate the debug log on every detection state change. This is
-			// invaluable when triaging "smoothing tool wasn't detected" reports
-			// -- the log will show whether the detector saw the process at all.
-			char ann[256];
-			if (detected) {
-				snprintf(ann, sizeof ann,
-					"external_smoothing_detected: %s", detectedName.c_str());
-			} else {
-				snprintf(ann, sizeof ann, "external_smoothing_cleared");
-			}
-			Metrics::WriteLogAnnotation(ann);
-
-			if (detected) {
-				char msg[256];
-				snprintf(msg, sizeof msg,
-					"%s detected -- not supported. Stop it and use the per-tracker smoothness sliders in the Prediction tab instead.\n",
-					detectedName.c_str());
-				CalCtx.Log(msg);
-			}
-		}
-	}
+	// External smoothing-tool detection moved to the Smoothing overlay's
+	// Tick (Protocol v12, 2026-05-11); its plugin scans on its own 5-second
+	// cadence and surfaces the banner inside its Prediction sub-tab.
 
 	ctx.timeLastTick = time;
 	shmem.ReadNewPoses([&](const protocol::DriverPoseShmem::AugmentedPose& augmented_pose) {

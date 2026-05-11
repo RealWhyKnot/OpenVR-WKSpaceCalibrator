@@ -324,45 +324,13 @@ void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	// which matches the old "fully zero velocity" behaviour.  We don't
 	// rewrite the JSON on load -- the next SaveProfile will emit the new
 	// schema -- so a downgrade keeps the legacy data readable too.
-	ctx.trackerSmoothness.clear();
-	if (obj["tracker_smoothness"].is<picojson::object>()) {
-		for (auto& kv : obj["tracker_smoothness"].get<picojson::object>()) {
-			if (!kv.second.is<double>()) continue;
-			int v = (int)kv.second.get<double>();
-			if (v < 0) v = 0;
-			if (v > 100) v = 100;
-			if (v > 0) ctx.trackerSmoothness[kv.first] = v;
-		}
-	} else if (obj["suppressed_serials"].is<picojson::array>()) {
-		// Legacy migration path.
-		for (auto& v : obj["suppressed_serials"].get<picojson::array>()) {
-			if (v.is<std::string>()) {
-				ctx.trackerSmoothness[v.get<std::string>()] = 100;
-			}
-		}
-	}
-	// auto_suppress_on_external_tool was removed in v2026.4.28+ (we no longer
-	// try to interop with external smoothing tools -- we just warn the user).
-	// Silently drop the legacy key on load.
-
-	// Finger smoothing (Index Knuckles). Skip-if-default: missing keys mean
-	// the user hasn't opted in, leave the in-code defaults (off, strength 50,
-	// all fingers in mask) untouched.
-	if (obj["finger_smoothing_enabled"].is<bool>()) {
-		ctx.fingerSmoothingEnabled = obj["finger_smoothing_enabled"].get<bool>();
-	}
-	if (obj["finger_smoothing_strength"].is<double>()) {
-		int s = (int)obj["finger_smoothing_strength"].get<double>();
-		if (s < 0)   s = 0;
-		if (s > 100) s = 100;
-		ctx.fingerSmoothingStrength = s;
-	}
-	if (obj["finger_smoothing_mask"].is<double>()) {
-		int m = (int)obj["finger_smoothing_mask"].get<double>();
-		if (m < 0)        m = 0;
-		if (m > 0x03FF)   m = 0x03FF;
-		ctx.fingerSmoothingMask = (uint16_t)m;
-	}
+	// tracker_smoothness, suppressed_serials (legacy), finger_smoothing_*
+	// removed from SC profiles on 2026-05-11 (Protocol v12 migration).
+	// Per-tracker prediction smoothness and finger-smoothing settings now
+	// live in %LocalAppDataLow%\OpenVR-Pair\profiles\smoothing.txt under
+	// the Smoothing overlay. We silently drop the legacy keys on load so
+	// pre-migration profiles don't error; the values themselves are
+	// migrated on first launch by hand or by reimport in the Smoothing UI.
 
 	if (obj["recalibrate_on_movement"].is<bool>()) {
 		ctx.recalibrateOnMovement = obj["recalibrate_on_movement"].get<bool>();
@@ -647,34 +615,13 @@ void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	WRITE_IF_CHANGED_BOOL  ("base_station_drift_correction", baseStationDriftCorrectionEnabled);
 	WRITE_IF_CHANGED_DOUBLE("calibration_speed",            calibrationSpeed);
 
-	// Finger smoothing keys. The strength and mask are int / uint16 so they
-	// pass through WRITE_IF_CHANGED_DOUBLE via implicit promotion -- picojson
-	// only stores doubles for numerics. Only writes when the user has actually
-	// changed something away from the in-code defaults; absent keys load as
-	// in-code defaults so old profiles remain byte-identical to today.
-	WRITE_IF_CHANGED_BOOL  ("finger_smoothing_enabled",     fingerSmoothingEnabled);
-	WRITE_IF_CHANGED_DOUBLE("finger_smoothing_strength",    fingerSmoothingStrength);
-	WRITE_IF_CHANGED_DOUBLE("finger_smoothing_mask",        fingerSmoothingMask);
+	// finger_smoothing_* and tracker_smoothness moved out of SC profiles
+	// on 2026-05-11 (Protocol v12 migration). The Smoothing overlay owns
+	// that state in its own config file now -- see OpenVR-WKSmoothing's
+	// Config.cpp.
 
 #undef WRITE_IF_CHANGED_BOOL
 #undef WRITE_IF_CHANGED_DOUBLE
-
-	// --- Per-tracker prediction smoothness (always written when populated) ----
-	// Empty map => omit the key entirely. Old "suppressed_serials" array isn't
-	// written; load path migrates v0/v1 profiles from it on first read.
-	if (!ctx.trackerSmoothness.empty()) {
-		picojson::object trackerSmoothness;
-		for (const auto& kv : ctx.trackerSmoothness) {
-			if (kv.second <= 0) continue;
-			picojson::value v;
-			double smoothness = (double)kv.second;
-			v.set<double>(smoothness);
-			trackerSmoothness[kv.first] = v;
-		}
-		if (!trackerSmoothness.empty()) {
-			profile["tracker_smoothness"].set<picojson::object>(trackerSmoothness);
-		}
-	}
 
 	if (ctx.chaperone.valid) {
 		picojson::object chaperone;

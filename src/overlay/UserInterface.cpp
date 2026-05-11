@@ -52,13 +52,12 @@ static void DrawTipPanel(ImVec2 panelSize);
 static void BuildMainWindowContents(bool runningInOverlay_);
 
 // Forward decls for the tab content called from both modes. CCal_BasicInfo /
-// CCal_DrawSettings / CCal_DrawPredictionSuppression were declared near the
-// continuous-mode tab bar; the non-continuous flow needs them in scope at
-// BuildMainWindow time too, so the decls live at file scope.
+// CCal_DrawSettings were declared near the continuous-mode tab bar; the
+// non-continuous flow needs them in scope at BuildMainWindow time too, so the
+// decls live at file scope. Prediction and finger smoothing relocated to the
+// Smoothing overlay (Protocol v12 migration, 2026-05-11).
 void CCal_BasicInfo();
 void CCal_DrawSettings();
-void CCal_DrawPredictionSuppression();
-void CCal_DrawFingerSmoothing();
 static void OneShot_DrawSettings();
 
 static bool runningInOverlay;
@@ -208,14 +207,6 @@ static void BuildMainWindowContents(bool runningInOverlay_)
 				}
 				if (ImGui::BeginTabItem("Advanced")) {
 					CCal_DrawSettings();
-					ImGui::EndTabItem();
-				}
-				if (ImGui::BeginTabItem("Prediction")) {
-					CCal_DrawPredictionSuppression();
-					ImGui::EndTabItem();
-				}
-				if (ImGui::BeginTabItem("Fingers")) {
-					CCal_DrawFingerSmoothing();
 					ImGui::EndTabItem();
 				}
 				if (ImGui::BeginTabItem("Logs")) {
@@ -612,16 +603,6 @@ void BuildContinuousCalDisplay() {
 
 		if (ImGui::BeginTabItem("Advanced")) {
 			CCal_DrawSettings();
-			ImGui::EndTabItem();
-		}
-
-		if (ImGui::BeginTabItem("Prediction")) {
-			CCal_DrawPredictionSuppression();
-			ImGui::EndTabItem();
-		}
-
-		if (ImGui::BeginTabItem("Fingers")) {
-			CCal_DrawFingerSmoothing();
 			ImGui::EndTabItem();
 		}
 
@@ -1298,181 +1279,12 @@ inline const char* GetPrettyTrackingSystemName(const std::string& value) {
 	return value.c_str();
 }
 
-void CCal_DrawPredictionSuppression() {
-	auto& ctx = CalCtx;
-
-	// === Detection status box =============================================
-	// Always-visible header so the user sees at a glance whether the program
-	// has noticed an external smoothing tool. The previous design buried this
-	// information; users couldn't tell if the program even *knew* OVR-SmoothTracking
-	// was running.
-	{
-		ImVec4 bgColor;
-		ImVec4 textColor = ImVec4(0.95f, 0.95f, 0.95f, 1.0f);
-		const char* statusText = nullptr;
-		const char* tool = ctx.externalSmoothingToolName.empty()
-			? "an external smoothing tool"
-			: ctx.externalSmoothingToolName.c_str();
-		char statusBuf[256];
-
-		if (ctx.externalSmoothingDetected) {
-			snprintf(statusBuf, sizeof statusBuf,
-				"DETECTED: %s is running.", tool);
-			statusText = statusBuf;
-			bgColor = ImVec4(0.55f, 0.40f, 0.10f, 1.0f); // amber
-		} else {
-			statusText = "No external smoothing tool detected.";
-			bgColor = ImVec4(0.20f, 0.40f, 0.25f, 1.0f); // green
-		}
-
-		const ImVec2 textSize = ImGui::CalcTextSize(statusText);
-		const ImVec2 padding(10.0f, 6.0f);
-		ImVec2 cursor = ImGui::GetCursorScreenPos();
-		ImVec2 rectMin = cursor;
-		ImVec2 rectMax(cursor.x + ImGui::GetContentRegionAvail().x,
-		               cursor.y + textSize.y + padding.y * 2.0f);
-		ImDrawList* dl = ImGui::GetWindowDrawList();
-		dl->AddRectFilled(rectMin, rectMax, ImGui::GetColorU32(bgColor), 6.0f);
-		dl->AddText(ImVec2(rectMin.x + padding.x, rectMin.y + padding.y),
-		            ImGui::GetColorU32(textColor), statusText);
-		ImGui::Dummy(ImVec2(0, textSize.y + padding.y * 2.0f));
-	}
-
-	// External-tool warning. We don't try to interop -- when an external
-	// smoothing tool is detected, our driver's velocity/acceleration scaling
-	// fights it in unpredictable ways. Tell the user clearly.
-	if (ctx.externalSmoothingDetected) {
-		ImGui::Spacing();
-		ImGui::PushStyleColor(ImGuiCol_ChildBg,  ImVec4(0.55f, 0.20f, 0.20f, 1.0f));
-		ImGui::PushStyleColor(ImGuiCol_Border,   ImVec4(0.95f, 0.45f, 0.45f, 1.0f));
-		ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
-		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 8.0f));
-		const float h = ImGui::GetFrameHeightWithSpacing() * 3.0f;
-		if (ImGui::BeginChild("##ext_warn", ImVec2(ImGui::GetContentRegionAvail().x, h),
-		                      ImGuiChildFlags_Border)) {
-			const char* tool = ctx.externalSmoothingToolName.empty()
-				? "An external smoothing tool"
-				: ctx.externalSmoothingToolName.c_str();
-			ImGui::TextColored(ImVec4(1.0f, 0.95f, 0.95f, 1.0f),
-				"%s is running.  We don't support working alongside it -- our smoothing\n"
-				"and its smoothing will fight, and the result is unpredictable.\n"
-				"Please close it and use the per-tracker smoothness sliders below instead.",
-				tool);
-		}
-		ImGui::EndChild();
-		ImGui::PopStyleVar(2);
-		ImGui::PopStyleColor(2);
-	}
-
-	ImGui::Spacing();
-	ImGui::TextWrapped(
-		"Prediction smoothness scales each tracker's reported velocity / acceleration "
-		"down toward zero. 0 leaves the pose untouched (raw motion, sharp response). 100 "
-		"fully zeros velocity, which defeats SteamVR's pose extrapolation entirely (smoothest "
-		"motion at the cost of a tiny lag). Pick a value between to trade response for jitter.\n\n"
-		"Three devices can never be smoothed: the HMD, the calibration reference tracker, "
-		"and the calibration target tracker. Suppressing them would either cause judder in "
-		"your view or corrupt the calibration math, so they're locked at 0 regardless of "
-		"what you pick here.");
-	ImGui::Spacing();
-	ImGui::Separator();
-	ImGui::TextDisabled("Per-tracker smoothness");
-	ImGui::TextWrapped(
-		"Settings stick to a tracker by serial number, so a device that disconnects and reconnects "
-		"keeps its slider value.");
-	ImGui::Spacing();
-
-	auto vrSystem = vr::VRSystem();
-	if (!vrSystem) {
-		ImGui::TextDisabled("(VR system not available)");
-		return;
-	}
-
-	// Resolve hard-block serials once. We compare by serial (stable across ID
-	// reassignment) rather than by index. The calibration profile stores the
-	// "calibrated" serials in referenceStandby.serial / targetStandby.serial;
-	// match against those so the lock holds even when a device just reconnected
-	// and its OpenVR ID is fresh.
-	const std::string refSerial = ctx.referenceStandby.serial;
-	const std::string tgtSerial = ctx.targetStandby.serial;
-
-	bool anyShown = false;
-	char buffer[vr::k_unMaxPropertyStringSize];
-	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id) {
-		auto deviceClass = vrSystem->GetTrackedDeviceClass(id);
-		if (deviceClass == vr::TrackedDeviceClass_Invalid) continue;
-
-		vr::ETrackedPropertyError err = vr::TrackedProp_Success;
-		vrSystem->GetStringTrackedDeviceProperty(id, vr::Prop_SerialNumber_String, buffer, sizeof buffer, &err);
-		if (err != vr::TrackedProp_Success || buffer[0] == 0) continue;
-		std::string serial = buffer;
-
-		vrSystem->GetStringTrackedDeviceProperty(id, vr::Prop_RenderModelName_String, buffer, sizeof buffer, &err);
-		std::string model = (err == vr::TrackedProp_Success) ? buffer : "";
-
-		vrSystem->GetStringTrackedDeviceProperty(id, vr::Prop_TrackingSystemName_String, buffer, sizeof buffer, &err);
-		std::string sys = (err == vr::TrackedProp_Success) ? GetPrettyTrackingSystemName(buffer) : "";
-
-		const bool isHmd = (deviceClass == vr::TrackedDeviceClass_HMD);
-		const bool isRef = !refSerial.empty() && refSerial == serial;
-		const bool isTgt = !tgtSerial.empty() && tgtSerial == serial;
-		const bool blocked = isHmd || isRef || isTgt;
-
-		// Read current value (0 if absent from the map).
-		int smoothness = 0;
-		auto it = ctx.trackerSmoothness.find(serial);
-		if (it != ctx.trackerSmoothness.end()) smoothness = it->second;
-		// If blocked, force-display 0 even if a stale value is stored.
-		if (blocked) smoothness = 0;
-
-		const char* roleTag = isHmd ? "HMD"
-			: isRef ? "calibration reference"
-			: isTgt ? "calibration target"
-			: nullptr;
-
-		// Label row: device info text.
-		ImGui::PushID(("trk_" + serial).c_str());
-		ImGui::Text("%s  [%s]  %s",
-			model.empty() ? "(unknown model)" : model.c_str(),
-			sys.empty() ? "?" : sys.c_str(),
-			serial.c_str());
-		if (roleTag) {
-			ImGui::SameLine();
-			ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.55f, 1.0f), "[%s, locked]", roleTag);
-		}
-
-		// Slider row.
-		ImGui::BeginDisabled(blocked);
-		if (ImGui::SliderInt("smoothness##slider", &smoothness, 0, 100, "%d%%")) {
-			if (smoothness <= 0) ctx.trackerSmoothness.erase(serial);
-			else ctx.trackerSmoothness[serial] = smoothness;
-			SaveProfile(ctx);
-		}
-		ImGui::EndDisabled();
-		if (ImGui::IsItemHovered()) {
-			if (blocked) {
-				ImGui::SetTooltip(
-					"Locked to 0 because this device is the %s.\n"
-					"Suppressing it would %s.",
-					roleTag,
-					isHmd
-						? "cause judder in your view"
-						: "corrupt the calibration math (it reads this device's velocity)");
-			} else {
-				ImGui::SetTooltip(
-					"0 = raw motion (no suppression).\n"
-					"100 = fully suppressed (matches the old binary 'freeze' behaviour).\n"
-					"Try around 50-75 for IMU-based trackers that feel jittery.");
-			}
-		}
-		ImGui::Spacing();
-		ImGui::PopID();
-		anyShown = true;
-	}
-	if (!anyShown) {
-		ImGui::TextDisabled("(No tracked devices found.)");
-	}
-}
+// CCal_DrawPredictionSuppression: relocated to the Smoothing overlay's
+// SmoothingPrediction sub-tab as part of the Protocol v12 migration on
+// 2026-05-11. Per-tracker pose-prediction smoothness is now owned by the
+// Smoothing plugin and pushed via RequestSetDevicePrediction; SC no longer
+// holds trackerSmoothness state or sends those fields inside
+// RequestSetDeviceTransform.
 
 // === Logs panel ============================================================
 // User-friendly view of the debug-log files written when "Enable debug logs"
@@ -3017,144 +2829,9 @@ void TextWithWidth(const char *label, const char *text, float width)
 	ImGui::EndChild();
 }
 
-// =============================================================================
-// Finger Smoothing tab -- Index Knuckles per-bone slerp smoothing.
-//
-// The driver hooks IVRDriverInputInternal::UpdateSkeletonComponent (a private
-// Valve interface, reachable via GetGenericInterface; layout recovered by
-// parsing the public IVRDriverInput pimpl thunks at install time -- see
-// SkeletalHookInjector.cpp). On every UpdateSkeleton call for a recognised
-// /skeleton/hand/{left,right} component, each bone is slerp'd toward the
-// incoming pose by a factor derived from the smoothness slider. Per-finger
-// disable bits let the user isolate one finger if its smoothing produces an
-// artifact without disabling the whole feature.
-//
-// Default-OFF and skip-if-default-on-save: a user who never opens this tab
-// sees byte-identical profile JSON and zero behaviour change.
-// =============================================================================
-// Non-static so Calibration.cpp's InitCalibrator() (and any future caller)
-// can push the current persisted config without going through the slider
-// handler. Forward-declared in Calibration.cpp.
-void SendFingerSmoothingConfig(CalibrationContext &ctx)
-{
-	if (!Driver.IsConnected()) return;
-	protocol::Request req(protocol::RequestSetFingerSmoothing);
-	req.setFingerSmoothing.master_enabled = ctx.fingerSmoothingEnabled;
-	int s = ctx.fingerSmoothingStrength;
-	if (s < 0) s = 0;
-	if (s > 100) s = 100;
-	req.setFingerSmoothing.smoothness = (uint8_t)s;
-	req.setFingerSmoothing.finger_mask = ctx.fingerSmoothingMask;
-	req.setFingerSmoothing._reserved = 0;
-	try {
-		Driver.SendBlocking(req);
-	} catch (const std::exception &e) {
-		std::cerr << "[FingerSmoothing] IPC send failed: " << e.what() << std::endl;
-	}
-}
-
-void CCal_DrawFingerSmoothing()
-{
-	auto &ctx = CalCtx;
-
-	ImGui::Text("Finger smoothing");
-	ImGui::TextDisabled("(Index Knuckles only -- smooths per-frame finger bone updates before VRChat sees them.)");
-	ImGui::Spacing();
-
-	bool dirty = false;
-
-	bool master = ctx.fingerSmoothingEnabled;
-	if (ImGui::Checkbox("Enable finger smoothing", &master)) {
-		ctx.fingerSmoothingEnabled = master;
-		dirty = true;
-	}
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip(
-			"Master kill switch. When off, the driver passes Knuckles bone\n"
-			"arrays through untouched -- exactly the same behaviour as a build\n"
-			"without the finger-smoothing feature compiled in.");
-	}
-
-	ImGui::Spacing();
-	ImGui::BeginDisabled(!ctx.fingerSmoothingEnabled);
-
-	int strength = ctx.fingerSmoothingStrength;
-	if (ImGui::SliderInt("Strength##fingers", &strength, 0, 100, "%d%%")) {
-		if (strength < 0) strength = 0;
-		if (strength > 100) strength = 100;
-		ctx.fingerSmoothingStrength = strength;
-		dirty = true;
-	}
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip(
-			"0   = no smoothing (each frame snaps to incoming bones).\n"
-			"50  = moderate (good starting point).\n"
-			"100 = heavy lag (slerp factor 0.05 per frame). Never fully freezes.\n"
-			"Drag the slider live and feel the change immediately in-game.");
-	}
-
-	ImGui::Spacing();
-	ImGui::Text("Per-finger toggles (uncheck to bypass that finger only)");
-	ImGui::TextDisabled("Useful for isolating a finger whose smoothing produces an artifact.");
-
-	const char *fingerLabels[5] = { "Thumb", "Index", "Middle", "Ring", "Pinky" };
-	const char *handLabels[2]   = { "Left", "Right" };
-
-	if (ImGui::BeginTable("fingers_grid", 6, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_BordersInnerV)) {
-		ImGui::TableSetupColumn("Hand");
-		for (int f = 0; f < 5; ++f) ImGui::TableSetupColumn(fingerLabels[f]);
-		ImGui::TableHeadersRow();
-
-		for (int hand = 0; hand < 2; ++hand) {
-			ImGui::TableNextRow();
-			ImGui::TableNextColumn();
-			ImGui::Text("%s", handLabels[hand]);
-			for (int finger = 0; finger < 5; ++finger) {
-				int bit = hand * 5 + finger;
-				ImGui::TableNextColumn();
-				bool enabled = ((ctx.fingerSmoothingMask >> bit) & 1) != 0;
-				ImGui::PushID(bit);
-				if (ImGui::Checkbox("##fingerbit", &enabled)) {
-					if (enabled) ctx.fingerSmoothingMask |= (uint16_t)(1u << bit);
-					else         ctx.fingerSmoothingMask &= (uint16_t)~(1u << bit);
-					dirty = true;
-				}
-				ImGui::PopID();
-			}
-		}
-		ImGui::EndTable();
-	}
-
-	ImGui::Spacing();
-	if (ImGui::Button("Enable all fingers")) {
-		if (ctx.fingerSmoothingMask != protocol::kAllFingersMask) {
-			ctx.fingerSmoothingMask = protocol::kAllFingersMask;
-			dirty = true;
-		}
-	}
-	ImGui::SameLine();
-	if (ImGui::Button("Disable all fingers")) {
-		if (ctx.fingerSmoothingMask != 0) {
-			ctx.fingerSmoothingMask = 0;
-			dirty = true;
-		}
-	}
-
-	ImGui::EndDisabled();
-
-	ImGui::Spacing();
-	ImGui::Separator();
-	if (Driver.IsConnected()) {
-		ImGui::TextColored(ImVec4(0.20f, 0.80f, 0.30f, 1.0f),
-			"Driver connected -- changes apply live as you drag the slider.");
-	} else {
-		ImGui::TextColored(ImVec4(0.85f, 0.30f, 0.25f, 1.0f),
-			"Driver not connected. Settings will save locally and apply once SteamVR is running.");
-	}
-
-	if (dirty) {
-		SaveProfile(ctx);
-		SendFingerSmoothingConfig(ctx);
-	}
-}
+// SendFingerSmoothingConfig + CCal_DrawFingerSmoothing relocated to the
+// Smoothing overlay's SmoothingFingers sub-tab on 2026-05-11 (Protocol v12
+// migration). The Smoothing plugin owns the on-disk config and the
+// RequestSetFingerSmoothing IPC send now; SC no longer carries finger state
+// in CalibrationContext.
 
