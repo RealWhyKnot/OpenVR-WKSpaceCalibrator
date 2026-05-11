@@ -237,6 +237,11 @@ struct CalibrationContext
 	// Persisted as irls_use_tukey in profile JSON.
 	bool useTukeyBiweight = false;
 
+	// When true, the translation solve falls back to the pre-revamp pairwise
+	// O(N^2) IRLS path. Provided as a safety hatch if the direct O(N)
+	// latent-offset solve regresses on a real session. Default false.
+	bool useLegacyMath = false;
+
 	// Opt-in switch for the Kalman-filter blend at publish (replaces the
 	// single-step EMA at alpha=0.3 in CalibrationCalc::ComputeIncremental
 	// with a 4-state filter on yaw + translation, with proper process and

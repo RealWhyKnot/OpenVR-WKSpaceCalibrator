@@ -16,6 +16,7 @@ set(REPLAY_SOURCES
     main.cpp
     CalibrationMetrics_stub.cpp
     ${CMAKE_SOURCE_DIR}/src/overlay/CalibrationCalc.cpp
+    ${CMAKE_SOURCE_DIR}/src/overlay/TranslationSolveDirect.cpp
 )
 
 add_executable(spacecal_replay ${REPLAY_SOURCES})

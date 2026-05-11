@@ -5,6 +5,7 @@
 #include "WatchdogDecisions.h"  // ShouldClearViaWatchdog, IsCalibrationHealthy
 #include "RobustScale.h"        // Qn, TukeyWeight, kQnConsistency, kTukeyTune (opt-in IRLS path)
 #include "BlendFilter.h"        // Kalman-filter blend (opt-in publish path)
+#include "TranslationSolveDirect.h"
 
 #include <chrono>  // steady_clock for throttled diagnostic logs in
                    // CalibrateRotation / CalibrateTranslation. The throttle
@@ -462,7 +463,7 @@ Eigen::Vector3d CalibrationCalc::CalibrateRotation(const bool ignoreOutliers) co
 	return euler;
 }
 
-Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rotation) const
+Eigen::Vector3d CalibrationCalc::CalibrateTranslationLegacyPairwise(const Eigen::Matrix3d &rotation) const
 {
 	// Each delta-pair carries an associated weight derived from the smaller of the
 	// two rotation magnitudes between samples i and j. Pairs with tiny rotation
@@ -763,6 +764,20 @@ Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rot
 	//snprintf(buf, sizeof buf, "Calibrated translation x=%.2f y=%.2f z=%.2f\n", transcm[0], transcm[1], transcm[2]);
 	//CalCtx.Log(buf);
 	return trans;
+}
+
+Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rotation) const
+{
+	if (CalCtx.useLegacyMath) {
+		return CalibrateTranslationLegacyPairwise(rotation);
+	}
+	spacecal::translation::DirectOptions opts;
+	opts.useTukeyBiweight          = useTukeyBiweight;
+	opts.useVelocityAwareWeighting = useVelocityAwareWeighting;
+	std::vector<Sample> sampleVec(m_samples.begin(), m_samples.end());
+	const auto result = spacecal::translation::SolveDirect(sampleVec, rotation, opts);
+	m_translationConditionRatio = result.conditionRatio;
+	return result.translation;
 }
 
 
