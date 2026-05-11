@@ -14,6 +14,7 @@ The most recent release is at the top.
 ### Added
 - **inputhealth:** Add SpaceCalibrator inputs diagnostics tab (d3ebcec)
 - **repo:** Own Calibration driver request module and umbrella overlay plugin (ed12403)
+- **overlay:** Wrap calibration UI in shell card and report metadata (499b9de)
 
 ### Changed
 - **deps:** Bump OpenVR-PairDriver for InputHealth safety (ee049e6)
