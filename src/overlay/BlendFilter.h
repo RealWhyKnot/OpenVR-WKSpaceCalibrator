@@ -108,8 +108,11 @@ inline void Update(State& state,
     const double Py_pred   = state.Py   + dQpos;
     const double Pz_pred   = state.Pz   + dQpos;
 
-    // Innovation: measurement minus predicted state.
-    const double yYaw = measYaw - state.yaw;
+    // Innovation: measurement minus predicted state. Wrap yaw to [-pi, pi]
+    // so a measurement near +pi and a state near -pi give a small delta,
+    // not a 2*pi jump.
+    const double yYawRaw = measYaw - state.yaw;
+    const double yYaw = std::atan2(std::sin(yYawRaw), std::cos(yYawRaw));
     const double yX   = measTx  - state.tx;
     const double yY   = measTy  - state.ty;
     const double yZ   = measTz  - state.tz;

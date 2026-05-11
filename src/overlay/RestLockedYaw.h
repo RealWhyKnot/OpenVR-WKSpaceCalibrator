@@ -50,10 +50,10 @@ enum class TrackingSystemClass {
     // queries.
 };
 
-constexpr double kRestEnterDeg    = 2.0;   // matches SlimeVR good-IMU default
-constexpr double kRestEnterSec    = 1.0;
-constexpr double kRestExitDeg     = 2.0;   // symmetric for v1
-constexpr double kRestExitSec     = 3.0;
+constexpr double kRestEnterDegPerSec = 120.0; // 2 deg/tick at 60 Hz; rate-invariant
+constexpr double kRestEnterSec       = 1.0;
+constexpr double kRestExitDegPerSec  = 120.0; // symmetric for v1
+constexpr double kRestExitSec        = 3.0;
 constexpr double kFallbackYawCap  = 0.15;  // single-cap fallback if classification fails
 
 enum class RestPhase : uint8_t {
@@ -72,11 +72,13 @@ struct RestState {
 };
 
 // Phase-machine update for one tracker. Pure function: takes the existing
-// state, the new orientation, and the timestamp; returns the updated state.
-// Caller is responsible for storing the result.
+// state, the new orientation, the timestamp, and the tick duration (dt_sec).
+// dt_sec is used to convert angular distance to deg/s so the rest threshold
+// is sample-rate independent. Caller is responsible for storing the result.
 inline RestState UpdatePhase(const RestState& prior,
                              const Eigen::Quaterniond& newRot,
-                             double now) {
+                             double now,
+                             double dt_sec) {
     RestState s = prior;
 
     if (!s.initialized) {
@@ -88,15 +90,17 @@ inline RestState UpdatePhase(const RestState& prior,
         return s;
     }
 
-    // Angular distance between the prior tick's rotation and this one. A
-    // stable tracker hovers below kRestEnterDeg; any tracker the user is
-    // moving easily exceeds it within one tick at 20 Hz.
+    // Angular velocity between the prior tick's rotation and this one.
+    // Divide by dt_sec to get deg/s so the threshold is rate-independent.
+    // Guard against near-zero dt (first tick after enable) by clamping.
     const double dotProd = std::clamp(std::abs(s.lastRot.dot(newRot)), 0.0, 1.0);
     const double angleRad = 2.0 * std::acos(dotProd);
     const double angleDeg = angleRad * (180.0 / 3.14159265358979323846);
+    const double safeDt = std::max(dt_sec, 1e-4);
+    const double angularVelDegPerSec = angleDeg / safeDt;
     s.lastRot = newRot;
 
-    if (angleDeg > kRestEnterDeg) {
+    if (angularVelDegPerSec > kRestEnterDegPerSec) {
         s.phase = RestPhase::Moving;
         s.phaseEnteredAt = now;
         s.haveLock = false;
@@ -196,14 +200,15 @@ inline double QualityWeight(double sigmaYawRad) {
 // fusion (full-SE(3) corrections from rec J) can replace this with the real
 // Markley Section III eigensolver without rewriting callers.
 inline double FuseYawContributionsRad(const std::vector<YawContribution>& xs) {
-    double weightedSum = 0.0;
+    double sumSin = 0.0, sumCos = 0.0;
     double weightTotal = 0.0;
     for (const auto& x : xs) {
-        weightedSum += x.weight * x.yawErrRad;
+        sumSin += x.weight * std::sin(x.yawErrRad);
+        sumCos += x.weight * std::cos(x.yawErrRad);
         weightTotal += x.weight;
     }
     if (weightTotal <= 0.0) return 0.0;
-    return weightedSum / weightTotal;
+    return std::atan2(sumSin, sumCos);
 }
 
 // Sentinel for "no correction this tick." Callers compare against this to

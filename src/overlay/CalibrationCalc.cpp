@@ -61,7 +61,8 @@ namespace {
 
 	double AngleFromRotationMatrix3(Eigen::Matrix3d rot)
 	{
-		return acos((rot(0, 0) + rot(1, 1) + rot(2, 2) - 1.0) / 2.0);
+		const double c = (rot(0, 0) + rot(1, 1) + rot(2, 2) - 1.0) * 0.5;
+		return std::acos(std::clamp(c, -1.0, 1.0));
 	}
 
 	vr::HmdQuaternion_t VRRotationQuat(Eigen::Vector3d eulerdeg)
@@ -257,20 +258,25 @@ std::vector<bool> CalibrationCalc::DetectOutliers() const {
 		for (size_t i = 0; i < valids.size(); i++) if (valids[i]) validCount++;
 		if (validCount == 0) break;
 
-		// The "least-squares on identity blocks" solve from the prior implementation
-		// is mathematically just the mean of the per-sample quaternion 4-vectors,
-		// then normalized. The BDCSVD round-trip cost ~hundreds of microseconds
-		// per outlier-detection run on a 200-sample buffer; the closed-form mean
-		// is O(N) and exact. (Item #1 from the math review.)
-		Eigen::Vector4d quatSum = Eigen::Vector4d::Zero();
+		// Markley eigenvector mean: accumulate the 4x4 outer-product matrix
+		// M = sum(q * q^T) for each valid quaternion (w,x,y,z), then take
+		// the eigenvector of the largest eigenvalue as the mean quaternion.
+		// Eigen sorts eigenvalues ascending, so the largest is column 3.
+		// This is numerically stable across antipodal-flip boundaries where
+		// the arithmetic mean would collapse to near-zero and normalize
+		// poorly. Convention (w,x,y,z) matches PoseAverager::Push.
+		Eigen::Matrix4d M = Eigen::Matrix4d::Zero();
 		for (size_t i = 0; i < m_samples.size(); i++) {
 			if (!valids[i]) continue;
-			quatSum += Eigen::Vector4d(
+			Eigen::Vector4d v(
 				perSampleQuat[i].w(), perSampleQuat[i].x(),
 				perSampleQuat[i].y(), perSampleQuat[i].z());
+			M += v * v.transpose();
 		}
-		Eigen::Vector4d result = quatSum / static_cast<double>(validCount);
-		Eigen::Quaterniond quatExt(result(0), result(1), result(2), result(3));
+		Eigen::SelfAdjointEigenSolver<Eigen::Matrix4d> solver;
+		solver.compute(M);
+		const Eigen::Vector4d& ev = solver.eigenvectors().col(3);
+		Eigen::Quaterniond quatExt(ev(0), ev(1), ev(2), ev(3));
 		quatExt.normalize();
 
 		// Re-mark every sample (valid set can grow as well as shrink across iterations,
@@ -409,25 +415,18 @@ Eigen::Vector3d CalibrationCalc::CalibrateRotation(const bool ignoreOutliers) co
 		CalCtx.Log(buf);
 	}
 
-	// Project SO(3) -> yaw via swing-twist quaternion decomposition.
+	// Yaw extraction by Y-axis swing-twist decomposition of the SO(3)
+	// rotation. For a unit quaternion this is algebraically identical to
+	// atan2(R(0,2) - R(2,0), R(0,0) + R(2,2)); both yield the closed-form
+	// yaw rotation closest to R under Frobenius distance. Swing-twist is
+	// kept for quaternion-convention clarity. The accuracy improvement
+	// over the pre-9f46548 code came from fitting full SO(3) with Kabsch
+	// before projecting to yaw, not from the projection formula itself.
 	//
-	// The previous Rodrigues projection
-	//     yaw = atan2(R(0,2) - R(2,0), R(0,0) + R(2,2))
-	// is the closed-form yaw ONLY when R has zero pitch/roll. For 5-10 deg
-	// of pitch or roll the recovered yaw error is ~0.3-1 deg -- small but the
-	// whole reason for this rewrite was to remove this kind of leakage from
-	// the math, and HMD calibration almost never lines up with zero pitch
-	// in practice.
-	//
-	// Swing-twist: convert R to quaternion q, then extract the twist about
-	// the Y-axis by zeroing the X and Z components and re-normalising. The
-	// remaining quaternion is a pure rotation around Y; reading its angle
-	// is exact for any SO(3) input.
-	//
-	// Sign convention preserved: with R in target -> ref direction (after
-	// the transpose above) and Eigen's right-handed Y-up convention, the
-	// twist quaternion's y component sign matches the previous Rodrigues
-	// projection's atan2 sign for the zero-pitch/roll case.
+	// Sign convention: with R in target -> ref direction (after the
+	// transpose above) and Eigen's right-handed Y-up convention, the
+	// twist quaternion's y component sign matches the Rodrigues atan2
+	// sign for the zero-pitch/roll case.
 	Eigen::Quaterniond q(R);
 	Eigen::Quaterniond twistY(q.w(), 0.0, q.y(), 0.0);
 	twistY.normalize();

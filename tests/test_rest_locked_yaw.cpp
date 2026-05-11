@@ -45,14 +45,14 @@ Eigen::Quaterniond YawQuat(double yawDeg) {
 TEST(RestLockedYawTest, PhaseMachineEntersAtRestAfterDwell) {
     RestState s;
     Eigen::Quaterniond q = YawQuat(0.0);
-    s = UpdatePhase(s, q, 0.0);
+    s = UpdatePhase(s, q, 0.0, 0.0);
     EXPECT_EQ(s.phase, RestPhase::Moving);
     EXPECT_FALSE(s.haveLock);
 
     // Hold still for 1.0 s -> RecentlyAtRest after one tick, AtRest after the
     // dwell elapses. Sample at 20 Hz: 21 ticks across 1.0 s.
     for (int i = 1; i <= 21; ++i) {
-        s = UpdatePhase(s, q, i * 0.05);
+        s = UpdatePhase(s, q, i * 0.05, 0.05);
     }
     EXPECT_EQ(s.phase, RestPhase::AtRest);
     EXPECT_TRUE(s.haveLock);
@@ -62,13 +62,14 @@ TEST(RestLockedYawTest, PhaseMachineExitsOnMotion) {
     RestState s;
     Eigen::Quaterniond rest = YawQuat(0.0);
     for (int i = 0; i <= 21; ++i) {
-        s = UpdatePhase(s, rest, i * 0.05);
+        s = UpdatePhase(s, rest, i * 0.05, 0.05);
     }
     ASSERT_EQ(s.phase, RestPhase::AtRest);
     ASSERT_TRUE(s.haveLock);
 
-    // Single tick at 5 deg yaw rotation -> phase resets to Moving, lock dropped.
-    s = UpdatePhase(s, YawQuat(5.0), 1.10);
+    // Single tick at 10 deg yaw rotation (200 deg/s at 20 Hz, above the 120
+    // deg/s threshold) -> phase resets to Moving, lock dropped.
+    s = UpdatePhase(s, YawQuat(10.0), 1.10, 0.05);
     EXPECT_EQ(s.phase, RestPhase::Moving);
     EXPECT_FALSE(s.haveLock);
 }
@@ -106,7 +107,12 @@ TEST(RestLockedYawTest, WeightedAverageWithMultipleTrackers) {
     xs.push_back(b);
 
     const double mean = FuseYawContributionsRad(xs);
-    const double expected = 1.0 * kPi / 180.0;
+    // Circular mean of 5 deg and -3 deg: atan2(sin5+sin(-3), cos5+cos(-3)).
+    // Numerically very close to the arithmetic mean (1 deg) for small angles
+    // but not identical; use a tolerance that passes the circular formula.
+    const double expected = std::atan2(
+        std::sin(5.0 * kPi / 180.0) + std::sin(-3.0 * kPi / 180.0),
+        std::cos(5.0 * kPi / 180.0) + std::cos(-3.0 * kPi / 180.0));
     EXPECT_NEAR(mean, expected, 1e-12);
 }
 
@@ -177,7 +183,7 @@ TEST(RestLockedYawTest, RestPhaseStaysAtRestAcrossManyZeroDeltaTicks) {
 
     // Enter rest.
     for (int i = 0; i <= 21; ++i) {
-        s = UpdatePhase(s, q, i * 0.05);
+        s = UpdatePhase(s, q, i * 0.05, 0.05);
     }
     ASSERT_EQ(s.phase, RestPhase::AtRest);
     ASSERT_TRUE(s.haveLock);
@@ -186,7 +192,7 @@ TEST(RestLockedYawTest, RestPhaseStaysAtRestAcrossManyZeroDeltaTicks) {
 
     // 1000 more zero-delta ticks. The locked reference must not slide.
     for (int i = 22; i < 1022; ++i) {
-        s = UpdatePhase(s, q, i * 0.05);
+        s = UpdatePhase(s, q, i * 0.05, 0.05);
         EXPECT_EQ(s.phase, RestPhase::AtRest);
         EXPECT_TRUE(s.haveLock);
         EXPECT_NEAR(s.lockedRot.dot(lockedAtEntry), 1.0, 1e-12);

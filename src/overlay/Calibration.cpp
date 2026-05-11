@@ -1905,7 +1905,7 @@ static void TickRestLockedYaw(double now) {
 		auto& rest = g_restStates[id];
 		const bool wasLocked = rest.haveLock;
 		const auto priorPhase = rest.phase;
-		rest = spacecal::rest_yaw::UpdatePhase(rest, worldRot, now);
+		rest = spacecal::rest_yaw::UpdatePhase(rest, worldRot, now, dt);
 		if (rest.phase == spacecal::rest_yaw::RestPhase::AtRest && rest.haveLock) {
 			if (!wasLocked) {
 				// Stamp the lock time on first transition into AtRest. Used
