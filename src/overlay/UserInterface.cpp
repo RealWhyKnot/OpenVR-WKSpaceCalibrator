@@ -62,6 +62,12 @@ void CCal_DrawFingerSmoothing();
 static void OneShot_DrawSettings();
 
 static bool runningInOverlay;
+static bool s_inUmbrella = false;
+
+void CCal_SetInUmbrella(bool inUmbrella)
+{
+	s_inUmbrella = inUmbrella;
+}
 
 // Update-check state. Lives for the lifetime of the process. We kick off the
 // initial check on the first BuildMainWindow tick so we don't slow startup.
@@ -551,14 +557,16 @@ static void DrawUpdateBanner() {
 }
 
 void BuildContinuousCalDisplay() {
-	ImGui::SetNextWindowPos(ImVec2(0, 0));
-	ImGui::SetNextWindowSize(ImGui::GetWindowSize());
-	ImGui::SetNextWindowBgAlpha(1);
-	if (!ImGui::Begin("Continuous Calibration", nullptr,
-		bareWindowFlags & ~ImGuiWindowFlags_NoTitleBar
-	)) {
-		ImGui::End();
-		return;
+	if (!s_inUmbrella) {
+		ImGui::SetNextWindowPos(ImVec2(0, 0));
+		ImGui::SetNextWindowSize(ImGui::GetWindowSize());
+		ImGui::SetNextWindowBgAlpha(1);
+		if (!ImGui::Begin("Continuous Calibration", nullptr,
+			bareWindowFlags & ~ImGuiWindowFlags_NoTitleBar
+		)) {
+			ImGui::End();
+			return;
+		}
 	}
 
 	ImVec2 contentRegion;
@@ -567,7 +575,7 @@ void BuildContinuousCalDisplay() {
 
 	if (!ImGui::BeginChild("CCalDisplayFrame", contentRegion, ImGuiChildFlags_None)) {
 		ImGui::EndChild();
-		ImGui::End();
+		if (!s_inUmbrella) ImGui::End();
 		return;
 	}
 
@@ -629,7 +637,7 @@ void BuildContinuousCalDisplay() {
 
 	ShowVersionLine();
 
-	ImGui::End();
+	if (!s_inUmbrella) ImGui::End();
 }
 
 static void ScaledDragFloat(const char* label, double& f, double scale, double min, double max, int flags = ImGuiSliderFlags_AlwaysClamp) {

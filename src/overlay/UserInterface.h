@@ -4,6 +4,14 @@
 
 void BuildMainWindow(bool runningInOverlay);
 void CCal_DrawTab();
+
+// Signal to SC's UI that it is being rendered inside the OpenVR-Pair umbrella
+// shell. While true, code paths that would otherwise spawn their own
+// fullscreen ImGui window (the continuous-calibration display in particular)
+// render their content inline so the umbrella's top tab bar stays visible
+// and clickable. Reset to false for the standalone SpaceCalibrator binary.
+void CCal_SetInUmbrella(bool inUmbrella);
+
 void RequestImmediateRedraw();
 void RequestExit();
 
