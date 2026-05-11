@@ -15,6 +15,7 @@ The most recent release is at the top.
 - **inputhealth:** Add SpaceCalibrator inputs diagnostics tab (d3ebcec)
 - **repo:** Own Calibration driver request module and umbrella overlay plugin (ed12403)
 - **overlay:** Wrap calibration UI in shell card and report metadata (499b9de)
+- **overlay:** Direct O(N) translation solve replaces pairwise IRLS (fe274c9)
 
 ### Changed
 - **deps:** Bump OpenVR-WKPairDriver for InputHealth safety (ee049e6)
