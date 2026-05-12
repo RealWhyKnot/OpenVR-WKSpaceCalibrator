@@ -28,6 +28,7 @@ The most recent release is at the top.
 - Rename OpenVR modules to WK variants (c22ce04)
 - **overlay:** Split UserInterface.cpp into per-section files (76c7dad)
 - **deps:** Bump driver to MotionGate Tiny=AND fix; update tests + wiki (527039a)
+- ui(advanced): split the Experimental panel into Legacy + Experimental (c280ff2)
 
 ### Fixed
 - **build:** Track BuildStamp.h with a dev fallback (aef2b28)
