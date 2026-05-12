@@ -3105,7 +3105,7 @@ void CalibrationTick(double time)
 		
 	bool lerp = false;
 	calibration.useVelocityAwareWeighting = CalCtx.useVelocityAwareWeighting && !CalCtx.useUpstreamMath;
-	calibration.useTukeyBiweight = CalCtx.useTukeyBiweight;
+	calibration.useTukeyBiweight = CalCtx.useTukeyBiweight && !CalCtx.useUpstreamMath;
 	calibration.useBlendFilter = CalCtx.useBlendFilter && !CalCtx.useUpstreamMath;
 
 	if (CalCtx.state == CalibrationState::Continuous) {

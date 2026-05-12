@@ -75,6 +75,15 @@ if(OPENVR_PAIR_BUILD_UMBRELLA)
     return()
 endif()
 
+# Standalone overlay build (build.ps1, CI, IDE configure). The umbrella branch
+# above sets SPACECAL_PAIRDRIVER_ROOT to the sibling repo or this repo's
+# lib/ submodule. The standalone branch was previously hard-coded to the
+# submodule path; default the variable here so shared-header GLOBs and
+# target_include_directories below still resolve when nothing set it.
+if(NOT DEFINED SPACECAL_PAIRDRIVER_ROOT)
+    set(SPACECAL_PAIRDRIVER_ROOT "${CMAKE_SOURCE_DIR}/lib/OpenVR-WKPairDriver")
+endif()
+
 project(SpaceCalibratorOverlay)
 message("SpaceCalibrator - Overlay")
 

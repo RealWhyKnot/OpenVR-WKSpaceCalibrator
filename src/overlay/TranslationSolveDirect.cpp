@@ -173,10 +173,14 @@ DirectResult CalibrateTranslationUpstream(
 {
     DirectResult result;
 
+    // The pairwise loop pushes two rows per (i, j) pair with j < i, so the
+    // final count is 2 * C(N, 2) = N * (N - 1). The previous N * N * 2
+    // reservation over-allocated by ~2x.
     std::vector<std::pair<Eigen::Vector3d, Eigen::Matrix3d>> deltas;
-    deltas.reserve(samples.size() * samples.size() * 2);
+    const std::size_t N = samples.size();
+    deltas.reserve(N > 1 ? N * (N - 1) : 0);
 
-    for (std::size_t i = 0; i < samples.size(); i++) {
+    for (std::size_t i = 0; i < N; i++) {
         Sample s_i = samples[i];
         s_i.target.rot = C_R * s_i.target.rot;
         s_i.target.trans = C_R * s_i.target.trans;
@@ -214,8 +218,34 @@ DirectResult CalibrateTranslationUpstream(
         }
     }
 
-    result.translation = coefficients.bdcSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(constants);
-    result.conditionRatio = 1.0; // Upstream path has no translation condition gate.
+    Eigen::BDCSVD<Eigen::MatrixXd> svd(coefficients,
+        Eigen::ComputeThinU | Eigen::ComputeThinV);
+    result.translation = svd.solve(constants);
+
+    // Emit a throttled diagnostic with the *actual* SVD ratio of the upstream
+    // pairwise system. Visible to the user via `cal_translation_cond_upstream`
+    // so the upstream-mode motion buffer's observability isn't a black box.
+    const auto& sv = svd.singularValues();
+    const double actualRatio = (sv.size() > 0 && sv(0) > 0.0)
+        ? std::sqrt(sv(sv.size() - 1) / sv(0))
+        : 0.0;
+
+    static auto s_lastUpstreamCondLog = std::chrono::steady_clock::time_point{};
+    const auto nowTp = std::chrono::steady_clock::now();
+    if (nowTp - s_lastUpstreamCondLog >= std::chrono::seconds(2)) {
+        s_lastUpstreamCondLog = nowTp;
+        char buf[224];
+        std::snprintf(buf, sizeof buf,
+            "cal_translation_cond_upstream: svd_ratio=%.6f sample_count=%zu",
+            actualRatio, N);
+        Metrics::WriteLogAnnotation(buf);
+    }
+
+    // Set the conditionRatio the dispatcher will write into
+    // m_translationConditionRatio to 1.0. The fork-added 0.05 condition gate
+    // is bypassed in upstream mode (upstream had no such gate); the actual
+    // ratio is emitted to the log above for visibility.
+    result.conditionRatio = 1.0;
     result.iterations = 1;
     return result;
 }
