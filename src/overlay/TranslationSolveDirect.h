@@ -25,4 +25,8 @@ DirectResult SolveDirect(
     const Eigen::Matrix3d& C_R,
     const DirectOptions& opts);
 
+DirectResult CalibrateTranslationUpstream(
+    const std::vector<Sample>& samples,
+    const Eigen::Matrix3d& C_R);
+
 } // namespace spacecal::translation

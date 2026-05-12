@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <utility>
 #include <vector>
 
 namespace spacecal::translation {
@@ -163,6 +164,59 @@ DirectResult SolveDirect(
         Metrics::WriteLogAnnotation(buf);
     }
 
+    return result;
+}
+
+DirectResult CalibrateTranslationUpstream(
+    const std::vector<Sample>& samples,
+    const Eigen::Matrix3d& C_R)
+{
+    DirectResult result;
+
+    std::vector<std::pair<Eigen::Vector3d, Eigen::Matrix3d>> deltas;
+    deltas.reserve(samples.size() * samples.size() * 2);
+
+    for (std::size_t i = 0; i < samples.size(); i++) {
+        Sample s_i = samples[i];
+        s_i.target.rot = C_R * s_i.target.rot;
+        s_i.target.trans = C_R * s_i.target.trans;
+
+        for (std::size_t j = 0; j < i; j++) {
+            Sample s_j = samples[j];
+            s_j.target.rot = C_R * s_j.target.rot;
+            s_j.target.trans = C_R * s_j.target.trans;
+
+            auto QAi = s_i.ref.rot.transpose();
+            auto QAj = s_j.ref.rot.transpose();
+            auto dQA = QAj - QAi;
+            auto CA = QAj * (s_j.ref.trans - s_j.target.trans) - QAi * (s_i.ref.trans - s_i.target.trans);
+            deltas.push_back(std::make_pair(CA, dQA));
+
+            auto QBi = s_i.target.rot.transpose();
+            auto QBj = s_j.target.rot.transpose();
+            auto dQB = QBj - QBi;
+            auto CB = QBj * (s_j.ref.trans - s_j.target.trans) - QBi * (s_i.ref.trans - s_i.target.trans);
+            deltas.push_back(std::make_pair(CB, dQB));
+        }
+    }
+
+    if (deltas.empty()) {
+        return result;
+    }
+
+    Eigen::VectorXd constants(deltas.size() * 3);
+    Eigen::MatrixXd coefficients(deltas.size() * 3, 3);
+
+    for (std::size_t i = 0; i < deltas.size(); i++) {
+        for (int axis = 0; axis < 3; axis++) {
+            constants(i * 3 + axis) = deltas[i].first(axis);
+            coefficients.row(i * 3 + axis) = deltas[i].second.row(axis);
+        }
+    }
+
+    result.translation = coefficients.bdcSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(constants);
+    result.conditionRatio = 1.0; // Upstream path has no translation condition gate.
+    result.iterations = 1;
     return result;
 }
 

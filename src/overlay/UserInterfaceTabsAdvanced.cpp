@@ -455,30 +455,48 @@ void CCal_DrawSettings() {
 			}
 		};
 		// ---------------------------------------------------------------
-		// Panel 1: Legacy (revert recent math changes).
+		// Panel 1: Legacy (pre-fork upstream math).
 		//
-		// Each checkbox here, when ON, returns one specific code path to
-		// the behavior from the previous fork release. The UI checkbox is
-		// the *inverse* of the underlying enable-the-new-path flag so the
-		// label matches what the user sees ("ON = legacy"). Persistence
-		// keys and log annotations keep the original semantics so existing
-		// profiles round-trip cleanly. All toggles are always interactive;
-		// each tooltip states which calibration mode that path actually
-		// runs in.
+		// One master switch for pre-fork upstream behavior. This is broader
+		// than the current-math kill switches below: it selects the bare
+		// upstream pairwise BDCSVD translation path and bypasses fork-only
+		// helpers at their call sites.
 		// ---------------------------------------------------------------
 		{
-			ImGui::BeginGroupPanel("Legacy (revert recent math changes)", panel_size);
-			ImGui::TextWrapped("Toggle these on to revert specific fork math changes. Each one returns "
-				"that code path to the behavior from the previous fork release. Useful for A/B testing "
-				"against a known-good version or as a safety hatch if a session shows tracking regressed "
-				"after a recent change. Tooltip on each toggle states which calibration mode the "
-				"underlying path actually runs in.");
+			ImGui::BeginGroupPanel("Legacy (pre-fork upstream math)", panel_size);
+			ImGui::TextWrapped("Use this only as a broad compatibility mode. When on, the translation "
+				"solve uses the pre-fork upstream bare pairwise BDCSVD path and fork-only helpers "
+				"such as latency correction, velocity-aware weighting, and rest-locked yaw are bypassed.");
+			ImGui::Spacing();
+
+			ImGui::Checkbox("Use pre-fork upstream math", &CalCtx.useUpstreamMath);
+			if (ImGui::IsItemHovered(0)) {
+				ImGui::SetTooltip("Master compatibility switch. ON selects the pre-fork upstream translation\n"
+					"solve and bypasses fork-only math helpers without changing their saved settings.\n"
+					"Turn it off to return to the current fork math stack.");
+			}
+			ImGui::EndGroupPanel();
+		}
+
+		ImGui::Spacing();
+
+		// ---------------------------------------------------------------
+		// Panel 2: Current math (disable individual features).
+		//
+		// Per-feature kill switches for the current fork math stack. The
+		// labels are feature-disable wording; the stored bool names keep
+		// existing profile semantics.
+		// ---------------------------------------------------------------
+		{
+			ImGui::BeginGroupPanel("Current math (disable individual features)", panel_size);
+			ImGui::TextWrapped("These switches disable individual pieces of the current fork math stack. "
+				"The pre-fork upstream switch above takes precedence while it is on.");
 			ImGui::Spacing();
 
 			// Legacy translation solve. The default path is the direct O(N)
 			// latent-offset solve; flipping this on reverts to the prior
 			// pairwise O(N^2) IRLS as a safety hatch.
-			ImGui::Checkbox("Legacy translation solve (pairwise)", &CalCtx.useLegacyMath);
+			ImGui::Checkbox("Disable direct translation solve (use pairwise IRLS)", &CalCtx.useLegacyMath);
 			if (ImGui::IsItemHovered(0)) {
 				ImGui::SetTooltip("Reverts the translation solve to the prior pairwise O(N^2) IRLS path.\n"
 					"The default direct O(N) latent-offset solver jointly estimates the calibration\n"
@@ -493,7 +511,7 @@ void CCal_DrawSettings() {
 			// checked = revert to time-domain CC. Always interactive; this is
 			// a persisted preference, the tooltip explains when it takes effect.
 			bool legacyTimeDomainLatency = !CalCtx.useGccPhatLatency;
-			if (ImGui::Checkbox("Legacy time-domain latency estimator", &legacyTimeDomainLatency)) {
+			if (ImGui::Checkbox("Disable GCC-PHAT latency estimator (use time-domain CC)", &legacyTimeDomainLatency)) {
 				CalCtx.useGccPhatLatency = !legacyTimeDomainLatency;
 			}
 			if (ImGui::IsItemHovered(0)) {
@@ -508,7 +526,7 @@ void CCal_DrawSettings() {
 			// Legacy uniform IRLS weighting. Inverts useVelocityAwareWeighting:
 			// checked = drop the velocity scaling of the per-pair threshold.
 			bool legacyUniformIRLS = !CalCtx.useVelocityAwareWeighting;
-			if (ImGui::Checkbox("Legacy uniform IRLS weighting", &legacyUniformIRLS)) {
+			if (ImGui::Checkbox("Disable velocity-aware IRLS weighting", &legacyUniformIRLS)) {
 				CalCtx.useVelocityAwareWeighting = !legacyUniformIRLS;
 			}
 			if (ImGui::IsItemHovered(0)) {
@@ -540,7 +558,7 @@ void CCal_DrawSettings() {
 		ImGui::Spacing();
 
 		// ---------------------------------------------------------------
-		// Panel 2: Experimental / research (opt-in).
+		// Panel 3: Experimental / research (opt-in).
 		//
 		// Fork-added code paths that have not graduated. Each has a
 		// documented risk that kept it from default-on. Off by default.
@@ -622,6 +640,7 @@ void CCal_DrawSettings() {
 			// to the loaded-profile values on first frame so we do not log a
 			// spurious flip just because the panel rendered for the first time.
 			static bool s_prevAutoDetect = CalCtx.latencyAutoDetect;
+			static bool s_prevUpstream   = CalCtx.useUpstreamMath;
 			static bool s_prevGccPhat    = CalCtx.useGccPhatLatency;
 			static bool s_prevCusum      = CalCtx.useCusumGeometryShift;
 			static bool s_prevVelAware   = CalCtx.useVelocityAwareWeighting;
@@ -632,6 +651,7 @@ void CCal_DrawSettings() {
 			static bool s_prevPredRecov  = CalCtx.predictiveRecoveryEnabled;
 			static bool s_prevChiSq      = CalCtx.reanchorChiSquareEnabled;
 			logToggleFlip("latency_auto_detect",       s_prevAutoDetect, CalCtx.latencyAutoDetect);
+			logToggleFlip("translation_use_upstream",  s_prevUpstream,   CalCtx.useUpstreamMath);
 			logToggleFlip("latency_use_gcc_phat",      s_prevGccPhat,    CalCtx.useGccPhatLatency);
 			logToggleFlip("geometry_shift_use_cusum",  s_prevCusum,      CalCtx.useCusumGeometryShift);
 			logToggleFlip("irls_velocity_aware",       s_prevVelAware,   CalCtx.useVelocityAwareWeighting);

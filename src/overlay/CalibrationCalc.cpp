@@ -768,13 +768,18 @@ Eigen::Vector3d CalibrationCalc::CalibrateTranslationLegacyPairwise(const Eigen:
 
 Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rotation) const
 {
+	std::vector<Sample> sampleVec(m_samples.begin(), m_samples.end());
+	if (CalCtx.useUpstreamMath) {
+		const auto result = spacecal::translation::CalibrateTranslationUpstream(sampleVec, rotation);
+		m_translationConditionRatio = result.conditionRatio;
+		return result.translation;
+	}
 	if (CalCtx.useLegacyMath) {
 		return CalibrateTranslationLegacyPairwise(rotation);
 	}
 	spacecal::translation::DirectOptions opts;
 	opts.useTukeyBiweight          = useTukeyBiweight;
 	opts.useVelocityAwareWeighting = useVelocityAwareWeighting;
-	std::vector<Sample> sampleVec(m_samples.begin(), m_samples.end());
 	const auto result = spacecal::translation::SolveDirect(sampleVec, rotation, opts);
 	m_translationConditionRatio = result.conditionRatio;
 	return result.translation;

@@ -128,9 +128,10 @@ static void TickCpuPressureMonitor(double computationTimeMs, double now_s) {
         char buf[256];
         snprintf(buf, sizeof buf,
             "cpu_pressure_warning_on: ema_pct=%.1f inst_pct=%.1f cores=%d"
-            " gcc_phat=%d cusum=%d velocity_aware=%d tukey=%d kalman=%d"
+            " upstream=%d gcc_phat=%d cusum=%d velocity_aware=%d tukey=%d kalman=%d"
             " auto_detect_latency=%d state=%d",
             s.emaPct, instPct, s.logicalProcessors,
+            (int)CalCtx.useUpstreamMath,
             (int)CalCtx.useGccPhatLatency, (int)CalCtx.useCusumGeometryShift,
             (int)CalCtx.useVelocityAwareWeighting, (int)CalCtx.useTukeyBiweight,
             (int)CalCtx.useBlendFilter, (int)CalCtx.latencyAutoDetect,
@@ -155,8 +156,9 @@ static void TickCpuPressureMonitor(double computationTimeMs, double now_s) {
         char buf[256];
         snprintf(buf, sizeof buf,
             "cpu_pressure_spike: computationTime_ms=%.1f ema_pct=%.1f"
-            " gcc_phat=%d cusum=%d velocity_aware=%d tukey=%d kalman=%d state=%d",
+            " upstream=%d gcc_phat=%d cusum=%d velocity_aware=%d tukey=%d kalman=%d state=%d",
             computationTimeMs, s.emaPct,
+            (int)CalCtx.useUpstreamMath,
             (int)CalCtx.useGccPhatLatency, (int)CalCtx.useCusumGeometryShift,
             (int)CalCtx.useVelocityAwareWeighting, (int)CalCtx.useTukeyBiweight,
             (int)CalCtx.useBlendFilter, (int)CalCtx.state);
@@ -786,6 +788,7 @@ void ReopenShmem()
 
 double GetActiveLatencyOffsetMs(const CalibrationContext& ctx)
 {
+	if (ctx.useUpstreamMath) return 0.0;
 	return ctx.latencyAutoDetect ? ctx.estimatedLatencyOffsetMs : ctx.targetLatencyOffsetMs;
 }
 
@@ -1843,7 +1846,7 @@ static inline Eigen::Quaterniond WorldRotationFromPose(const vr::DriverPose_t& p
 // compensate." If the live test shows the wrong sign, flip here -- the toggle
 // is OFF by default so a wrong-sign build cannot regress users.
 static void TickRestLockedYaw(double now) {
-	if (!CalCtx.restLockedYawEnabled) {
+	if (!CalCtx.restLockedYawEnabled || CalCtx.useUpstreamMath) {
 		// Toggle OFF: clear state so a future toggle-on starts fresh.
 		if (!g_restStates.empty()) g_restStates.clear();
 		g_restLockedYawLastTickTime = -1.0;
@@ -2594,9 +2597,10 @@ void CalibrationTick(double time)
 			s_loggedConfigDump = true;
 			char dumpBuf[512];
 			snprintf(dumpBuf, sizeof dumpBuf,
-				"session_config_dump: gcc_phat=%d cusum=%d velocity_aware=%d tukey=%d kalman=%d"
+				"session_config_dump: upstream=%d gcc_phat=%d cusum=%d velocity_aware=%d tukey=%d kalman=%d"
 				" auto_detect_latency=%d ignore_outliers=%d static_recal=%d"
 				" recalibrate_on_movement=%d cal_speed=%.2f jitter_threshold=%.2f",
+				(int)ctx.useUpstreamMath,
 				(int)ctx.useGccPhatLatency, (int)ctx.useCusumGeometryShift,
 				(int)ctx.useVelocityAwareWeighting, (int)ctx.useTukeyBiweight,
 				(int)ctx.useBlendFilter,
@@ -2743,7 +2747,8 @@ void CalibrationTick(double time)
 	// signals), compute a discrete cross-correlation and update the EMA estimate.
 	// The active value is then used by CollectSample on subsequent ticks when
 	// latencyAutoDetect is on.
-	if ((time - ctx.timeLastLatencyEstimate) > 1.0
+	if (!ctx.useUpstreamMath
+		&& (time - ctx.timeLastLatencyEstimate) > 1.0
 		&& ctx.refSpeedHistory.size() >= CalibrationContext::kLatencyHistoryCapacity
 		&& ctx.targetSpeedHistory.size() >= CalibrationContext::kLatencyHistoryCapacity
 		&& ctx.speedSampleTimes.size() >= CalibrationContext::kLatencyHistoryCapacity)
@@ -3099,14 +3104,14 @@ void CalibrationTick(double time)
 	QueryPerformanceCounter(&start_time);
 		
 	bool lerp = false;
+	calibration.useVelocityAwareWeighting = CalCtx.useVelocityAwareWeighting && !CalCtx.useUpstreamMath;
+	calibration.useTukeyBiweight = CalCtx.useTukeyBiweight;
+	calibration.useBlendFilter = CalCtx.useBlendFilter && !CalCtx.useUpstreamMath;
 
 	if (CalCtx.state == CalibrationState::Continuous) {
 		CalCtx.messages.clear();
 		calibration.enableStaticRecalibration = CalCtx.enableStaticRecalibration;
 		calibration.lockRelativePosition = CalCtx.lockRelativePosition;
-		calibration.useVelocityAwareWeighting = CalCtx.useVelocityAwareWeighting;
-		calibration.useTukeyBiweight = CalCtx.useTukeyBiweight;
-		calibration.useBlendFilter = CalCtx.useBlendFilter;
 		// User-toggled "Pause updates" from the continuous-cal UI: keep the
 		// already-applied driver offset live, skip any new solve cycle so the
 		// math doesn't fight the user trying to inspect the current result.

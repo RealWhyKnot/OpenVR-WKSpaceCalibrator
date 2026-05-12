@@ -244,6 +244,14 @@ struct CalibrationContext
 	// Persisted as translation_use_legacy in profile JSON.
 	bool useLegacyMath = false;
 
+	// When true, the calibration math stack reverts to the pre-fork upstream
+	// shape as closely as the current codebase allows: bare pairwise BDCSVD
+	// translation solve, no latency correction, no velocity-aware weighting,
+	// and no rest-locked yaw. This is a broader compatibility switch than
+	// useLegacyMath, which only selects the previous fork's pairwise IRLS
+	// translation solver. Default false. Persisted as translation_use_upstream.
+	bool useUpstreamMath = false;
+
 	// Opt-in switch for the Kalman-filter blend at publish (replaces the
 	// single-step EMA at alpha=0.3 in CalibrationCalc::ComputeIncremental
 	// with a 4-state filter on yaw + translation, with proper process and

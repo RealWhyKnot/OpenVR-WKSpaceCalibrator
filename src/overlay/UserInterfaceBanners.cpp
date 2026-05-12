@@ -7,6 +7,7 @@
 #include "UpdateChecker.h"
 #include "Updater.h"
 #include "BuildStamp.h"
+#include "UiHelpers.h"
 
 #include <string>
 #include <shellapi.h>
@@ -43,36 +44,23 @@ void DrawVRWaitingBanner() {
 	const bool isMismatch = vrError.find("interface version") != std::string::npos
 		|| vrError.find("VR_INTERFACE_VERSION") != std::string::npos;
 
-	// Mismatch: red-tinted banner to signal it needs action, not just waiting.
-	// Normal waiting: yellow-orange "attention needed" shade.
+	const bool hasDetails = !vrError.empty();
+
 	if (isMismatch) {
-		ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.40f, 0.10f, 0.10f, 1.0f));
-		ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.90f, 0.35f, 0.35f, 1.0f));
+		const std::string detail =
+			"Update SteamVR or reinstall this overlay to resolve. Details: " + vrError;
+		openvr_pair::overlay::ui::DrawErrorBanner(
+			"OpenVR interface version mismatch",
+			detail.c_str());
+	} else if (hasDetails) {
+		const std::string detail = "Details: " + vrError;
+		openvr_pair::overlay::ui::DrawErrorBanner(
+			"SteamVR connection failed -- calibration controls enable when tracking is live.",
+			detail.c_str());
 	} else {
-		ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.45f, 0.34f, 0.10f, 1.0f));
-		ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.95f, 0.78f, 0.30f, 1.0f));
+		openvr_pair::overlay::ui::DrawWaitingBanner(
+			"Waiting for SteamVR -- calibration controls enable when tracking is live.");
 	}
-	ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
-	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 6.0f));
-
-	const float bannerHeight = ImGui::GetFrameHeightWithSpacing() * (isMismatch ? 2.0f : 1.2f);
-	if (ImGui::BeginChild("VRWaitingBanner",
-			ImVec2(ImGui::GetContentRegionAvail().x, bannerHeight),
-			ImGuiChildFlags_Border)) {
-		if (isMismatch) {
-			ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.75f, 1.0f),
-				"OpenVR interface version mismatch -- SteamVR is too old or too new for this overlay.");
-			ImGui::TextColored(ImVec4(0.90f, 0.70f, 0.70f, 1.0f),
-				"Update SteamVR (or reinstall this overlay) to resolve. Details: %s", vrError.c_str());
-		} else {
-			ImGui::TextColored(ImVec4(1.0f, 0.95f, 0.80f, 1.0f),
-				"Waiting for SteamVR -- calibration controls enable when tracking is live.");
-		}
-	}
-	ImGui::EndChild();
-
-	ImGui::PopStyleVar(2);
-	ImGui::PopStyleColor(2);
 
 	ImGui::Spacing();
 }
