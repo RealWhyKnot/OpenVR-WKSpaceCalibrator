@@ -155,28 +155,33 @@ void CCal_DrawSettings() {
 	DrawDiagnosticsPanel(panel_size);
 
 	// === Toggles panel ====================================================
-	// Power-user checkboxes that aren't worth Basic real estate. Static
-	// recalibration removed -- it's now always-on, gated implicitly by
-	// whether Lock relative position has identified a rigid attachment, so
-	// the separate toggle was redundant.
-	ImGui::BeginGroupPanel("Toggles", panel_size);
-	if (ImGui::Checkbox("Hide tracker", &CalCtx.quashTargetInContinuous)) {
-		SaveProfile(CalCtx);
+	// Hide tracker + Ignore outliers also live in the one-shot Settings tab
+	// (UserInterface.cpp). When state == None both tabs are visible at once,
+	// so duplicating them here would render the same checkbox twice. Gate on
+	// continuous mode: in continuous, the Settings tab is hidden and Advanced
+	// is the user's only access point; in non-continuous, the Settings tab
+	// owns these.
+	const bool kInContinuous = (CalCtx.state == CalibrationState::Continuous);
+	if (kInContinuous) {
+		ImGui::BeginGroupPanel("Toggles", panel_size);
+		if (ImGui::Checkbox("Hide tracker", &CalCtx.quashTargetInContinuous)) {
+			SaveProfile(CalCtx);
+		}
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Suppress the target tracker's pose in OpenVR while continuous calibration runs.\n"
+			                  "Use when the target tracker would otherwise show up as a duplicate of the reference\n"
+			                  "(e.g. taping a Vive tracker to a Quest controller for calibration).");
+		}
+		ImGui::SameLine();
+		ImGui::Checkbox("Ignore outliers", &CalCtx.ignoreOutliers);
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Drop sample pairs whose rotation axis disagrees with the consensus before the LS solve.\n"
+			                  "Default on.  Turn off only if you suspect the outlier rejector is throwing out good samples\n"
+			                  "(e.g. genuinely jittery motion the cosine-similarity test mistakes for outliers).");
+		}
+		ImGui::EndGroupPanel();
+		ImGui::Spacing();
 	}
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip("Suppress the target tracker's pose in OpenVR while continuous calibration runs.\n"
-		                  "Use when the target tracker would otherwise show up as a duplicate of the reference\n"
-		                  "(e.g. taping a Vive tracker to a Quest controller for calibration).");
-	}
-	ImGui::SameLine();
-	ImGui::Checkbox("Ignore outliers", &CalCtx.ignoreOutliers);
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip("Drop sample pairs whose rotation axis disagrees with the consensus before the LS solve.\n"
-		                  "Default on.  Turn off only if you suspect the outlier rejector is throwing out good samples\n"
-		                  "(e.g. genuinely jittery motion the cosine-similarity test mistakes for outliers).");
-	}
-	ImGui::EndGroupPanel();
-	ImGui::Spacing();
 
 	// === ADVANCED SETTINGS ==================================================
 	// All technical knobs.  No longer behind a CollapsingHeader: the tab
@@ -196,8 +201,10 @@ void CCal_DrawSettings() {
 			);
 			ImGui::PopStyleColor();
 
-			// Calibration Speed radio
-			{
+			// Calibration Speed radio. Also rendered in the one-shot Settings
+			// tab; gate on continuous mode here to avoid the same radio appearing
+			// twice when state == None (both tabs visible at once).
+			if (kInContinuous) {
 				ImGui::BeginGroupPanel("Calibration speed", panel_size);
 
 				auto speed = CalCtx.calibrationSpeed;
@@ -410,24 +417,18 @@ void CCal_DrawSettings() {
 			ImGui::PopID();
 
 			// Auto-detect runs cross-correlation across the rolling sample
-			// buffer that only fills during continuous calibration. In one-shot
-			// mode the calibration is frozen and the estimator never runs, so
-			// grey the checkbox out to make the constraint explicit.
-			const bool kLatencyAutoDetectActive = (CalCtx.state == CalibrationState::Continuous);
-			ImGui::BeginDisabled(!kLatencyAutoDetectActive);
+			// buffer that only fills during continuous calibration; in one-shot
+			// mode the estimator never fires. This is a persisted preference,
+			// so it's always interactive -- the tooltip explains when the path
+			// actually runs.
 			ImGui::Checkbox("Auto-detect target latency", &CalCtx.latencyAutoDetect);
-			ImGui::EndDisabled();
 			if (ImGui::IsItemHovered(0)) {
-				if (kLatencyAutoDetectActive) {
-					ImGui::SetTooltip("Uses cross-correlation of tracker velocities to estimate the inter-system\n"
-						"latency once per second when both devices are moving. Overrides the manual\n"
-						"offset above when on.");
-				} else {
-					ImGui::SetTooltip("Active only during continuous calibration. The cross-correlation\n"
-						"estimator runs against the rolling sample buffer continuous mode populates;\n"
-						"in one-shot mode the calibration is frozen and the estimator never fires.\n"
-						"The manual offset slider above still applies in either mode.");
-				}
+				ImGui::SetTooltip("Uses cross-correlation of tracker velocities to estimate the inter-system\n"
+					"latency once per second when both devices are moving. Overrides the manual\n"
+					"offset above when on.\n\n"
+					"Active in: continuous calibration only. In one-shot mode the rolling sample\n"
+					"buffer that this estimator reads doesn't fill, so the value freezes; the\n"
+					"manual offset slider above still applies.");
 			}
 
 			ImGui::EndGroupPanel();
