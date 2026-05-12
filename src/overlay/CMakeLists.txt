@@ -1,18 +1,17 @@
 cmake_minimum_required (VERSION 3.15)
 
-if(OPENVR_PAIR_BUILD_UMBRELLA)
-    get_filename_component(SPACECAL_REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
-
-    set(SPACECAL_PAIRDRIVER_ROOT "${OPENVR_PAIRDRIVER_ROOT}" CACHE PATH "OpenVR-WKPairDriver checkout")
-    if(NOT SPACECAL_PAIRDRIVER_ROOT)
-        set(_sibling_pairdriver "${SPACECAL_REPO_ROOT}/../OpenVR-WKPairDriver")
-        if(EXISTS "${_sibling_pairdriver}/src/overlay/FeaturePlugin.h")
-            get_filename_component(SPACECAL_PAIRDRIVER_ROOT "${_sibling_pairdriver}" ABSOLUTE)
-        else()
-            get_filename_component(SPACECAL_PAIRDRIVER_ROOT "${SPACECAL_REPO_ROOT}/lib/OpenVR-WKPairDriver" ABSOLUTE)
-        endif()
+get_filename_component(SPACECAL_REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
+set(SPACECAL_PAIRDRIVER_ROOT "${OPENVR_PAIRDRIVER_ROOT}" CACHE PATH "OpenVR-WKPairDriver checkout")
+if(NOT SPACECAL_PAIRDRIVER_ROOT)
+    set(_sibling_pairdriver "${SPACECAL_REPO_ROOT}/../OpenVR-WKPairDriver")
+    if(EXISTS "${_sibling_pairdriver}/src/overlay/FeaturePlugin.h")
+        get_filename_component(SPACECAL_PAIRDRIVER_ROOT "${_sibling_pairdriver}" ABSOLUTE)
+    else()
+        get_filename_component(SPACECAL_PAIRDRIVER_ROOT "${SPACECAL_REPO_ROOT}/lib/OpenVR-WKPairDriver" ABSOLUTE)
     endif()
+endif()
 
+if(OPENVR_PAIR_BUILD_UMBRELLA)
     set(SPACECAL_BUILDSTAMP_HEADER "${CMAKE_CURRENT_LIST_DIR}/BuildStamp.h")
     if(NOT EXISTS "${SPACECAL_BUILDSTAMP_HEADER}")
         file(WRITE "${SPACECAL_BUILDSTAMP_HEADER}"

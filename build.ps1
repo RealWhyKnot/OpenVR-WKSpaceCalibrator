@@ -24,6 +24,32 @@ $ErrorActionPreference = "Stop"
 # resolve consistently regardless of how the script is invoked.
 Set-Location $PSScriptRoot
 
+function Clear-StaleCMakeGeneratorInstance {
+    param([Parameter(Mandatory=$true)][string]$BuildDir)
+
+    $cachePath = Join-Path $BuildDir "CMakeCache.txt"
+    if (-not (Test-Path -LiteralPath $cachePath)) { return }
+
+    $instancePath = $null
+    foreach ($line in Get-Content -LiteralPath $cachePath) {
+        if ($line -match '^CMAKE_GENERATOR_INSTANCE:[^=]*=(.*)$') {
+            $instancePath = $Matches[1]
+            break
+        }
+    }
+    if (-not $instancePath) { return }
+
+    if (-not (Test-Path -LiteralPath $instancePath)) {
+        Write-Host "CMake cached Visual Studio instance no longer exists: $instancePath" -ForegroundColor Yellow
+        Write-Host "Clearing generated CMake configure cache under $BuildDir" -ForegroundColor Yellow
+        Remove-Item -LiteralPath $cachePath -Force
+        $cmakeFiles = Join-Path $BuildDir "CMakeFiles"
+        if (Test-Path -LiteralPath $cmakeFiles) {
+            Remove-Item -LiteralPath $cmakeFiles -Recurse -Force
+        }
+    }
+}
+
 # Activate the repo's tracked git hooks (.githooks/) the first time the build runs in a clone.
 # We do this from the build script -- rather than asking users to run `git config core.hooksPath`
 # manually -- because forgetting the setup silently disables the hooks, which defeats the point of
@@ -154,6 +180,7 @@ function Invoke-NativeQuiet {
 
 if (-not $SkipConfigure) {
     Write-Host "`n--- CMake configure ---" -ForegroundColor Cyan
+    Clear-StaleCMakeGeneratorInstance -BuildDir "bin"
     # Quoting matters: PowerShell's call operator splits `-DCMAKE_POLICY_VERSION_MINIMUM=3.5`
     # on the dot in some non-interactive environments — cmake then sees `3` and `.5` as
     # separate args, and the policy override is silently dropped. Pass it as a single
