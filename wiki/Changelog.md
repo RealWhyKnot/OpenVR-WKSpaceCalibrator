@@ -41,6 +41,7 @@ The most recent release is at the top.
 - **overlay:** Correctness pass on calibration math helpers (b0aa3e5)
 - **build, ui:** Silence PowerShell 5.1 NativeCommandError noise; drop disabled gating from legacy toggles (a72ac0f)
 - **ui:** Kill duplicated toggles in non-continuous Advanced + un-grey latency auto-detect (1511f51)
+- **overlay:** Repair standalone build + honest upstream conditioning (3fc8b7a)
 
 ---
 
