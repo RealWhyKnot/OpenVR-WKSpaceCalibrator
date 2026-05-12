@@ -126,34 +126,48 @@ Set-Content -Path $BuildStampPath -Value $BuildStampContent -Encoding UTF8
 # The minhook submodule's CMakeLists declares cmake_minimum_required(2.8.12) which CMake 4.x
 # rejects outright. -DCMAKE_POLICY_VERSION_MINIMUM=3.5 lets us configure without forking the
 # submodule. Mirror this in .github/workflows/ci.yml.
-if (-not $SkipConfigure) {
-    Write-Host "`n--- CMake configure ---" -ForegroundColor Cyan
+#
+# PowerShell 5.1 wraps every stderr line from a native command as a
+# NativeCommandError ErrorRecord. Under the script-wide 'Stop' default that wrap
+# kills the script on the first CMake message() line; under 'Continue' the
+# script survives but the lines still render with the red "+ CategoryInfo
+# ... NativeCommandError" preamble that buries real diagnostics in noise.
+# Pipe through a ForEach-Object that coerces ErrorRecord -> plain string so
+# stderr lines print clean alongside stdout. $LASTEXITCODE is preserved
+# across the pipe so the exit-code check still works.
+function Invoke-NativeQuiet {
+    param([scriptblock]$Cmd)
     $PrevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-        # Quoting matters: PowerShell's call operator splits `-DCMAKE_POLICY_VERSION_MINIMUM=3.5`
-        # on the dot in some non-interactive environments — cmake then sees `3` and `.5` as
-        # separate args, and the policy override is silently dropped. Pass it as a single
-        # quoted token to keep PS from helpful tokenisation.
-        # -Wno-dev suppresses developer-mode warnings from the minhook submodule and from
-        # GoogleTest's FetchContent module — both are upstream code we don't control.
-        & cmake -G "Visual Studio 17 2022" -A x64 -B bin -S . "-DCMAKE_POLICY_VERSION_MINIMUM=3.5" -Wno-dev
-        if ($LASTEXITCODE -ne 0) { throw "cmake configure failed (exit $LASTEXITCODE)" }
+        & $Cmd 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                Write-Host $_.Exception.Message
+            } else {
+                Write-Host $_
+            }
+        }
     } finally {
         $ErrorActionPreference = $PrevEap
     }
 }
 
+if (-not $SkipConfigure) {
+    Write-Host "`n--- CMake configure ---" -ForegroundColor Cyan
+    # Quoting matters: PowerShell's call operator splits `-DCMAKE_POLICY_VERSION_MINIMUM=3.5`
+    # on the dot in some non-interactive environments — cmake then sees `3` and `.5` as
+    # separate args, and the policy override is silently dropped. Pass it as a single
+    # quoted token to keep PS from helpful tokenisation.
+    # -Wno-dev suppresses developer-mode warnings from the minhook submodule and from
+    # GoogleTest's FetchContent module — both are upstream code we don't control.
+    Invoke-NativeQuiet { cmake -G "Visual Studio 17 2022" -A x64 -B bin -S . "-DCMAKE_POLICY_VERSION_MINIMUM=3.5" -Wno-dev }
+    if ($LASTEXITCODE -ne 0) { throw "cmake configure failed (exit $LASTEXITCODE)" }
+}
+
 # --- MSBuild ---
 Write-Host "`n--- Building (Release|x64) ---" -ForegroundColor Cyan
-$PrevEap = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
-try {
-    & cmake --build bin --config Release --parallel
-    if ($LASTEXITCODE -ne 0) { throw "cmake build failed (exit $LASTEXITCODE)" }
-} finally {
-    $ErrorActionPreference = $PrevEap
-}
+Invoke-NativeQuiet { cmake --build bin --config Release --parallel }
+if ($LASTEXITCODE -ne 0) { throw "cmake build failed (exit $LASTEXITCODE)" }
 
 # --- Locate built artifacts ---
 # Driver source moved to the OpenVR-WKPairDriver submodule. Build it here so

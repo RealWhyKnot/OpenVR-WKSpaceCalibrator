@@ -453,17 +453,6 @@ void CCal_DrawSettings() {
 				prev = current;
 			}
 		};
-		// Mode-availability flags. Several toggles only affect runtime
-		// behavior in specific calibration states; greying them out in the
-		// modes where they would be silent no-ops makes the constraint
-		// visible instead of leaving the user to wonder why a flip
-		// produced no observable change. Shared by both panels below.
-		const bool continuousActive = (CalCtx.state == CalibrationState::Continuous);
-		const bool oneShotInProgress = (CalCtx.state == CalibrationState::Begin
-			|| CalCtx.state == CalibrationState::Rotation
-			|| CalCtx.state == CalibrationState::Translation);
-		const bool restLockedActive = !continuousActive && !oneShotInProgress;
-
 		// ---------------------------------------------------------------
 		// Panel 1: Legacy (revert recent math changes).
 		//
@@ -472,29 +461,17 @@ void CCal_DrawSettings() {
 		// the *inverse* of the underlying enable-the-new-path flag so the
 		// label matches what the user sees ("ON = legacy"). Persistence
 		// keys and log annotations keep the original semantics so existing
-		// profiles round-trip cleanly.
+		// profiles round-trip cleanly. All toggles are always interactive;
+		// each tooltip states which calibration mode that path actually
+		// runs in.
 		// ---------------------------------------------------------------
 		{
 			ImGui::BeginGroupPanel("Legacy (revert recent math changes)", panel_size);
 			ImGui::TextWrapped("Toggle these on to revert specific fork math changes. Each one returns "
 				"that code path to the behavior from the previous fork release. Useful for A/B testing "
 				"against a known-good version or as a safety hatch if a session shows tracking regressed "
-				"after a recent change.");
-			ImGui::Spacing();
-
-			ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-			if (continuousActive) {
-				ImGui::TextWrapped("Continuous calibration is active. Continuous-only reverts (legacy "
-					"time-domain latency) are interactive; rest-locked-yaw revert is inactive while "
-					"continuous runs.");
-			} else if (oneShotInProgress) {
-				ImGui::TextWrapped("One-shot calibration is in progress. Most reverts are inactive until "
-					"the one-shot finishes or you start continuous calibration.");
-			} else {
-				ImGui::TextWrapped("Continuous calibration is OFF. Continuous-only reverts are inactive; "
-					"rest-locked-yaw revert is interactive.");
-			}
-			ImGui::PopStyleColor();
+				"after a recent change. Tooltip on each toggle states which calibration mode the "
+				"underlying path actually runs in.");
 			ImGui::Spacing();
 
 			// Legacy translation solve. The default path is the direct O(N)
@@ -512,29 +489,19 @@ void CCal_DrawSettings() {
 			}
 
 			// Legacy time-domain latency estimator. Inverts useGccPhatLatency:
-			// checked = revert to time-domain CC.
-			const bool gccPhatActive = continuousActive && CalCtx.latencyAutoDetect;
+			// checked = revert to time-domain CC. Always interactive; this is
+			// a persisted preference, the tooltip explains when it takes effect.
 			bool legacyTimeDomainLatency = !CalCtx.useGccPhatLatency;
-			ImGui::BeginDisabled(!gccPhatActive);
 			if (ImGui::Checkbox("Legacy time-domain latency estimator", &legacyTimeDomainLatency)) {
 				CalCtx.useGccPhatLatency = !legacyTimeDomainLatency;
 			}
-			ImGui::EndDisabled();
 			if (ImGui::IsItemHovered(0)) {
-				if (gccPhatActive) {
-					ImGui::SetTooltip("Reverts the latency estimator from the default whitened-spectrum\n"
-						"cross-correlator (GCC-PHAT, Knapp-Carter 1976) to the prior time-domain CC.\n"
-						"GCC-PHAT is drop-in better across the latency-relevant range, especially when\n"
-						"the two tracking systems' velocity signals have different frequency content.\n"
-						"Flip this on if your auto-detected offset reads as jumpy.\n\n"
-						"Active in: continuous calibration with auto-detect target latency on.");
-				} else if (continuousActive) {
-					ImGui::SetTooltip("Requires Auto-detect target latency above.\n\n"
-						"Active in: continuous calibration with auto-detect target latency on.");
-				} else {
-					ImGui::SetTooltip("Active in: continuous calibration with auto-detect target latency on.\n"
-						"Currently inactive because continuous calibration is off.");
-				}
+				ImGui::SetTooltip("Reverts the latency estimator from the default whitened-spectrum\n"
+					"cross-correlator (GCC-PHAT, Knapp-Carter 1976) to the prior time-domain CC.\n"
+					"GCC-PHAT is drop-in better across the latency-relevant range, especially when\n"
+					"the two tracking systems' velocity signals have different frequency content.\n"
+					"Flip this on if your auto-detected offset reads as jumpy.\n\n"
+					"Active in: continuous calibration with auto-detect target latency on.");
 			}
 
 			// Legacy uniform IRLS weighting. Inverts useVelocityAwareWeighting:
@@ -554,27 +521,17 @@ void CCal_DrawSettings() {
 
 			// Disable rest-locked yaw drift correction. Inverts
 			// restLockedYawEnabled: checked = revert to no rest-yaw correction.
+			// Always interactive; tooltip explains when the path runs.
 			bool disableRestLockedYaw = !CalCtx.restLockedYawEnabled;
-			ImGui::BeginDisabled(!restLockedActive);
 			if (ImGui::Checkbox("Disable rest-locked yaw drift correction", &disableRestLockedYaw)) {
 				CalCtx.restLockedYawEnabled = !disableRestLockedYaw;
 			}
-			ImGui::EndDisabled();
 			if (ImGui::IsItemHovered(0)) {
-				if (restLockedActive) {
-					ImGui::SetTooltip("Disables the rest-locked yaw drift correction. When a tracker stays\n"
-						"still for 1 s, the default path locks its orientation as an absolute reference\n"
-						"and applies bounded-rate yaw nudges on subsequent at-rest ticks. Flip this on\n"
-						"to remove the correction entirely and rely on continuous-cal alone.\n\n"
-						"Active in: continuous calibration OFF (one-shot, idle, editing, standby).");
-				} else if (continuousActive) {
-					ImGui::SetTooltip("Active in: continuous calibration OFF only.\n"
-						"Continuous-cal already corrects drift in its own loop; rest-locked yaw is\n"
-						"inactive during continuous mode regardless of this revert.");
-				} else {
-					ImGui::SetTooltip("Active in: continuous calibration OFF only.\n"
-						"Currently inactive because a one-shot calibration is in progress.");
-				}
+				ImGui::SetTooltip("Disables the rest-locked yaw drift correction. When a tracker stays\n"
+					"still for 1 s, the default path locks its orientation as an absolute reference\n"
+					"and applies bounded-rate yaw nudges on subsequent at-rest ticks. Flip this on\n"
+					"to remove the correction entirely and rely on continuous-cal alone.\n\n"
+					"Active in: continuous calibration OFF (one-shot, idle, editing, standby).");
 			}
 			ImGui::EndGroupPanel();
 		}
@@ -597,24 +554,15 @@ void CCal_DrawSettings() {
 			// CUSUM geometry-shift detector (Page 1954) replaces the 5x-rolling-
 			// median rule with a cumulative-sum statistical test. Same recovery
 			// action; tunable false-alarm rate via standard ARL tables.
-			// Continuous-only: the geometry-shift watchdog runs inside the
-			// continuous-cal tick path.
-			ImGui::BeginDisabled(!continuousActive);
+			// Always interactive; tooltip explains when the path runs.
 			ImGui::Checkbox("CUSUM geometry-shift detector", &CalCtx.useCusumGeometryShift);
-			ImGui::EndDisabled();
 			if (ImGui::IsItemHovered(0)) {
-				if (continuousActive) {
-					ImGui::SetTooltip("Statistical change-point test (CUSUM, Page 1954) instead of the\n"
-						"default 5x-rolling-median rule. Same recovery action when fired (clear cal,\n"
-						"demote to standby). Documented ARL_0 ~ 10^4 ticks (~3 min at 60 Hz at noise-\n"
-						"floor convergence) means roughly one false alarm per quiet session, which is\n"
-						"why it has not graduated to default-on.\n\n"
-						"Active in: continuous calibration only.");
-				} else {
-					ImGui::SetTooltip("Active in: continuous calibration only.\n"
-						"The geometry-shift watchdog runs inside the continuous-cal tick path; in\n"
-						"one-shot mode the calibration is frozen and the watchdog never fires.");
-				}
+				ImGui::SetTooltip("Statistical change-point test (CUSUM, Page 1954) instead of the\n"
+					"default 5x-rolling-median rule. Same recovery action when fired (clear cal,\n"
+					"demote to standby). Documented ARL_0 ~ 10^4 ticks (~3 min at 60 Hz at noise-\n"
+					"floor convergence) means roughly one false alarm per quiet session, which is\n"
+					"why it has not graduated to default-on.\n\n"
+					"Active in: continuous calibration only.");
 			}
 
 			// Tukey biweight + Qn-scale alternative robust kernel. Same
@@ -630,23 +578,16 @@ void CCal_DrawSettings() {
 
 			// Kalman-filter blend at publish. Replaces the EMA in
 			// ComputeIncremental; ComputeOneshot does not use the EMA path,
-			// so this toggle is a no-op in one-shot mode.
-			ImGui::BeginDisabled(!continuousActive);
+			// so this toggle is a no-op in one-shot mode. Always interactive;
+			// tooltip explains when the path runs.
 			ImGui::Checkbox("Kalman-filter blend at publish", &CalCtx.useBlendFilter);
-			ImGui::EndDisabled();
 			if (ImGui::IsItemHovered(0)) {
-				if (continuousActive) {
-					ImGui::SetTooltip("Replaces the single-step EMA (alpha=0.3) at the publish point with a\n"
-						"4-state Kalman filter on (yaw, tx, ty, tz). Off by default: measurement noise\n"
-						"is currently fixed and has not been adapted to the new direct translation\n"
-						"solver's covariance output. Until that plumbing lands, the EMA is the safer\n"
-						"default.\n\n"
-						"Active in: continuous calibration only.");
-				} else {
-					ImGui::SetTooltip("Active in: continuous calibration only.\n"
-						"The blend filter sits in the ComputeIncremental publish path; one-shot mode\n"
-						"does not run incremental publishes, so the filter never sees a candidate.");
-				}
+				ImGui::SetTooltip("Replaces the single-step EMA (alpha=0.3) at the publish point with a\n"
+					"4-state Kalman filter on (yaw, tx, ty, tz). Off by default: measurement noise\n"
+					"is currently fixed and has not been adapted to the new direct translation\n"
+					"solver's covariance output. Until that plumbing lands, the EMA is the safer\n"
+					"default.\n\n"
+					"Active in: continuous calibration only.");
 			}
 
 			// Predictive recovery pre-correction. Buffer fills on the 30 cm
