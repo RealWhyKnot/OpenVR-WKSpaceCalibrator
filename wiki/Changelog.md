@@ -30,6 +30,8 @@ The most recent release is at the top.
 - **deps:** Bump driver to MotionGate Tiny=AND fix; update tests + wiki (527039a)
 - ui(advanced): split the Experimental panel into Legacy + Experimental (c280ff2)
 - Add upstream math mode and shared banners (7b1b14a)
+- Refresh PairDriver submodule for build cache fix (df2693f)
+- Make SpaceCalibrator build resilient to VS cache drift (fa3ac31)
 
 ### Fixed
 - **build:** Track BuildStamp.h with a dev fallback (aef2b28)
