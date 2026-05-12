@@ -32,6 +32,7 @@ The most recent release is at the top.
 - Add upstream math mode and shared banners (7b1b14a)
 - Refresh PairDriver submodule for build cache fix (df2693f)
 - Make SpaceCalibrator build resilient to VS cache drift (fa3ac31)
+- **deps:** Bump driver to protocol v14; update test pin (e02fe30)
 
 ### Fixed
 - **build:** Track BuildStamp.h with a dev fallback (aef2b28)
