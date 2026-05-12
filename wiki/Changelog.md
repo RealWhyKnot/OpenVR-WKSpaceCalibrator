@@ -37,6 +37,7 @@ The most recent release is at the top.
 - **overlay:** Surface VR + profile + chaperone failures instead of silent fall-through (ae6b6c3)
 - **overlay:** Correctness pass on calibration math helpers (b0aa3e5)
 - **build, ui:** Silence PowerShell 5.1 NativeCommandError noise; drop disabled gating from legacy toggles (a72ac0f)
+- **ui:** Kill duplicated toggles in non-continuous Advanced + un-grey latency auto-detect (1511f51)
 
 ---
 
