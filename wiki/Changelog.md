@@ -29,6 +29,7 @@ The most recent release is at the top.
 - **overlay:** Split UserInterface.cpp into per-section files (76c7dad)
 - **deps:** Bump driver to MotionGate Tiny=AND fix; update tests + wiki (527039a)
 - ui(advanced): split the Experimental panel into Legacy + Experimental (c280ff2)
+- Add upstream math mode and shared banners (7b1b14a)
 
 ### Fixed
 - **build:** Track BuildStamp.h with a dev fallback (aef2b28)
