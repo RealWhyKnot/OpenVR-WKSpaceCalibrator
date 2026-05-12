@@ -36,6 +36,7 @@ The most recent release is at the top.
 - **overlay:** Rebrand footer to OpenVR-Pair and silence top VR banner in umbrella (d486246)
 - **overlay:** Surface VR + profile + chaperone failures instead of silent fall-through (ae6b6c3)
 - **overlay:** Correctness pass on calibration math helpers (b0aa3e5)
+- **build, ui:** Silence PowerShell 5.1 NativeCommandError noise; drop disabled gating from legacy toggles (a72ac0f)
 
 ---
 
