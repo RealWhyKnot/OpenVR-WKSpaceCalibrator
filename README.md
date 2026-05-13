@@ -13,7 +13,7 @@ This module is descended from [pushrax/OpenVR-SpaceCalibrator](https://github.co
 - [ArcticFox8515/OpenVR-SpaceCalibrator](https://github.com/ArcticFox8515/OpenVR-SpaceCalibrator)
 - [hyblocker/OpenVR-SpaceCalibrator](https://github.com/hyblocker/OpenVR-SpaceCalibrator) by Hyblocker -- the fork that was directly used to seed this work
 
-The [`archive-source`](https://github.com/RealWhyKnot/WKOpenVR-SpaceCalibrator/tree/archive-source) branch on this repo preserves the original upstream `pushrax/OpenVR-SpaceCalibrator` source so the attribution chain stays intact.
+The [`archive-source`](https://github.com/RealWhyKnot/WKOpenVR-SpaceCalibrator/tree/archive-source) branch on this repo preserves the [`hyblocker/OpenVR-SpaceCalibrator`](https://github.com/hyblocker/OpenVR-SpaceCalibrator) `develop` tree as it was when this fork seeded -- which itself carries the full commit history back through ArcticFox8515, bdunderscore, and pushrax, so the attribution chain stays intact.
 
 Full credits and a side-by-side of which pieces are derived vs new in WKOpenVR live in the umbrella repo's [README](https://github.com/RealWhyKnot/WKOpenVR#upstreams-and-credits).
 
